@@ -1,689 +1,504 @@
 # 构建与部署指南
 
+本文档描述 Virtual NVMe StorPort Miniport 驱动的构建、签名和部署流程。
+
 ## 开发环境要求
 
-- Windows 10/11 (64-bit)
-- Visual Studio 2022 (带 C++ 桌面开发工作负载)
-- Windows Driver Kit (WDK) 10.0.22621 或更高版本
-- Windows SDK 10.0.22621 或更高版本
-- Spectre 缓解库 (可选但推荐)
+### 必需组件
 
-## 安装 WDK
+| 组件 | 版本 | 下载地址 |
+|------|------|----------|
+| Visual Studio 2022 | 17.0+ | https://visualstudio.microsoft.com/ |
+| Windows SDK | 10.0.22621.0+ | Visual Studio 安装器 |
+| Windows WDK | 10.0.22621.0+ | https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk |
+| Spectre 缓解库 | 匹配 WDK 版本 | Visual Studio 安装器 |
 
-### 1. 安装 Visual Studio 2022
-```
-1. 下载 Visual Studio 2022 Community/Professional/Enterprise
-2. 选择 "使用 C++ 的桌面开发" 工作负载
-3. 确保选中 "MSVC v143 - VS 2022 C++ x64/x86 Spectre 缓解库"
-```
+### Visual Studio 工作负载
 
-### 2. 安装 Windows SDK
-```
-1. 下载 Windows SDK: https://developer.microsoft.com/windows/downloads/windows-sdk/
-2. 安装时选择 "Debugging Tools for Windows"
-```
+安装 Visual Studio 时选择以下工作负载：
 
-### 3. 安装 WDK
-```
-1. 下载 WDK: https://learn.microsoft.com/windows-hardware/drivers/download-the-wdk
-2. 运行安装程序完成安装
-3. 安装完成后安装 WDK Visual Studio 扩展
-```
+- **"使用 C++ 的桌面开发"**
+  - MSVC v143 - VS 2022 C++ x64/x86 构建工具
+  - MSVC v143 - VS 2022 C++ x64/x86 Spectre 缓解库
 
-### 验证安装
+- **Windows 驱动程序开发**（安装 WDK 后自动添加）
+
+### 环境验证
+
 ```powershell
-# 检查 WDK 是否正确安装
-Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include\*\km"
+# 验证 WDK 安装
+Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots" |
+    Select-Object KitsRoot10
+
+# 验证 SDK 版本
+Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" |
+    Where-Object { $_.Name -match "^\d+\." } |
+    Sort-Object Name -Descending |
+    Select-Object -First 1
+
+# 验证驱动开发工具
+where.exe inf2cat
+where.exe signtool
 ```
 
-## 项目配置
+## 项目结构
 
-### 创建驱动项目
-1. 打开 Visual Studio 2022
-2. 新建项目 → 搜索 "KMDF" → 选择 "Kernel Mode Driver (KMDF)"
-3. 项目名称: VirtualNvme
+```
+virtual-nvme-driver/
+├── src/
+│   └── miniport/
+│       ├── vnvme.vcxproj           # 驱动项目文件
+│       ├── vnvme.vcxproj.filters
+│       ├── vnvme_main.c            # 驱动入口
+│       ├── vnvme_adapter.c         # 适配器管理
+│       ├── vnvme_lun.c             # LUN 管理
+│       ├── vnvme_scsi.c            # SCSI 命令处理
+│       ├── vnvme_backend.c         # 后端接口
+│       ├── vnvme_backend_memory.c  # 内存后端
+│       ├── vnvme_backend_file.c    # 文件后端
+│       ├── vnvme_ioctl.c           # IOCTL 处理
+│       ├── vnvme.h                 # 主头文件
+│       └── sources.props           # 源文件属性
+├── inf/
+│   └── vnvme.inf                   # INF 文件
+├── tools/
+│   └── vnvmectl/
+│       ├── vnvmectl.vcxproj        # 管理工具项目
+│       └── vnvmectl.cpp
+├── test/
+│   └── vnvme_test.vcxproj          # 测试项目
+├── vnvme.sln                       # 解决方案文件
+└── build/                          # 构建输出
+```
 
-### vcxproj 关键配置
+## 创建项目
+
+### 1. 创建解决方案
+
+```
+Visual Studio → 新建项目 → 空解决方案 → vnvme
+```
+
+### 2. 添加 Miniport 驱动项目
+
+```
+解决方案 → 添加 → 新建项目 → 
+  Empty WDM Driver 或 Kernel Mode Driver (KMDF)
+  
+注意: StorPort Miniport 使用 WDM 模型，不是 KMDF
+```
+
+### 3. 配置项目属性
+
+**常规属性：**
 ```xml
-<PropertyGroup Label="Configuration">
-  <TargetVersion>Windows10</TargetVersion>
-  <UseDebugLibraries>true</UseDebugLibraries>
-  <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-  <ConfigurationType>Driver</ConfigurationType>
-  <DriverType>KMDF</DriverType>
-  <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
-  <KMDF_VERSION_MINOR>33</KMDF_VERSION_MINOR>
+<PropertyGroup Label="Globals">
+  <ProjectGuid>{新 GUID}</ProjectGuid>
+  <TargetName>vnvme</TargetName>
+  <DriverType>WDM</DriverType>
+  <KMDF_VERSION_MAJOR></KMDF_VERSION_MAJOR>  <!-- 留空，不使用 KMDF -->
 </PropertyGroup>
+```
 
+**链接器设置：**
+```xml
 <ItemDefinitionGroup>
-  <ClCompile>
-    <PreprocessorDefinitions>_AMD64_;POOL_NX_OPTIN=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-    <WppEnabled>true</WppEnabled>
-    <WppRecorderEnabled>true</WppRecorderEnabled>
-    <WppScanConfigurationData>trace.h</WppScanConfigurationData>
-  </ClCompile>
   <Link>
-    <AdditionalDependencies>%(AdditionalDependencies);$(DDK_LIB_PATH)\wdmsec.lib</AdditionalDependencies>
+    <AdditionalDependencies>
+      storport.lib;
+      ntoskrnl.lib;
+      hal.lib;
+      wdmsec.lib;
+      %(AdditionalDependencies)
+    </AdditionalDependencies>
+    <EntryPointSymbol>DriverEntry</EntryPointSymbol>
   </Link>
 </ItemDefinitionGroup>
 ```
 
-### 编译配置
-```
-平台: x64 (必需), ARM64 (可选)
-配置: Debug / Release
-目标 OS: Windows 10 Version 2004 (Build 19041) 或更高
-驱动模型: KMDF 1.33+
+## 项目文件模板
+
+### vnvme.vcxproj
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" 
+         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{YOUR-GUID-HERE}</ProjectGuid>
+    <RootNamespace>vnvme</RootNamespace>
+    <TargetName>vnvme</TargetName>
+    <DriverType>WDM</DriverType>
+    <Configuration>Debug</Configuration>
+    <Platform>x64</Platform>
+    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <UseDebugLibraries>true</UseDebugLibraries>
+  </PropertyGroup>
+  
+  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ConfigurationType>Driver</ConfigurationType>
+    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions>
+        POOL_NX_OPTIN=1;
+        %(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>
+        $(ProjectDir);
+        $(ProjectDir)..\include;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <WarningLevel>Level4</WarningLevel>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>
+        storport.lib;
+        ntoskrnl.lib;
+        hal.lib;
+        %(AdditionalDependencies)
+      </AdditionalDependencies>
+      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+    </Link>
+  </ItemDefinitionGroup>
+  
+  <ItemGroup>
+    <ClCompile Include="vnvme_main.c" />
+    <ClCompile Include="vnvme_adapter.c" />
+    <ClCompile Include="vnvme_lun.c" />
+    <ClCompile Include="vnvme_scsi.c" />
+    <ClCompile Include="vnvme_backend.c" />
+    <ClCompile Include="vnvme_backend_memory.c" />
+    <ClCompile Include="vnvme_backend_file.c" />
+    <ClCompile Include="vnvme_ioctl.c" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <ClInclude Include="vnvme.h" />
+    <ClInclude Include="vnvme_backend.h" />
+    <ClInclude Include="vnvme_trace.h" />
+  </ItemGroup>
+  
+  <ItemGroup>
+    <Inf Include="..\inf\vnvme.inf" />
+  </ItemGroup>
+  
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  
+</Project>
 ```
 
-## 构建命令
+## 构建步骤
 
 ### 命令行构建
-```powershell
-# 进入项目目录
-cd virtual-nvme-driver
 
-# 使用 MSBuild
-msbuild VirtualNvme.sln /p:Configuration=Debug /p:Platform=x64
+```batch
+REM 打开开发者命令提示符
+"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+
+REM 进入项目目录
+cd /d Q:\src\virtual-nvme-driver
+
+REM Debug 构建
+msbuild vnvme.sln /p:Configuration=Debug /p:Platform=x64
+
+REM Release 构建
+msbuild vnvme.sln /p:Configuration=Release /p:Platform=x64
+
+REM 清理构建
+msbuild vnvme.sln /t:Clean /p:Configuration=Debug /p:Platform=x64
 ```
 
-### 输出文件
+### Visual Studio 构建
+
+1. 打开 `vnvme.sln`
+2. 选择配置 (Debug/Release) 和平台 (x64)
+3. 生成 → 生成解决方案 (Ctrl+Shift+B)
+
+### 构建输出
+
 ```
-Debug\x64\
-├── vnvme.sys        # 驱动文件
-├── vnvme.inf        # 安装信息文件
-├── vnvme.pdb        # 调试符号
-└── vnvme.cat        # 签名目录 (需要签名)
+build/
+├── x64/
+│   ├── Debug/
+│   │   ├── vnvme.sys       # 驱动文件
+│   │   ├── vnvme.pdb       # 调试符号
+│   │   └── vnvme.inf       # INF 文件副本
+│   └── Release/
+│       ├── vnvme.sys
+│       ├── vnvme.pdb
+│       └── vnvme.inf
 ```
 
 ## 驱动签名
 
-### 测试签名 (开发环境)
+### 开发阶段 - 测试签名
 
-#### 启用测试签名模式
-```powershell
-# 以管理员身份运行
+#### 1. 启用测试签名模式
+
+```batch
+REM 以管理员身份运行
 bcdedit /set testsigning on
-# 重启计算机使更改生效
-Restart-Computer
+
+REM 重启系统
+shutdown /r /t 0
 ```
 
-#### 创建测试证书
-```powershell
-# 创建自签名证书 (在 VS 开发者命令提示符中)
-makecert -r -pe -ss PrivateCertStore -n "CN=VNvme Test Certificate" vnvme_test.cer
+#### 2. 创建测试证书
 
-# 或使用 PowerShell 创建
-$cert = New-SelfSignedCertificate `
-    -Type CodeSigningCert `
-    -Subject "CN=VNvme Test Certificate" `
-    -CertStoreLocation "Cert:\CurrentUser\My" `
-    -NotAfter (Get-Date).AddYears(5)
+```batch
+REM 创建自签名证书
+makecert -r -pe -ss PrivateCertStore -n "CN=VNvme Test Cert" vnvme_test.cer
 
-# 导出证书
-Export-Certificate -Cert $cert -FilePath vnvme_test.cer
+REM 导入到受信任的根证书
+certutil -addstore Root vnvme_test.cer
+certutil -addstore TrustedPublisher vnvme_test.cer
 ```
 
-#### 签名驱动文件
-```powershell
-# 使用 SignTool 签名
-signtool sign /v /s PrivateCertStore /n "VNvme Test Certificate" /t http://timestamp.digicert.com vnvme.sys
+#### 3. 签名驱动
 
-# 或使用证书文件
-signtool sign /v /f vnvme_test.pfx /p <password> /t http://timestamp.digicert.com vnvme.sys
+```batch
+REM 创建 CAT 文件
+inf2cat /driver:build\x64\Release /os:10_x64 /verbose
+
+REM 签名 CAT 文件
+signtool sign /v /s PrivateCertStore /n "VNvme Test Cert" ^
+  /t http://timestamp.digicert.com ^
+  build\x64\Release\vnvme.cat
+
+REM 签名 SYS 文件 (可选，CAT 签名即可)
+signtool sign /v /s PrivateCertStore /n "VNvme Test Cert" ^
+  /t http://timestamp.digicert.com ^
+  build\x64\Release\vnvme.sys
 ```
 
-#### 创建 CAT 签名目录
-```powershell
-# 生成 CAT 文件
-inf2cat /driver:.\output /os:10_X64
+#### 4. 验证签名
 
-# 签名 CAT 文件
-signtool sign /v /s PrivateCertStore /n "VNvme Test Certificate" /t http://timestamp.digicert.com vnvme.cat
+```batch
+signtool verify /pa /v build\x64\Release\vnvme.sys
+signtool verify /pa /v build\x64\Release\vnvme.cat
 ```
 
-### 生产签名 (发布环境)
-
-生产驱动需要以下步骤：
+### 生产阶段 - WHQL 签名
 
 1. **获取 EV 代码签名证书**
-   - 从认证的 CA 购买 (DigiCert, Sectigo 等)
-   - 需要公司身份验证
-
 2. **注册 Windows 硬件开发人员中心**
-   - https://partner.microsoft.com/dashboard/hardware
-   - 使用 EV 证书注册
+3. **运行 HLK 测试**
+4. **提交驱动包获取 Microsoft 签名**
 
-3. **提交驱动进行签名**
-   ```
-   a. 创建提交包 (.hlkx 或 .cab)
-   b. 上传到硬件开发人员中心
-   c. 等待 Microsoft 签名
-   d. 下载签名后的驱动
-   ```
+## 部署
 
-4. **WHQL 认证 (可选但推荐)**
-   - 运行 Windows HLK 测试
-   - 提交测试结果获取认证签名
+### 手动安装
 
-## 安装驱动
+```batch
+REM 复制文件到目标目录
+copy build\x64\Release\vnvme.sys C:\Drivers\vnvme\
+copy build\x64\Release\vnvme.cat C:\Drivers\vnvme\
+copy inf\vnvme.inf C:\Drivers\vnvme\
 
-### 使用设备管理器
-1. 打开设备管理器
-2. 操作 → 添加过时硬件
-3. 从磁盘安装
-4. 选择 vnvme.inf
+REM 使用 devcon 安装
+devcon install C:\Drivers\vnvme\vnvme.inf Root\VNvme
+```
 
-### 使用命令行
-```powershell
-# 安装驱动
+### 使用 pnputil
+
+```batch
+REM 添加驱动到 DriverStore
 pnputil /add-driver vnvme.inf /install
 
-# 查看状态
-sc query vnvme
+REM 列出已安装的驱动
+pnputil /enum-drivers | findstr vnvme
 
-# 卸载驱动
-pnputil /delete-driver vnvme.inf /uninstall
+REM 删除驱动
+pnputil /delete-driver oem123.inf /uninstall /force
 ```
 
-## 调试配置
-
-### 启用内核调试
-
-#### 网络调试 (推荐)
-```powershell
-# 启用调试
-bcdedit /debug on
-
-# 配置网络调试 (自动生成密钥)
-bcdedit /dbgsettings net hostip:192.168.1.100 port:50000
-
-# 查看生成的密钥
-bcdedit /dbgsettings
-# 输出示例:
-# key                     1.2.3.4.5.6.7.8.9.10.11.12.13.14.15.16
-
-# 重启生效
-Restart-Computer
-```
-
-#### 串口调试 (虚拟机)
-```powershell
-bcdedit /debug on
-bcdedit /dbgsettings serial debugport:1 baudrate:115200
-```
-
-#### 本地调试 (有限功能)
-```powershell
-bcdedit /debug on
-bcdedit /dbgsettings local
-```
-
-### WinDbg 连接
-
-#### 网络调试连接
-```
-1. 启动 WinDbg (管理员)
-2. File → Attach to kernel (Ctrl+K)
-3. 选择 "Net" 标签
-4. Port: 50000
-5. Key: <上一步生成的密钥>
-6. 点击 OK
-```
-
-#### 常用调试命令
-```windbg
-# 加载符号
-.sympath+ srv*c:\symbols*https://msdl.microsoft.com/download/symbols
-.reload
-
-# 驱动相关
-!drvobj vnvme 2              # 查看驱动对象详情
-!devobj <device_address>     # 查看设备对象
-!devstack <device_address>   # 查看设备栈
-!devnode 0 1                 # 显示所有设备节点
-
-# 崩溃分析
-!analyze -v                  # 详细分析蓝屏
-.bugcheck                    # 显示 bugcheck 代码
-
-# 内存和对象
-!pool <address>              # 检查池内存
-!object <address>            # 查看对象
-dt vnvme!VNVME_CONTROLLER_CONTEXT  # 显示结构体
-
-# 断点
-bp vnvme!DriverEntry         # 设置断点
-bl                           # 列出断点
-bc *                         # 清除所有断点
-
-# 跟踪
-!wdfkd.wdfdriverinfo vnvme   # WDF 驱动信息
-!wdfkd.wdfdevice <handle>    # WDF 设备信息
-!wdfkd.wdfqueue <handle>     # WDF 队列信息
-```
-
-### 日志和跟踪
-
-#### 启用 WPP 跟踪
-```powershell
-# 启动跟踪会话
-logman create trace vnvme_trace -p {GUID} -o vnvme.etl
-
-# 开始跟踪
-logman start vnvme_trace
-
-# 停止跟踪
-logman stop vnvme_trace
-
-# 解析跟踪文件
-tracefmt vnvme.etl -p . -o vnvme.txt
-```
-
-#### DbgPrint 输出查看
-```powershell
-# 使用 DebugView (Sysinternals)
-# 1. 以管理员运行 DebugView
-# 2. Capture → Capture Kernel (Ctrl+K)
-# 3. 启用 "Enable Verbose Kernel Output"
-```
-
-## 注册表配置
-
-```
-HKLM\SYSTEM\CurrentControlSet\Services\vnvme\Parameters
-
-BackendType     REG_DWORD   0=Memory, 1=File
-BackendPath     REG_SZ      文件后端路径
-DiskSizeMB      REG_DWORD   虚拟磁盘大小(MB)
-BlockSize       REG_DWORD   块大小(512/4096)
-```
-
-## 静态代码分析
-
-### PREfast (代码分析)
-
-PREfast 是 WDK 内置的静态代码分析工具，可检测驱动中的常见错误。
-
-#### 启用 PREfast
-
-**方法 1: Visual Studio 项目属性**
-```
-项目属性 → Code Analysis → General
-→ Enable Code Analysis: Yes
-→ Run Code Analysis on Build: Yes
-```
-
-**方法 2: MSBuild 命令行**
-```powershell
-msbuild VirtualNvme.sln /p:Configuration=Debug /p:Platform=x64 /p:EnablePREfast=true
-```
-
-**方法 3: 项目文件配置**
-```xml
-<PropertyGroup>
-  <EnablePREfast>true</EnablePREfast>
-  <PREfastLog>prefast.xml</PREfastLog>
-  <PREfastAdditionalOptions>/analyze:plugin EspXEngine.dll</PREfastAdditionalOptions>
-</PropertyGroup>
-```
-
-#### 常见 PREfast 警告
-
-| 代码 | 说明 | 修复建议 |
-|------|------|----------|
-| C6001 | 使用未初始化的内存 | 初始化变量 |
-| C6011 | 取消引用 NULL 指针 | 添加 NULL 检查 |
-| C6014 | 内存泄漏 | 确保释放分配的内存 |
-| C6031 | 忽略返回值 | 检查函数返回值 |
-| C6054 | 字符串可能未终止 | 确保 null 终止 |
-| C6200 | 缓冲区溢出 (非栈) | 检查缓冲区边界 |
-| C6201 | 栈缓冲区溢出 | 检查数组索引 |
-| C6385 | 读取无效数据 | 检查读取范围 |
-| C6386 | 写入缓冲区溢出 | 检查写入范围 |
-| C28615 | 调用 MustCheck 函数 | 检查返回状态 |
-| C28719 | 禁止的 API (POOL_TYPE) | 使用 NonPagedPoolNx |
-
-#### SAL 注释
-
-使用 SAL (Source-code Annotation Language) 提高分析精度：
-
-```c
-// 参数注释
-NTSTATUS ProcessCommand(
-    _In_        PDEVICE_CONTEXT     DeviceContext,
-    _In_        ULONG               CommandId,
-    _Inout_     PVOID               Buffer,
-    _In_        SIZE_T              BufferSize,
-    _Out_       PSIZE_T             BytesReturned
-);
-
-// 返回值注释
-_Must_inspect_result_
-_IRQL_requires_max_(DISPATCH_LEVEL)
-NTSTATUS AllocateResource(
-    _Outptr_result_nullonfailure_ PVOID* Resource
-);
-
-// 锁注释
-_Acquires_lock_(Lock)
-VOID AcquireLock(_Inout_ PKSPIN_LOCK Lock);
-
-_Releases_lock_(Lock)
-VOID ReleaseLock(_Inout_ PKSPIN_LOCK Lock);
-```
-
-### SDV (Static Driver Verifier)
-
-SDV 执行更深入的规则验证，检测驱动是否正确遵循 Windows 驱动规则。
-
-#### 运行 SDV
+### 安装脚本
 
 ```powershell
-# 在驱动项目目录中
-cd src\driver
-
-# 清理之前的运行
-msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/clean"
-
-# 运行 SDV
-msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/check:*"
-
-# 查看结果
-msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/view"
-```
-
-#### 重要 SDV 规则
-
-| 规则 | 说明 |
-|------|------|
-| IrqlKeDispatchLte | KeXxx 函数的 IRQL 要求 |
-| IrqlZwPassive | Zw 函数必须在 PASSIVE_LEVEL |
-| SpinLock | 自旋锁正确获取/释放 |
-| RequestCompleted | 请求必须被完成 |
-| DoubleCompletion | 不能双重完成请求 |
-| DeferredRequestCompleted | 延迟请求必须完成 |
-| MarkCancOnCancReqLocal | 取消处理正确性 |
-| PnpSurpriseRemove | 意外移除处理 |
-
-## CI/CD 集成
-
-### GitHub Actions 配置
-
-创建 `.github/workflows/build.yml`:
-
-```yaml
-name: Build Driver
-
-on:
-  push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-
-jobs:
-  build:
-    runs-on: windows-latest
-    
-    strategy:
-      matrix:
-        configuration: [Debug, Release]
-        platform: [x64, ARM64]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1.3
-    
-    - name: Install WDK
-      run: |
-        # 下载并安装 WDK
-        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2196230" -OutFile "wdksetup.exe"
-        Start-Process -FilePath "wdksetup.exe" -ArgumentList "/quiet", "/norestart" -Wait
-    
-    - name: Build
-      run: |
-        msbuild VirtualNvme.sln `
-          /p:Configuration=${{ matrix.configuration }} `
-          /p:Platform=${{ matrix.platform }} `
-          /p:EnablePREfast=true
-    
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: driver-${{ matrix.configuration }}-${{ matrix.platform }}
-        path: |
-          ${{ matrix.configuration }}/${{ matrix.platform }}/*.sys
-          ${{ matrix.configuration }}/${{ matrix.platform }}/*.inf
-          ${{ matrix.configuration }}/${{ matrix.platform }}/*.pdb
-
-  test:
-    needs: build
-    runs-on: windows-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download Artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: driver-Debug-x64
-        path: driver
-    
-    - name: Run Static Analysis
-      run: |
-        # 运行额外的静态分析检查
-        # ...
-    
-    - name: Package
-      run: |
-        # 创建发布包
-        Compress-Archive -Path driver\* -DestinationPath vnvme-driver.zip
-```
-
-### Azure DevOps Pipeline
-
-创建 `azure-pipelines.yml`:
-
-```yaml
-trigger:
-  branches:
-    include:
-      - main
-      - develop
-
-pool:
-  vmImage: 'windows-latest'
-
-variables:
-  solution: 'VirtualNvme.sln'
-  buildConfiguration: 'Release'
-
-stages:
-- stage: Build
-  jobs:
-  - job: BuildDriver
-    strategy:
-      matrix:
-        x64:
-          buildPlatform: 'x64'
-        ARM64:
-          buildPlatform: 'ARM64'
-    
-    steps:
-    - task: PowerShell@2
-      displayName: 'Install WDK'
-      inputs:
-        targetType: 'inline'
-        script: |
-          # WDK 安装脚本
-          choco install windows-driver-kit -y
-    
-    - task: VSBuild@1
-      displayName: 'Build Driver'
-      inputs:
-        solution: '$(solution)'
-        platform: '$(buildPlatform)'
-        configuration: '$(buildConfiguration)'
-        msbuildArgs: '/p:EnablePREfast=true'
-    
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publish Artifacts'
-      inputs:
-        PathtoPublish: '$(buildConfiguration)\$(buildPlatform)'
-        ArtifactName: 'driver-$(buildPlatform)'
-
-- stage: Test
-  dependsOn: Build
-  jobs:
-  - job: RunTests
-    steps:
-    - task: DownloadBuildArtifacts@1
-      inputs:
-        buildType: 'current'
-        downloadType: 'single'
-        artifactName: 'driver-x64'
-        downloadPath: '$(System.ArtifactsDirectory)'
-    
-    - task: PowerShell@2
-      displayName: 'Verify INF'
-      inputs:
-        targetType: 'inline'
-        script: |
-          & "C:\Program Files (x86)\Windows Kits\10\Tools\x64\infverif.exe" `
-            /v /w $(System.ArtifactsDirectory)\driver-x64\vnvme.inf
-```
-
-### 本地构建脚本
-
-创建 `build.ps1`:
-
-```powershell
-#Requires -RunAsAdministrator
+# install.ps1
 param(
-    [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
-    
-    [ValidateSet("x64", "ARM64")]
-    [string]$Platform = "x64",
-    
-    [switch]$Clean,
-    [switch]$EnablePREfast,
-    [switch]$RunSDV,
-    [switch]$Sign,
-    [switch]$Package
+    [string]$DriverPath = ".\build\x64\Release"
 )
 
 $ErrorActionPreference = "Stop"
-$SolutionPath = Join-Path $PSScriptRoot "VirtualNvme.sln"
-$OutputPath = Join-Path $PSScriptRoot "$Configuration\$Platform"
 
-Write-Host "=== Virtual NVMe Driver Build ===" -ForegroundColor Cyan
-Write-Host "Configuration: $Configuration"
-Write-Host "Platform: $Platform"
-Write-Host "Output: $OutputPath"
-Write-Host ""
-
-# 查找 MSBuild
-$MSBuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-    -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | 
-    Select-Object -First 1
-
-if (-not $MSBuild) {
-    throw "MSBuild not found"
+# 检查管理员权限
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    throw "请以管理员身份运行此脚本"
 }
 
-# 清理
-if ($Clean) {
-    Write-Host "Cleaning..." -ForegroundColor Yellow
-    & $MSBuild $SolutionPath /t:Clean /p:Configuration=$Configuration /p:Platform=$Platform
-    Remove-Item -Path $OutputPath -Recurse -Force -ErrorAction SilentlyContinue
+# 安装驱动
+Write-Host "正在安装 Virtual NVMe 驱动..."
+
+$infPath = Join-Path $DriverPath "vnvme.inf"
+
+# 使用 pnputil 添加驱动
+$result = pnputil /add-driver $infPath /install 2>&1
+Write-Host $result
+
+# 创建设备实例
+Write-Host "正在创建设备实例..."
+$devconPath = "$env:WDKContentRoot\Tools\x64\devcon.exe"
+
+if (Test-Path $devconPath) {
+    & $devconPath install $infPath "Root\VNvme"
+} else {
+    Write-Warning "未找到 devcon.exe，请手动创建设备实例"
+    Write-Host "设备 ID: Root\VNvme"
 }
 
-# 构建参数
-$BuildArgs = @(
-    $SolutionPath,
-    "/p:Configuration=$Configuration",
-    "/p:Platform=$Platform",
-    "/m"  # 并行构建
-)
-
-if ($EnablePREfast) {
-    $BuildArgs += "/p:EnablePREfast=true"
-    Write-Host "PREfast enabled" -ForegroundColor Yellow
-}
-
-# 构建
-Write-Host "Building..." -ForegroundColor Yellow
-& $MSBuild @BuildArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "Build failed"
-}
-
-# SDV 分析
-if ($RunSDV) {
-    Write-Host "Running Static Driver Verifier..." -ForegroundColor Yellow
-    Push-Location (Join-Path $PSScriptRoot "src\driver")
-    try {
-        & $MSBuild /t:sdv /p:Configuration=$Configuration /p:Platform=$Platform /p:Inputs="/check:*"
-    }
-    finally {
-        Pop-Location
-    }
-}
-
-# 签名
-if ($Sign) {
-    Write-Host "Signing driver..." -ForegroundColor Yellow
-    $SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
-    
-    & $SignTool sign /v /s PrivateCertStore /n "VNvme Test Certificate" `
-        /t http://timestamp.digicert.com "$OutputPath\vnvme.sys"
-    
-    # 创建 CAT 文件
-    & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\inf2cat.exe" `
-        /driver:$OutputPath /os:10_$Platform
-    
-    & $SignTool sign /v /s PrivateCertStore /n "VNvme Test Certificate" `
-        /t http://timestamp.digicert.com "$OutputPath\vnvme.cat"
-}
-
-# 打包
-if ($Package) {
-    Write-Host "Creating package..." -ForegroundColor Yellow
-    $PackagePath = Join-Path $PSScriptRoot "vnvme-$Configuration-$Platform.zip"
-    
-    $FilesToPackage = @(
-        "$OutputPath\vnvme.sys",
-        "$OutputPath\vnvme.pdb",
-        "$OutputPath\vnvme.inf"
-    )
-    
-    if (Test-Path "$OutputPath\vnvme.cat") {
-        $FilesToPackage += "$OutputPath\vnvme.cat"
-    }
-    
-    Compress-Archive -Path $FilesToPackage -DestinationPath $PackagePath -Force
-    Write-Host "Package created: $PackagePath" -ForegroundColor Green
-}
-
-Write-Host ""
-Write-Host "=== Build Complete ===" -ForegroundColor Green
-Write-Host "Output: $OutputPath"
-Get-ChildItem $OutputPath -Filter "*.sys" | ForEach-Object {
-    Write-Host "  $($_.Name) - $([math]::Round($_.Length / 1KB, 2)) KB"
-}
+Write-Host "安装完成！"
 ```
 
-使用示例:
+## 调试
+
+### 设置内核调试
+
+#### 目标机配置
+
+```batch
+REM 启用调试
+bcdedit /debug on
+bcdedit /dbgsettings net hostip:192.168.1.100 port:50000
+
+REM 获取密钥
+bcdedit /dbgsettings
+```
+
+#### 主机配置
+
+1. 打开 WinDbg Preview
+2. File → Attach to kernel
+3. 输入目标机 IP 和端口
+4. 输入密钥
+
+### 加载符号
+
+```windbg
+.symfix
+.sympath+ C:\Symbols;srv*C:\LocalSymbols*https://msdl.microsoft.com/download/symbols
+
+.reload /f vnvme.sys
+```
+
+### 常用调试命令
+
+```windbg
+# 查看驱动信息
+lm m vnvme
+
+# 设置断点
+bu vnvme!DriverEntry
+bu vnvme!VNvmeHwStartIo
+
+# 查看 StorPort 适配器
+!storport.adapters
+
+# 查看 LUN 信息
+!storport.lun <adapter_address> <path> <target> <lun>
+
+# 查看 SRB
+dt storport!_SCSI_REQUEST_BLOCK <address>
+```
+
+### WPP 跟踪
+
+```batch
+REM 启动跟踪
+tracelog -start vnvme_trace -guid vnvme.guid -f vnvme.etl -flags 0xFF
+
+REM 运行测试...
+
+REM 停止跟踪
+tracelog -stop vnvme_trace
+
+REM 格式化输出
+tracefmt vnvme.etl -o vnvme.txt -p . -nosummary
+```
+
+## 测试
+
+### 功能测试
+
 ```powershell
-# 基本构建
-.\build.ps1
+# 创建虚拟磁盘
+vnvmectl.exe create -size 1GB -backend memory
 
-# 发布构建 (带签名和打包)
-.\build.ps1 -Configuration Release -EnablePREfast -Sign -Package
+# 格式化
+Get-Disk | Where-Object PartitionStyle -eq 'RAW' |
+    Initialize-Disk -PartitionStyle GPT -PassThru |
+    New-Partition -AssignDriveLetter -UseMaximumSize |
+    Format-Volume -FileSystem NTFS -Confirm:$false
 
-# 完整分析
-.\build.ps1 -Configuration Release -EnablePREfast -RunSDV
+# 写入测试文件
+$testFile = "V:\test.bin"
+[byte[]]$data = 1..1024 | ForEach-Object { Get-Random -Maximum 256 }
+[IO.File]::WriteAllBytes($testFile, $data)
+
+# 验证读取
+$readData = [IO.File]::ReadAllBytes($testFile)
+Compare-Object $data $readData
 ```
+
+### 性能测试
+
+```batch
+REM 使用 diskspd
+diskspd -b4K -d60 -r -w30 -t4 -o32 -Sh V:\testfile.dat
+```
+
+### HLK 测试
+
+1. 安装 Windows HLK
+2. 创建测试项目
+3. 添加目标机器
+4. 选择测试: "Storage - Storage Controller Testing"
+5. 运行测试并收集结果
+
+## 常见问题
+
+### 编译错误
+
+**问题**: `error LNK2019: unresolved external symbol StorPortInitialize`
+
+**解决**: 确保链接器设置中包含 `storport.lib`
+
+---
+
+**问题**: `warning C4996: 'ExAllocatePoolWithTag' deprecated`
+
+**解决**: 使用 `ExAllocatePool2` 替代，或定义 `POOL_NX_OPTIN=1`
+
+---
+
+### 运行时错误
+
+**问题**: 驱动加载失败，错误码 577
+
+**解决**: 启用测试签名模式并签名驱动
+
+---
+
+**问题**: 设备管理器显示黄色感叹号
+
+**解决**: 
+1. 检查 Event Log 中的 StorPort 事件
+2. 使用调试器附加检查 `DriverEntry` 返回值
+3. 验证 INF 文件设备 ID 匹配

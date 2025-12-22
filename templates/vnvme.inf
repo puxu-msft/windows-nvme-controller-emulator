@@ -1,0 +1,79 @@
+;
+; vnvme.inf - Virtual NVMe Controller Driver
+;
+; Copyright (c) 2025 Virtual NVMe Project
+;
+; 此 INF 文件用于安装 vnvme.sys 总线驱动到 ROOT\VNVME 设备
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = vnvme.cat
+DriverVer   = 12/23/2025,1.0.0.0
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir       = 13
+vnvme_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+vnvme.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll = 1
+
+;*****************************************
+; vnvme 设备安装节
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
+
+[Standard.NT$ARCH$.10.0...19041]
+%vnvme.DeviceDesc% = vnvme_Device, ROOT\VNVME
+
+[vnvme_Device.NT]
+CopyFiles = Drivers_Dir
+
+[Drivers_Dir]
+vnvme.sys
+
+;-------------- Service 安装
+[vnvme_Device.NT.Services]
+AddService = vnvme,%SPSVCINST_ASSOCSERVICE%, vnvme_Service_Inst
+
+[vnvme_Service_Inst]
+DisplayName    = %vnvme.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\vnvme.sys
+
+;-------------- WDF 共同安装程序
+[vnvme_Device.NT.CoInstallers]
+AddReg    = vnvme_Device_CoInstaller_AddReg
+CopyFiles = vnvme_Device_CoInstaller_CopyFiles
+
+[vnvme_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[vnvme_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[vnvme_Device.NT.Wdf]
+KmdfService = vnvme, vnvme_wdfsect
+
+[vnvme_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+;-------------- 字符串
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "Virtual NVMe Project"
+DiskName               = "Virtual NVMe Installation Disk"
+vnvme.DeviceDesc       = "Virtual NVMe Bus Controller"
+vnvme.SVCDESC          = "Virtual NVMe Driver"

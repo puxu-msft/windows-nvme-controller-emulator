@@ -257,141 +257,27 @@ EndGlobal
 - Driver Package: 启用
 - 签名: 测试签名或正式签名
 
-### INF 文件模板
+### INF 文件
 
-> **注意**: v2 架构使用单一 `vnvme.sys` 驱动，以下是完整的 INF 模板。
+> **详细说明**: 请参阅 [INF 文件指南](inf-guide.md)，包含完整的 INF 详解、安装脚本、签名流程和故障排查。
 
-**vnvme.inf** (主驱动 - 虚拟总线 + NVMe 控制器):
+v2 架构需要两个 INF 文件，模板位于 `templates/` 目录：
 
-```ini
-;
-; vnvme.inf - Virtual NVMe Controller Driver
-;
-; Copyright (c) 2025 Virtual NVMe Project
-;
+| 文件 | 用途 | 说明 |
+|------|------|------|
+| [vnvme.inf](../templates/vnvme.inf) | 主驱动 | 安装到 `ROOT\VNVME`，创建虚拟总线 |
+| [vnvme_child.inf](../templates/vnvme_child.inf) | 子设备 | 使 stornvme.sys 加载到虚拟 NVMe 控制器 |
 
-[Version]
-Signature   = "$WINDOWS NT$"
-Class       = System
-ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
-Provider    = %ManufacturerName%
-CatalogFile = vnvme.cat
-DriverVer   = 12/23/2025,1.0.0.0
-PnpLockDown = 1
+**关键配置**:
 
-[DestinationDirs]
-DefaultDestDir       = 13
-vnvme_Device_CoInstaller_CopyFiles = 11
-
-[SourceDisksNames]
-1 = %DiskName%,,,""
-
-[SourceDisksFiles]
-vnvme.sys  = 1,,
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll = 1
-
-;*****************************************
-; vnvme 设备安装节
-;*****************************************
-
-[Manufacturer]
-%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
-
-[Standard.NT$ARCH$.10.0...19041]
-%vnvme.DeviceDesc% = vnvme_Device, ROOT\VNVME
-
-[vnvme_Device.NT]
-CopyFiles = Drivers_Dir
-
-[Drivers_Dir]
-vnvme.sys
-
-;-------------- Service 安装
-[vnvme_Device.NT.Services]
-AddService = vnvme,%SPSVCINST_ASSOCSERVICE%, vnvme_Service_Inst
-
-[vnvme_Service_Inst]
-DisplayName    = %vnvme.SVCDESC%
-ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
-StartType      = 3               ; SERVICE_DEMAND_START
-ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %13%\vnvme.sys
-
-;-------------- WDF 共同安装程序
-[vnvme_Device.NT.CoInstallers]
-AddReg    = vnvme_Device_CoInstaller_AddReg
-CopyFiles = vnvme_Device_CoInstaller_CopyFiles
-
-[vnvme_Device_CoInstaller_AddReg]
-HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
-
-[vnvme_Device_CoInstaller_CopyFiles]
-WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
-
-[vnvme_Device.NT.Wdf]
-KmdfService = vnvme, vnvme_wdfsect
-
-[vnvme_wdfsect]
-KmdfLibraryVersion = $KMDFVERSION$
-
-;-------------- 字符串
-[Strings]
-SPSVCINST_ASSOCSERVICE = 0x00000002
-ManufacturerName       = "Virtual NVMe Project"
-DiskName               = "Virtual NVMe Installation Disk"
-vnvme.DeviceDesc       = "Virtual NVMe Bus Controller"
-vnvme.SVCDESC          = "Virtual NVMe Driver"
-```
-
-**vnvme_child.inf** (子设备 - stornvme 加载目标):
-
-```ini
-;
-; vnvme_child.inf - Virtual NVMe Controller Child Device
-;
-; 此 INF 文件使 Windows 将 stornvme.sys 加载到我们的虚拟 NVMe 设备上
-;
-
-[Version]
-Signature   = "$WINDOWS NT$"
-Class       = SCSIAdapter
-ClassGuid   = {4D36E97B-E325-11CE-BFC1-08002BE10318}
-Provider    = %ManufacturerName%
-CatalogFile = vnvme_child.cat
-DriverVer   = 12/23/2025,1.0.0.0
-PnpLockDown = 1
-
-[DestinationDirs]
-DefaultDestDir = 12
-
-[Manufacturer]
-%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
-
-; 硬件 ID 必须匹配我们在 PDO 中报告的 ID
-[Standard.NT$ARCH$.10.0...19041]
-%vnvme_child.DeviceDesc% = vnvme_child_Device, PCI\VEN_1B36&DEV_0010&SUBSYS_00011B36&REV_02
-
-; 使用 stornvme.sys (Windows 原生 NVMe 驱动)
-[vnvme_child_Device.NT]
-Include   = stornvme.inf
-Needs     = stornvme_Inst.NT
-
-[vnvme_child_Device.NT.HW]
-Include   = stornvme.inf
-Needs     = stornvme_Inst.NT.HW
-
-[vnvme_child_Device.NT.Services]
-Include   = stornvme.inf
-Needs     = stornvme_Inst.NT.Services
-
-[Strings]
-ManufacturerName        = "Virtual NVMe Project"
-vnvme_child.DeviceDesc  = "Virtual NVMe SSD Controller"
-```
+| INF 文件 | Class | HardwareID | 说明 |
+|----------|-------|------------|------|
+| vnvme.inf | System | `ROOT\VNVME` | 根枚举总线设备，KMDF 框架 |
+| vnvme_child.inf | SCSIAdapter | `PCI\VEN_1B36&DEV_0010...` | Include/Needs 继承 stornvme.inf |
 
 ### 安装根设备
 
-驱动安装后，需要手动创建根设备实例：
+驱动安装后，需要创建根设备实例：
 
 ```powershell
 # 方法 1: 使用 devcon (推荐用于开发测试)

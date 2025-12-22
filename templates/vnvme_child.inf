@@ -1,0 +1,46 @@
+;
+; vnvme_child.inf - Virtual NVMe Controller Child Device
+;
+; Copyright (c) 2025 Virtual NVMe Project
+;
+; 此 INF 文件使 Windows 将 stornvme.sys 加载到我们的虚拟 NVMe 设备上
+; 硬件 ID 必须与 vnvme.sys 在 PDO 中报告的 ID 匹配
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = SCSIAdapter
+ClassGuid   = {4D36E97B-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = vnvme_child.cat
+DriverVer   = 12/23/2025,1.0.0.0
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
+
+; 硬件 ID 必须匹配我们在 PDO 中报告的 ID
+; VEN_1B36 = Red Hat (QEMU), DEV_0010 = NVMe Controller
+[Standard.NT$ARCH$.10.0...19041]
+%vnvme_child.DeviceDesc% = vnvme_child_Device, PCI\VEN_1B36&DEV_0010&SUBSYS_00011B36&REV_02
+
+; 使用 stornvme.sys (Windows 原生 NVMe 驱动)
+; 通过 Include/Needs 机制继承 stornvme 的安装配置
+[vnvme_child_Device.NT]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT
+
+[vnvme_child_Device.NT.HW]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT.HW
+
+[vnvme_child_Device.NT.Services]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT.Services
+
+[Strings]
+ManufacturerName        = "Virtual NVMe Project"
+vnvme_child.DeviceDesc  = "Virtual NVMe SSD Controller"

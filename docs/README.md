@@ -23,6 +23,9 @@ Virtual NVMe Driver 是一个纯软件实现的虚拟 NVMe SSD 设备驱动程�
 | [command-handling.md](command-handling.md) | 命令处理流程 |
 | [build-guide.md](build-guide.md) | 构建与部署指南 |
 | [testing.md](testing.md) | 测试策略 |
+| [inf-template.md](inf-template.md) | INF 文件模板 |
+| [error-codes.md](error-codes.md) | NVMe 错误码参考 |
+| [troubleshooting.md](troubleshooting.md) | 故障排查指南 |
 
 ## 技术栈
 

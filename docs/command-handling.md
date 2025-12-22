@@ -82,26 +82,82 @@
 
 ## PRP 处理
 
-### PRP 列表解析
+PRP (Physical Region Page) 是 NVMe 用于描述数据缓冲区物理地址的机制。
+
+### PRP 条目格式
+```
+每个 PRP 条目是 64-bit 物理地址:
+- Bits [1:0]: 必须为 0 (4 字节对齐)
+- Bits [n-1:2]: 页内偏移 (n = 12 + MPS)
+- Bits [63:n]: 页帧号
+```
+
+### PRP 列表解析流程
 ```c
-// 单页情况
-if (dataLength <= PAGE_SIZE) {
-    address = PRP1;
-}
-// 双页情况
-else if (dataLength <= 2 * PAGE_SIZE) {
-    addresses[0] = PRP1;
-    addresses[1] = PRP2;
-}
-// PRP 列表情况
-else {
-    addresses[0] = PRP1;
-    prpList = (PUINT64)PRP2;
-    for (i = 1; i < numPages; i++) {
-        addresses[i] = prpList[i-1];
+NTSTATUS ProcessPrpList(
+    UINT64 Prp1,
+    UINT64 Prp2, 
+    UINT32 DataLength,
+    PVOID* Addresses,
+    PUINT32 AddressCount)
+{
+    UINT32 pageSize = 4096;  // 假设 MPS = 0
+    UINT32 offset = Prp1 & (pageSize - 1);
+    UINT32 firstPageBytes = pageSize - offset;
+    UINT32 index = 0;
+    
+    // 情况 1: 数据完全在第一页内
+    if (DataLength <= firstPageBytes) {
+        Addresses[index++] = (PVOID)Prp1;
+        *AddressCount = index;
+        return STATUS_SUCCESS;
     }
+    
+    // 第一页
+    Addresses[index++] = (PVOID)Prp1;
+    UINT32 remaining = DataLength - firstPageBytes;
+    
+    // 情况 2: 数据跨两页，PRP2 直接是第二页地址
+    if (remaining <= pageSize) {
+        Addresses[index++] = (PVOID)Prp2;
+        *AddressCount = index;
+        return STATUS_SUCCESS;
+    }
+    
+    // 情况 3: 数据超过两页，PRP2 指向 PRP 列表
+    // PRP 列表是连续的 PRP 条目数组
+    PUINT64 prpList = (PUINT64)MapPhysicalAddress(Prp2);
+    if (!prpList) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    UINT32 prpIndex = 0;
+    while (remaining > 0) {
+        // 检查是否跨 PRP 列表页边界
+        UINT32 prpListOffset = (Prp2 + prpIndex * sizeof(UINT64)) & (pageSize - 1);
+        if (prpListOffset == 0 && prpIndex > 0) {
+            // PRP 列表跨页，最后一个条目指向下一个 PRP 列表页
+            UINT64 nextPrpListPage = prpList[prpIndex - 1];
+            UnmapPhysicalAddress(prpList);
+            prpList = (PUINT64)MapPhysicalAddress(nextPrpListPage);
+            prpIndex = 0;
+        }
+        
+        Addresses[index++] = (PVOID)prpList[prpIndex++];
+        remaining = (remaining > pageSize) ? (remaining - pageSize) : 0;
+    }
+    
+    UnmapPhysicalAddress(prpList);
+    *AddressCount = index;
+    return STATUS_SUCCESS;
 }
 ```
+
+### PRP 处理注意事项
+1. **对齐要求**: PRP 地址必须是 DWORD (4字节) 对齐
+2. **偏移限制**: PRP1 可以有页内偏移，后续 PRP 必须页对齐
+3. **列表边界**: PRP List 不能跨页边界，最后条目指向下一页
+4. **内存映射**: 在内核中需要正确映射物理地址
 
 ## 错误处理
 

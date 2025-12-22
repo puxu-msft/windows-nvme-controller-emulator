@@ -202,7 +202,61 @@ stornvme.sys 初始化流程:
 
 **核心原则**：只做必须在内核态的事情，尽量简单。
 
-#### 1.0 根设备枚举
+#### 1.0 驱动内部架构
+
+vnvme.sys 在物理上是单一驱动，但在逻辑上分为两层：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         vnvme.sys 内部架构                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │                     vnvme.c (驱动入口 + IRP 路由)                │ │
+│  │                                                                 │ │
+│  │   NTSTATUS VnvmeDispatchPnp(DeviceObject, Irp)                  │ │
+│  │   {                                                             │ │
+│  │       if (IsDeviceFdo(DeviceObject))                            │ │
+│  │           return VnvmeFdoPnp(...);   // → FDO 层                │ │
+│  │       else                                                      │ │
+│  │           return VnvmePdoPnp(...);   // → PDO 层                │ │
+│  │   }                                                             │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+│                              │                                       │
+│               ┌──────────────┴──────────────┐                        │
+│               ▼                             ▼                        │
+│  ┌─────────────────────────┐   ┌─────────────────────────────────┐  │
+│  │       FDO 层            │   │          PDO 层                  │  │
+│  │   (总线功能)            │   │      (NVMe 仿真)                 │  │
+│  │                         │   │                                 │  │
+│  │ • fdo.c     FDO PnP     │   │ • pdo.c       PDO PnP/资源      │  │
+│  │ • bus.c     子设备枚举  │──▶│ • pcie_config PCIe 配置空间     │  │
+│  │ • user_comm 用户态 IOCTL│   │ • bar0.c      BAR0/寄存器       │  │
+│  │ • shared_mem 共享内存   │◀─▶│ • doorbell.c  轮询引擎          │  │
+│  │ • control_dev 控制设备  │   │ • queue.c     队列管理          │  │
+│  │                         │   │ • prp.c       PRP 解析          │  │
+│  └─────────────────────────┘   └─────────────────────────────────┘  │
+│           │                                │                        │
+│           ▼                                ▼                        │
+│   VNVME_FDO_CONTEXT                VNVME_PDO_CONTEXT                │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**为什么必须合并到单一驱动？**
+
+| 问题 | 分离架构 | 合并架构 |
+|------|----------|----------|
+| PDO 的 PnP IRP 谁响应？ | ❌ 无法控制 - Windows 会加载 stornvme | ✅ 创建者负责响应 |
+| IRP_MN_QUERY_RESOURCES | ❌ 需要复杂的 Filter Driver | ✅ 直接在 PDO 层处理 |
+| 共享内存访问 | ❌ 跨驱动通信开销 | ✅ 同一驱动直接访问 |
+| PCIe 配置空间 | ❌ 需要 IRP 转发 | ✅ 直接处理 BusQueryInterface |
+
+**关键点**: Windows 驱动模型中，创建 PDO 的驱动**必须**处理该 PDO 的底层 PnP/Power IRP。
+
+---
+
+#### 1.1 根设备枚举
 
 Windows 需要知道 `ROOT\VNVME` 设备存在，有三种方式：
 
@@ -282,7 +336,57 @@ New-ItemProperty -Path $regPath -Name "ConfigFlags" -Value 0 -PropertyType DWord
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### 1.1 总线管理
+---
+
+### 1.2 FDO 层 - 总线功能
+
+FDO (Functional Device Object) 层负责：
+- 总线设备管理
+- 子设备 (PDO) 的创建和枚举
+- 用户态通信
+- 共享内存管理
+
+#### 1.2.1 FDO 上下文结构
+
+```c
+// fdo.c, bus.c, user_comm.c, shared_memory.c 操作此结构
+typedef struct _VNVME_FDO_CONTEXT {
+    // === 标识 ===
+    BOOLEAN                 IsFdo;              // TRUE = FDO, FALSE = PDO
+    ULONG                   Signature;          // 'FDOV'
+    
+    // === WDF 对象 ===
+    WDFDEVICE               WdfDevice;          // FDO 设备对象
+    WDFCHILDLIST            ChildList;          // PDO 子设备列表
+    
+    // === 控制设备 ===
+    WDFDEVICE               ControlDevice;      // \\.\VNVMEControl
+    WDFQUEUE                ControlQueue;       // 控制设备 IOCTL 队列
+    
+    // === 用户态通信 ===
+    BOOLEAN                 UserModeReady;      // vnvme-server 已连接
+    LARGE_INTEGER           LastHeartbeat;      // 最后心跳时间
+    KEVENT                  CommandReadyEvent;  // 通知用户态有新命令
+    HANDLE                  UserEventHandle;    // 用户态事件句柄
+    
+    // === 共享内存 (与所有 PDO 共享) ===
+    PVOID                   SharedMemoryKernel; // 内核虚拟地址
+    PVOID                   SharedMemoryUser;   // 用户态映射地址
+    PHYSICAL_ADDRESS        SharedMemoryPhys;   // 物理地址
+    SIZE_T                  SharedMemorySize;   // 64MB
+    PMDL                    SharedMemoryMdl;    // MDL for 用户态映射
+    
+    // === 子设备管理 ===
+    ULONG                   ControllerCount;    // 当前控制器数量
+    ULONG                   MaxControllers;     // 最大控制器数量
+    KSPIN_LOCK              ChildListLock;
+    
+} VNVME_FDO_CONTEXT, *PVNVME_FDO_CONTEXT;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
+```
+
+#### 1.2.2 总线管理 (bus.c)
 
 ```c
 // 驱动入口
@@ -293,16 +397,110 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
     return WdfDriverCreate(DriverObject, RegistryPath, NULL, &config, NULL);
 }
 
-// 创建根总线设备
+// 创建根总线设备 FDO
 NTSTATUS VnvmeEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
 {
+    PVNVME_FDO_CONTEXT fdoCtx;
+    
     // 创建总线 FDO
     WdfDeviceInitSetDeviceType(DeviceInit, FILE_DEVICE_BUS_EXTENDER);
-    // ...
+    
+    // 创建设备
+    status = WdfDeviceCreate(&DeviceInit, &attributes, &device);
+    
+    // 获取 FDO 上下文
+    fdoCtx = VnvmeGetFdoContext(device);
+    fdoCtx->IsFdo = TRUE;
+    fdoCtx->Signature = 'FDOV';
+    
+    // 初始化共享内存
+    status = VnvmeAllocateSharedMemory(fdoCtx);
+    
+    // 创建控制设备 \\.\VNVMEControl
+    status = VnvmeCreateControlDevice(fdoCtx);
+    
+    // 创建子设备列表
+    status = WdfChildListCreate(device, ...);
+    
+    // 触发子设备枚举 - 创建虚拟 NVMe 控制器 PDO
+    status = VnvmeCreateControllerPdo(fdoCtx, 0);
+    
+    return status;
 }
 ```
 
-#### 1.2 BAR0 内存分配
+---
+
+### 1.3 PDO 层 - NVMe 仿真
+
+PDO (Physical Device Object) 层负责：
+- 呈现为 PCIe NVMe 设备
+- BAR0 内存和 NVMe 寄存器
+- Doorbell 轮询和命令检测
+- PRP 解析和数据复制
+
+#### 1.3.1 PDO 上下文结构
+
+```c
+// pdo.c, pcie_config.c, bar0.c, doorbell.c, queue.c, prp.c 操作此结构
+typedef struct _VNVME_PDO_CONTEXT {
+    // === 标识 ===
+    BOOLEAN                 IsFdo;              // FALSE = 这是 PDO
+    ULONG                   Signature;          // 'PDOV'
+    ULONG                   ControllerIndex;    // 控制器索引 (0, 1, 2...)
+    
+    // === 父 FDO 引用 ===
+    PVNVME_FDO_CONTEXT      ParentFdo;          // 访问共享内存
+    
+    // === 设备对象 ===
+    PDEVICE_OBJECT          PhysicalDeviceObject;
+    PDEVICE_OBJECT          AttachedDevice;     // stornvme 附加在此
+    
+    // === BAR0 内存 ===
+    PVOID                   Bar0VirtAddr;       // 内核虚拟地址
+    PHYSICAL_ADDRESS        Bar0PhysAddr;       // 物理地址 (报告给 stornvme)
+    ULONG                   Bar0Size;           // 64KB
+    
+    // === NVMe 寄存器 (指向 BAR0 内部) ===
+    volatile PNVME_REGISTERS  Registers;        // 寄存器基地址
+    volatile PULONG           Doorbells;        // Doorbell 基地址
+    
+    // === 控制器状态 ===
+    VNVME_CONTROLLER_STATE  State;              // Disabled/Enabled/Ready
+    ULONG                   CachedCC;           // CC 寄存器缓存 (检测变化)
+    
+    // === Admin Queue ===
+    VNVME_QUEUE             AdminSQ;
+    VNVME_QUEUE             AdminCQ;
+    USHORT                  AdminSQTailCached;  // 检测新命令
+    USHORT                  AdminCQHeadCached;
+    
+    // === I/O Queues ===
+    VNVME_QUEUE             IoSQ[VNVME_MAX_IO_QUEUES];
+    VNVME_QUEUE             IoCQ[VNVME_MAX_IO_QUEUES];
+    USHORT                  IoQueueCount;       // 当前 I/O 队列数
+    USHORT                  MaxIoQueues;        // 最大 I/O 队列数
+    
+    // === Doorbell 轮询 ===
+    WDFTIMER                PollTimer;
+    ULONG                   PollIntervalUs;     // 当前轮询间隔 (自适应)
+    BOOLEAN                 PollingActive;
+    
+    // === 命名空间 ===
+    VNVME_NAMESPACE         Namespaces[VNVME_MAX_NAMESPACES];
+    ULONG                   NamespaceCount;
+    
+    // === 性能统计 ===
+    ULONG64                 CommandsProcessed;
+    ULONG64                 BytesRead;
+    ULONG64                 BytesWritten;
+    
+} VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_PDO_CONTEXT, VnvmeGetPdoContext)
+```
+
+#### 1.3.2 BAR0 内存分配 (bar0.c)
 
 ```c
 // BAR0 布局 (64KB)
@@ -317,7 +515,7 @@ NTSTATUS VnvmeEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
 #define VNVME_BAR0_MSIX_TABLE_OFF   0x2000   // 0x2000-0x23FF: MSI-X Table
 #define VNVME_BAR0_MSIX_PBA_OFF     0x2400   // 0x2400-0x2407: MSI-X PBA
 
-NTSTATUS VnvmeAllocateBar0(PVNVME_CONTROLLER_CONTEXT Ctx)
+NTSTATUS VnvmeAllocateBar0(PVNVME_PDO_CONTEXT PdoCtx)
 {
     // 分配连续物理内存
     PHYSICAL_ADDRESS lowAddr = {0};
@@ -343,14 +541,14 @@ NTSTATUS VnvmeAllocateBar0(PVNVME_CONTROLLER_CONTEXT Ctx)
 }
 ```
 
-#### 1.3 静态寄存器初始化
+#### 1.3.3 静态寄存器初始化 (bar0.c)
 
 stornvme 读取时直接获得值，无需拦截：
 
 ```c
-VOID VnvmeInitRegisters(PVNVME_CONTROLLER_CONTEXT Ctx)
+VOID VnvmeInitRegisters(PVNVME_PDO_CONTEXT PdoCtx)
 {
-    PVOID regs = Ctx->Bar0VirtAddr;
+    PVOID regs = PdoCtx->Bar0VirtAddr;
     
     // CAP (偏移 0x00, 64-bit, 只读)
     // 这些值 stornvme 会直接读取
@@ -373,128 +571,98 @@ VOID VnvmeInitRegisters(PVNVME_CONTROLLER_CONTEXT Ctx)
     
     // 其他寄存器初始化为 0
     // CC, CSTS, AQA, ASQ, ACQ 由 stornvme 写入，我们轮询检测
+    
+    // 设置寄存器指针
+    PdoCtx->Registers = (PNVME_REGISTERS)regs;
+    PdoCtx->Doorbells = (PULONG)((PUCHAR)regs + VNVME_BAR0_DOORBELL_OFFSET);
 }
 ```
 
-#### 1.4 Doorbell 轮询引擎
+#### 1.3.4 Doorbell 轮询引擎 (doorbell.c)
 
 这是核心机制 - 检测 stornvme 的命令提交：
 
 ```c
-// 控制器上下文
-typedef struct _VNVME_CONTROLLER_CONTEXT {
-    // BAR0
-    PVOID Bar0VirtAddr;
-    PHYSICAL_ADDRESS Bar0PhysAddr;
-    
-    // 寄存器缓存 (用于检测变化)
-    ULONG CachedCC;
-    ULONG CachedAQA;
-    ULONG64 CachedASQ;
-    ULONG64 CachedACQ;
-    
-    // Admin Queue
-    PVNVME_QUEUE AdminSQ;
-    PVNVME_QUEUE AdminCQ;
-    USHORT AdminSQTailCached;
-    
-    // I/O Queues
-    LIST_ENTRY IoQueues;
-    USHORT ActiveIoQueueCount;
-    
-    // 轮询定时器
-    WDFTIMER PollTimer;
-    ULONG PollIntervalUs;      // 当前轮询间隔
-    ULONG MinPollIntervalUs;   // 最小轮询间隔 (10μs)
-    ULONG MaxPollIntervalUs;   // 最大轮询间隔 (1000μs)
-    
-    // 用户态通信
-    PVOID SharedMemory;
-    SIZE_T SharedMemorySize;
-    KEVENT CommandReadyEvent;
-    KEVENT CompletionReadyEvent;
-    BOOLEAN UserConnected;
-    
-    // 状态
-    VNVME_STATE State;
-    
-} VNVME_CONTROLLER_CONTEXT, *PVNVME_CONTROLLER_CONTEXT;
+// doorbell.c - 操作 VNVME_PDO_CONTEXT
 
 // 轮询定时器回调
 VOID VnvmePollTimerCallback(WDFTIMER Timer)
 {
-    PVNVME_CONTROLLER_CONTEXT ctx = WdfObjectGetTypedContext(
-        WdfTimerGetParentObject(Timer), VNVME_CONTROLLER_CONTEXT);
+    PVNVME_PDO_CONTEXT pdoCtx = WdfObjectGetTypedContext(
+        WdfTimerGetParentObject(Timer), VNVME_PDO_CONTEXT);
     
     BOOLEAN hadWork = FALSE;
     
     // 1. 检查 CC 寄存器变化 (控制器启用/禁用)
-    PULONG ccReg = (PULONG)((PUCHAR)ctx->Bar0VirtAddr + NVME_CC_OFFSET);
-    ULONG currentCC = *ccReg;
-    if (currentCC != ctx->CachedCC) {
-        VnvmeHandleCCChange(ctx, currentCC);
-        ctx->CachedCC = currentCC;
+    ULONG currentCC = pdoCtx->Registers->CC.AsUlong;
+    if (currentCC != pdoCtx->CachedCC) {
+        VnvmeHandleCCChange(pdoCtx, currentCC);
+        pdoCtx->CachedCC = currentCC;
         hadWork = TRUE;
     }
     
-    // 2. 如果控制器已启用，检查队列配置变化
-    if (ctx->State == VNVME_STATE_DISABLED) {
-        PULONG aqaReg = (PULONG)((PUCHAR)ctx->Bar0VirtAddr + NVME_AQA_OFFSET);
-        PULONG64 asqReg = (PULONG64)((PUCHAR)ctx->Bar0VirtAddr + NVME_ASQ_OFFSET);
-        PULONG64 acqReg = (PULONG64)((PUCHAR)ctx->Bar0VirtAddr + NVME_ACQ_OFFSET);
-        
-        ctx->CachedAQA = *aqaReg;
-        ctx->CachedASQ = *asqReg;
-        ctx->CachedACQ = *acqReg;
+    // 2. 如果控制器已启用，检查 Admin Queue 配置
+    if (pdoCtx->State == VNVME_STATE_ENABLED) {
+        // stornvme 写入 AQA/ASQ/ACQ 后设置 CC.EN=1
+        VnvmeSetupAdminQueue(pdoCtx);
     }
     
     // 3. 检查 Doorbell 变化
-    if (ctx->State == VNVME_STATE_READY) {
-        // 检查 Admin SQ Tail
-        PUSHORT adminSQTail = (PUSHORT)((PUCHAR)ctx->Bar0VirtAddr + 
-                                        VNVME_BAR0_DOORBELL_OFFSET);
-        USHORT currentTail = *adminSQTail;
-        if (currentTail != ctx->AdminSQTailCached) {
-            VnvmeProcessAdminCommands(ctx, ctx->AdminSQTailCached, currentTail);
-            ctx->AdminSQTailCached = currentTail;
+    if (pdoCtx->State == VNVME_STATE_READY) {
+        // 检查 Admin SQ Tail Doorbell
+        USHORT currentTail = (USHORT)pdoCtx->Doorbells[0];  // Doorbell 0 = Admin SQ
+        if (currentTail != pdoCtx->AdminSQTailCached) {
+            VnvmeProcessAdminCommands(pdoCtx, pdoCtx->AdminSQTailCached, currentTail);
+            pdoCtx->AdminSQTailCached = currentTail;
             hadWork = TRUE;
         }
         
         // 检查所有 I/O SQ Tails
-        // ...类似处理...
+        for (USHORT i = 0; i < pdoCtx->IoQueueCount; i++) {
+            USHORT ioTail = (USHORT)pdoCtx->Doorbells[2 + i * 2];  // I/O SQ Doorbell
+            if (ioTail != pdoCtx->IoSQ[i].TailCached) {
+                VnvmeProcessIoCommands(pdoCtx, i, pdoCtx->IoSQ[i].TailCached, ioTail);
+                pdoCtx->IoSQ[i].TailCached = ioTail;
+                hadWork = TRUE;
+            }
+        }
     }
     
     // 4. 自适应轮询间隔
     if (hadWork) {
-        // 有工作时加快轮询
-        ctx->PollIntervalUs = max(ctx->PollIntervalUs / 2, ctx->MinPollIntervalUs);
+        // 有工作时加快轮询 (最小 10μs)
+        pdoCtx->PollIntervalUs = max(pdoCtx->PollIntervalUs / 2, 10);
     } else {
-        // 无工作时减慢轮询
-        ctx->PollIntervalUs = min(ctx->PollIntervalUs * 2, ctx->MaxPollIntervalUs);
+        // 无工作时减慢轮询 (最大 1000μs)
+        pdoCtx->PollIntervalUs = min(pdoCtx->PollIntervalUs * 2, 1000);
     }
     
     // 5. 重新调度定时器
-    WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_US(ctx->PollIntervalUs));
+    WdfTimerStart(Timer, WDF_REL_TIMEOUT_IN_US(pdoCtx->PollIntervalUs));
 }
 ```
 
-#### 1.5 命令提取和转发
+#### 1.3.5 命令提取和转发 (queue.c)
 
 ```c
+// queue.c - 操作 VNVME_PDO_CONTEXT
+
 VOID VnvmeProcessAdminCommands(
-    PVNVME_CONTROLLER_CONTEXT Ctx,
+    PVNVME_PDO_CONTEXT PdoCtx,
     USHORT OldTail,
     USHORT NewTail)
 {
-    PVNVME_QUEUE sq = Ctx->AdminSQ;
+    PVNVME_QUEUE sq = &PdoCtx->AdminSQ;
     
     // 安全检查: 确保队列已初始化
-    if (!sq || !sq->MappedAddr) {
+    if (!sq->MappedAddr) {
         TraceEvents(TRACE_LEVEL_WARNING, TRACE_QUEUE,
                    "Admin SQ not initialized");
         return;
     }
     
+    // 获取父 FDO 的共享内存
+    PVNVME_FDO_CONTEXT fdoCtx = PdoCtx->ParentFdo;
     PNVME_COMMAND sqBase = (PNVME_COMMAND)sq->MappedAddr;
     
     // 遍历新提交的命令
@@ -503,52 +671,50 @@ VOID VnvmeProcessAdminCommands(
         PNVME_COMMAND cmd = &sqBase[idx];
         
         // 将命令复制到共享内存环形缓冲区
-        PVNVME_SHARED_COMMAND sharedCmd = VnvmeGetNextCommandSlot(Ctx);
+        PVNVME_SHARED_COMMAND sharedCmd = VnvmeGetNextCommandSlot(fdoCtx);
         if (sharedCmd) {
+            sharedCmd->ControllerIndex = PdoCtx->ControllerIndex;
             sharedCmd->QueueId = 0;  // Admin Queue
             sharedCmd->CommandIndex = idx;
             RtlCopyMemory(&sharedCmd->Command, cmd, sizeof(NVME_COMMAND));
             
-            // 如果是 I/O 命令，解析 PRP 并复制数据
+            // 如果是 Write 命令，解析 PRP 并复制数据到共享内存
             if (cmd->CDW0.OPC == NVME_OPC_WRITE) {
-                NTSTATUS status = VnvmeCopyDataFromPrp(Ctx, cmd, sharedCmd);
+                NTSTATUS status = VnvmeCopyDataFromPrp(PdoCtx, cmd, sharedCmd);
                 if (!NT_SUCCESS(status)) {
-                    // PRP 解析或数据复制失败，释放槽位并跳过
                     TraceEvents(TRACE_LEVEL_ERROR, TRACE_COMMAND,
                                "Failed to copy PRP data: 0x%08X", status);
-                    VnvmeReleaseCommandSlot(Ctx, sharedCmd);
+                    VnvmeReleaseCommandSlot(fdoCtx, sharedCmd);
                     idx = (idx + 1) % sq->Size;
                     continue;
                 }
             }
             
-            VnvmeSubmitCommandToUser(Ctx, sharedCmd);
+            VnvmeSubmitCommandToUser(fdoCtx, sharedCmd);
         }
         
         idx = (idx + 1) % sq->Size;
     }
     
     // 通知用户态有新命令
-    KeSetEvent(&Ctx->CommandReadyEvent, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&fdoCtx->CommandReadyEvent, IO_NO_INCREMENT, FALSE);
 }
 ```
 
-#### 1.6 完成处理
+#### 1.3.6 完成处理 (queue.c)
 
 ```c
-// 用户态处理完成后调用
+// queue.c - 用户态处理完成后，内核将结果写入 CQ
+
 VOID VnvmePostCompletion(
-    PVNVME_CONTROLLER_CONTEXT Ctx,
+    PVNVME_PDO_CONTEXT PdoCtx,
     USHORT CqId,
     PNVME_COMPLETION Completion)
 {
-    PVNVME_QUEUE cq = (CqId == 0) ? Ctx->AdminCQ : VnvmeFindIoCQ(Ctx, CqId);
-    if (!cq) return;
-    
+    PVNVME_QUEUE cq = (CqId == 0) ? &PdoCtx->AdminCQ : &PdoCtx->IoCQ[CqId - 1];
     PNVME_COMPLETION cqBase = (PNVME_COMPLETION)cq->MappedAddr;
     
     // 设置 Phase Tag (bit 0)
-    // 先清除原有 Phase 位，再根据当前队列 Phase 设置
     USHORT statusWithPhase = (Completion->Status & 0xFFFE) | (cq->Phase ? 1 : 0);
     Completion->Status = statusWithPhase;
     
@@ -562,11 +728,11 @@ VOID VnvmePostCompletion(
         cq->Phase = !cq->Phase;
     }
     
-    // 如果是 Read 命令，将数据复制到 stornvme 的缓冲区
-    // (数据已在共享内存中准备好)
+    // 如果是 Read 命令，将数据从共享内存复制到 stornvme 的 PRP 缓冲区
+    // ...
     
-    // 可选：触发中断
-    // 在实践中，stornvme 会定期轮询 CQ，所以中断不是必须的
+    // 更新统计
+    PdoCtx->CommandsProcessed++;
 }
 ```
 

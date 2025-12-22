@@ -2,9 +2,207 @@
 
 本文档定义虚拟 NVMe 控制器仿真器的核心数据结构。
 
-## 控制器上下文
+## v2 架构概述
 
-### 主控制器结构
+vnvme.sys 内部分为两层，每层有独立的上下文结构：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         vnvme.sys                                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   ┌─────────────────────────┐     ┌─────────────────────────────┐  │
+│   │   FDO 层 (总线功能)      │     │   PDO 层 (NVMe 仿真)        │  │
+│   │                         │     │                             │  │
+│   │   VNVME_FDO_CONTEXT     │────▶│   VNVME_PDO_CONTEXT         │  │
+│   │   • 共享内存            │     │   • BAR0 内存               │  │
+│   │   • 用户态通信          │     │   • NVMe 寄存器             │  │
+│   │   • 子设备管理          │     │   • 队列状态                │  │
+│   └─────────────────────────┘     └─────────────────────────────┘  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## FDO 层数据结构
+
+### VNVME_FDO_CONTEXT
+
+FDO (Functional Device Object) 上下文，由 `fdo.c`, `bus.c`, `user_comm.c`, `shared_memory.c` 操作。
+
+```c
+//
+// FDO 上下文 - 总线功能
+// 文件: vnvme.h
+//
+typedef struct _VNVME_FDO_CONTEXT {
+    // === 标识 ===
+    BOOLEAN                 IsFdo;              // TRUE = FDO, FALSE = PDO
+    ULONG                   Signature;          // 'FDOV' (0x564F4446)
+    
+    // === WDF 对象 ===
+    WDFDEVICE               WdfDevice;          // FDO 设备对象
+    WDFCHILDLIST            ChildList;          // PDO 子设备列表
+    
+    // === 控制设备 (user_comm.c) ===
+    WDFDEVICE               ControlDevice;      // \\.\VNVMEControl
+    WDFQUEUE                ControlQueue;       // 控制设备 IOCTL 队列
+    
+    // === 用户态通信 (user_comm.c) ===
+    BOOLEAN                 UserModeReady;      // vnvme-server 已连接
+    LARGE_INTEGER           LastHeartbeat;      // 最后心跳时间 (KeQuerySystemTime)
+    KEVENT                  CommandReadyEvent;  // 通知用户态有新命令
+    HANDLE                  UserEventHandle;    // 用户态事件句柄 (用于 IOCTL 返回)
+    
+    // === 共享内存 (shared_memory.c) ===
+    PVOID                   SharedMemoryKernel; // 内核虚拟地址
+    PVOID                   SharedMemoryUser;   // 用户态映射地址 (映射后填充)
+    PHYSICAL_ADDRESS        SharedMemoryPhys;   // 物理地址
+    SIZE_T                  SharedMemorySize;   // 64MB (VNVME_SHARED_MEMORY_SIZE)
+    PMDL                    SharedMemoryMdl;    // MDL for 用户态映射
+    PVNVME_SHARED_CONTROL_BLOCK ControlBlock;   // 指向共享内存开头
+    
+    // === 子设备管理 (bus.c) ===
+    ULONG                   ControllerCount;    // 当前控制器数量
+    ULONG                   MaxControllers;     // 最大控制器数量
+    KSPIN_LOCK              ChildListLock;
+    LIST_ENTRY              PdoList;            // PDO 链表 (备用，用于遍历)
+    
+} VNVME_FDO_CONTEXT, *PVNVME_FDO_CONTEXT;
+
+#define VNVME_FDO_SIGNATURE 'FDOV'
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
+```
+
+### 共享内存布局
+
+```c
+//
+// 共享内存常量
+//
+#define VNVME_SHARED_MEMORY_SIZE        (64 * 1024 * 1024)  // 64MB
+#define VNVME_CONTROL_BLOCK_SIZE        (4 * 1024)          // 4KB
+#define VNVME_COMMAND_RING_SIZE         (1 * 1024 * 1024)   // 1MB
+#define VNVME_COMPLETION_RING_SIZE      (256 * 1024)        // 256KB
+#define VNVME_DATA_BUFFER_SIZE          (62 * 1024 * 1024)  // ~62MB
+
+//
+// 共享内存控制块 (位于共享内存开头)
+//
+typedef struct _VNVME_SHARED_CONTROL_BLOCK {
+    // === 魔数和版本 ===
+    ULONG                   Magic;              // 'VNME' (0x454D4E56)
+    ULONG                   Version;            // 协议版本
+    
+    // === 状态 ===
+    volatile LONG           KernelReady;        // 内核已准备
+    volatile LONG           UserReady;          // 用户态已准备
+    volatile LONG           Shutdown;           // 关闭标志
+    
+    // === 心跳 ===
+    volatile ULONG64        KernelHeartbeat;    // 内核心跳计数
+    volatile ULONG64        UserHeartbeat;      // 用户态心跳计数
+    
+    // === 命令环形缓冲区指针 ===
+    volatile ULONG          CommandHead;        // 内核写入位置
+    volatile ULONG          CommandTail;        // 用户态读取位置
+    ULONG                   CommandRingOffset;  // 命令环偏移 (从共享内存开头)
+    ULONG                   CommandRingSize;    // 命令环大小
+    ULONG                   CommandEntrySize;   // 每条命令大小
+    
+    // === 完成环形缓冲区指针 ===
+    volatile ULONG          CompletionHead;     // 用户态写入位置
+    volatile ULONG          CompletionTail;     // 内核读取位置
+    ULONG                   CompletionRingOffset;
+    ULONG                   CompletionRingSize;
+    ULONG                   CompletionEntrySize;
+    
+    // === 数据缓冲区 ===
+    ULONG                   DataBufferOffset;   // 数据区偏移
+    ULONG                   DataBufferSize;     // 数据区大小
+    
+    // === 统计 ===
+    volatile ULONG64        CommandsSubmitted;
+    volatile ULONG64        CommandsCompleted;
+    volatile ULONG64        BytesRead;
+    volatile ULONG64        BytesWritten;
+    
+    // === 填充到 4KB ===
+    UCHAR                   Reserved[4096 - 128];
+    
+} VNVME_SHARED_CONTROL_BLOCK, *PVNVME_SHARED_CONTROL_BLOCK;
+
+C_ASSERT(sizeof(VNVME_SHARED_CONTROL_BLOCK) == 4096);
+```
+
+---
+
+## PDO 层数据结构
+
+### PDO 与 NVMe Controller 的关系
+
+在本项目中，**1 个 PDO = 1 个 NVMe 控制器**。这是同一实体的两种视角：
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        两种视角，同一实体                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   Windows 驱动模型视角              NVMe 规范视角                    │
+│   ═══════════════════              ═════════════                    │
+│                                                                      │
+│   ┌─────────────────┐              ┌─────────────────┐              │
+│   │      PDO        │      =       │  NVMe Controller│              │
+│   │ Physical Device │              │  控制器实例      │              │
+│   │     Object      │              │                 │              │
+│   └─────────────────┘              └─────────────────┘              │
+│          │                                  │                        │
+│          ▼                                  ▼                        │
+│   • 设备对象           ─────────────   • BAR0 寄存器                │
+│   • PnP/Power IRP      ─────────────   • Admin Queue                │
+│   • 资源报告           ─────────────   • I/O Queues                 │
+│   • 硬件 ID            ─────────────   • Namespaces                 │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+| Windows 概念 | NVMe 概念 | 说明 |
+|-------------|-----------|------|
+| PDO | Controller | 一个 PDO 呈现为一个 NVMe 控制器 |
+| PDO 的 HardwareID | PCIe VID/DID | `PCI\VEN_1B36&DEV_0010` |
+| PDO 的资源 (BAR0) | Controller Registers | 64KB MMIO 区域 |
+| PDO 的 PnP 状态 | Controller State | Started ↔ Ready |
+
+**命名选择**: 使用 `VNVME_PDO_CONTEXT` 而非 `VNVME_CONTROLLER_CONTEXT` 是为了：
+1. **与 FDO_CONTEXT 对称** - 代码中 FDO/PDO 一目了然
+2. **明确 IRP 处理职责** - PDO 负责处理底层 PnP/Power IRP
+3. **驱动开发者熟悉** - 符合 Windows 驱动的通用模式
+
+### 多控制器场景
+
+FDO 可以创建多个 PDO，每个 PDO 是一个独立的 NVMe 控制器：
+
+```
+FDO (ROOT\VNVME)
+└── VNVME_FDO_CONTEXT
+     │
+     ├── PDO[0] ──── VNVME_PDO_CONTEXT ──── NVMe Controller 0
+     │               • 独立的 Bar0, Registers
+     │               • 独立的 AdminSQ/CQ, IoSQ/CQ
+     │               • 独立的 Namespaces
+     │
+     ├── PDO[1] ──── VNVME_PDO_CONTEXT ──── NVMe Controller 1
+     │
+     └── PDO[2] ──── VNVME_PDO_CONTEXT ──── NVMe Controller 2
+```
+
+---
+
+### VNVME_PDO_CONTEXT
+
+PDO (Physical Device Object) 上下文，由 `pdo.c`, `pcie_config.c`, `bar0.c`, `doorbell.c`, `queue.c`, `prp.c` 操作。
 
 ```c
 //
@@ -21,82 +219,152 @@ typedef enum _VNVME_CONTROLLER_STATE {
 } VNVME_CONTROLLER_STATE;
 
 //
-// 主控制器上下文
+// PDO 上下文 - NVMe 控制器仿真
+// 文件: vnvme.h
 //
-typedef struct _VNVME_CONTROLLER {
-    // === 设备标识 ===
-    ULONG Signature;             // 'VNVM'
-    ULONG ControllerIndex;       // 控制器索引 (0-based)
-    WCHAR DeviceName[64];        // 设备名称
+// 注意: 此结构同时是：
+//   1. PDO 的设备扩展 (DeviceExtension) - Windows 视角
+//   2. NVMe 控制器的状态容器 - NVMe 视角
+//
+typedef struct _VNVME_PDO_CONTEXT {
+    // === 标识 ===
+    BOOLEAN                 IsFdo;              // FALSE = 这是 PDO
+    ULONG                   Signature;          // 'PDOV' (0x564F4450)
+    ULONG                   ControllerIndex;    // 控制器索引 (0, 1, 2...)
     
-    // === WDF 对象 ===
-    WDFDEVICE WdfDevice;
-    WDFQUEUE DefaultQueue;
-    WDFINTERRUPT Interrupt;
+    // === 父 FDO 引用 ===
+    PVNVME_FDO_CONTEXT      ParentFdo;          // 访问共享内存和用户态通信
+    LIST_ENTRY              PdoListEntry;       // 链入 FDO 的 PdoList
     
-    // === 设备对象 ===
-    PDEVICE_OBJECT FunctionalDeviceObject;
-    PDEVICE_OBJECT PhysicalDeviceObject;
-    PDEVICE_OBJECT LowerDeviceObject;
+    // === 设备对象 (pdo.c) ===
+    PDEVICE_OBJECT          PhysicalDeviceObject;
+    PDEVICE_OBJECT          AttachedDevice;     // stornvme 附加在此
+    BOOLEAN                 Present;            // 设备是否存在
+    BOOLEAN                 ReportedMissing;    // 已报告移除
+    
+    // === BAR0 内存 (bar0.c) ===
+    PVOID                   Bar0VirtAddr;       // 内核虚拟地址
+    PHYSICAL_ADDRESS        Bar0PhysAddr;       // 物理地址 (报告给 stornvme)
+    ULONG                   Bar0Size;           // 64KB
+    
+    // === NVMe 寄存器 (指向 BAR0 内部) ===
+    volatile PNVME_REGISTERS  Registers;        // 寄存器基地址 (BAR0 + 0x0000)
+    volatile PULONG           Doorbells;        // Doorbell 基地址 (BAR0 + 0x1000)
     
     // === 控制器状态 ===
-    VNVME_CONTROLLER_STATE State;
-    BOOLEAN ShutdownNotification;
+    VNVME_CONTROLLER_STATE  State;
+    ULONG                   CachedCC;           // CC 寄存器缓存 (检测变化)
     
-    // === NVMe 寄存器 ===
-    VNVME_REGISTERS Registers;
+    // === Admin Queue (queue.c) ===
+    VNVME_QUEUE             AdminSQ;
+    VNVME_QUEUE             AdminCQ;
+    USHORT                  AdminSQTailCached;  // 检测新命令
+    USHORT                  AdminCQHeadCached;
     
-    // === BAR0 内存 ===
-    PVOID Bar0VirtualAddress;
-    ULONG Bar0Size;
-    PHYSICAL_ADDRESS Bar0PhysicalAddress;
+    // === I/O Queues (queue.c) ===
+    VNVME_QUEUE             IoSQ[VNVME_MAX_IO_QUEUES];
+    VNVME_QUEUE             IoCQ[VNVME_MAX_IO_QUEUES];
+    USHORT                  IoQueueCount;       // 当前 I/O 队列数
+    USHORT                  MaxIoQueues;        // 最大 I/O 队列数
     
-    // === Admin Queue ===
-    VNVME_SUBMISSION_QUEUE AdminSQ;
-    VNVME_COMPLETION_QUEUE AdminCQ;
-    
-    // === I/O Queues ===
-    LIST_ENTRY IoSqList;         // I/O Submission Queue 列表
-    LIST_ENTRY IoCqList;         // I/O Completion Queue 列表
-    KSPIN_LOCK QueueLock;        // 队列列表锁
-    USHORT MaxIoQueues;          // 最大 I/O 队列数 (CAP.MQES)
+    // === Doorbell 轮询 (doorbell.c) ===
+    WDFTIMER                PollTimer;
+    ULONG                   PollIntervalUs;     // 当前轮询间隔 (自适应)
+    ULONG                   MinPollIntervalUs;  // 最小 10μs
+    ULONG                   MaxPollIntervalUs;  // 最大 1000μs
+    BOOLEAN                 PollingActive;
     
     // === 命名空间 ===
-    LIST_ENTRY NamespaceList;    // 命名空间列表
-    KSPIN_LOCK NamespaceLock;
-    ULONG NamespaceCount;
+    VNVME_NAMESPACE         Namespaces[VNVME_MAX_NAMESPACES];
+    ULONG                   NamespaceCount;
     
-    // === 后端存储 ===
-    PVNVME_BACKEND Backend;
+    // === 性能统计 ===
+    ULONG64                 CommandsProcessed;
+    ULONG64                 BytesRead;
+    ULONG64                 BytesWritten;
     
-    // === 工作线程 ===
-    VNVME_QUEUE_WORKER QueueWorker;
-    
-    // === 中断 ===
-    VNVME_INTERRUPT_STATE InterruptState;
-    VNVME_INTERRUPT_COALESCING IntCoalescing;
-    
-    // === 电源管理 ===
-    DEVICE_POWER_STATE DevicePowerState;
-    SYSTEM_POWER_STATE SystemPowerState;
-    
-    // === 性能计数器 ===
-    ULONG64 PerformanceFrequency;
-    VNVME_STATISTICS Statistics;
-    
-    // === 配置 ===
-    VNVME_CONFIG Config;
-    
-} VNVME_CONTROLLER, *PVNVME_CONTROLLER;
+} VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
 
-#define VNVME_CONTROLLER_SIGNATURE 'MVNV'
+#define VNVME_PDO_SIGNATURE 'PDOV'
+#define VNVME_MAX_IO_QUEUES     64
+#define VNVME_MAX_NAMESPACES    16
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_PDO_CONTEXT, VnvmeGetPdoContext)
 ```
 
-### NVMe 寄存器结构
+### 通用上下文访问
 
 ```c
 //
-// NVMe 控制器寄存器 (BAR0)
+// 通用设备上下文头 (用于 IRP 分发路由)
+// vnvme.c 中使用此结构判断设备类型
+//
+typedef struct _VNVME_COMMON_CONTEXT {
+    BOOLEAN                 IsFdo;
+    ULONG                   Signature;
+} VNVME_COMMON_CONTEXT, *PVNVME_COMMON_CONTEXT;
+
+//
+// IRP 分发路由示例
+//
+NTSTATUS VnvmeDispatchPnp(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PVNVME_COMMON_CONTEXT ctx = (PVNVME_COMMON_CONTEXT)DeviceObject->DeviceExtension;
+    
+    if (ctx->IsFdo) {
+        return VnvmeFdoPnp((PVNVME_FDO_CONTEXT)ctx, DeviceObject, Irp);
+    } else {
+        return VnvmePdoPnp((PVNVME_PDO_CONTEXT)ctx, DeviceObject, Irp);
+    }
+}
+```
+
+---
+
+## 队列结构
+
+### VNVME_QUEUE
+
+```c
+//
+// 通用队列结构 (SQ 和 CQ 共用)
+//
+typedef struct _VNVME_QUEUE {
+    // === 队列标识 ===
+    USHORT                  QueueId;            // 队列 ID (0 = Admin)
+    BOOLEAN                 IsSubmissionQueue;  // TRUE = SQ, FALSE = CQ
+    
+    // === 队列内存 ===
+    PHYSICAL_ADDRESS        PhysAddr;           // stornvme 分配的物理地址
+    PVOID                   MappedAddr;         // 内核映射的虚拟地址
+    PMDL                    Mdl;                // MDL (用于映射)
+    
+    // === 队列参数 ===
+    USHORT                  Size;               // 队列条目数
+    USHORT                  EntrySize;          // 每条目大小 (SQ=64, CQ=16)
+    
+    // === 队列状态 ===
+    USHORT                  Head;               // 头指针
+    USHORT                  Tail;               // 尾指针
+    USHORT                  TailCached;         // 尾指针缓存 (检测变化)
+    BOOLEAN                 Phase;              // 当前 Phase Tag (仅 CQ)
+    
+    // === 关联 ===
+    USHORT                  CompletionQueueId;  // 关联的 CQ ID (仅 SQ)
+    USHORT                  InterruptVector;    // 中断向量 (仅 CQ)
+    
+} VNVME_QUEUE, *PVNVME_QUEUE;
+```
+
+---
+
+## NVMe 寄存器结构
+
+### VNVME_REGISTERS
+
+```c
+//
+// NVMe 控制器寄存器 (BAR0 偏移 0x0000-0x0FFF)
 //
 typedef struct _VNVME_REGISTERS {
     // 0x00: Controller Capabilities

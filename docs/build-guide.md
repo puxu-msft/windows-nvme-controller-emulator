@@ -56,67 +56,133 @@ Restart-Computer
 
 > **注意**: v2 架构使用单一 `vnvme.sys` 内核驱动 + `vnvme-server.exe` 用户态服务
 
+### 为什么是单一内核驱动？
+
+虽然逻辑上存在"虚拟总线"和"NVMe 控制器仿真"两个功能，但必须合并到一个驱动中：
+
+| 问题 | 分离架构 | 合并架构 |
+|------|----------|----------|
+| PDO 的 PnP IRP 谁响应？ | ❌ 无法控制 | ✅ 创建者负责 |
+| BAR0 资源报告 | ❌ 需要复杂的 Filter | ✅ 直接处理 |
+| 共享内存访问 | ❌ 跨驱动通信 | ✅ 直接访问 |
+
+**关键点**: Windows 驱动模型中，创建 PDO 的驱动必须处理该 PDO 的底层 PnP IRP。分离会导致无法响应 `IRP_MN_QUERY_RESOURCES` 等关键请求。
+
+### 代码文件组织
+
+代码在物理上合并，但在逻辑上清晰分为 **FDO 层（总线功能）** 和 **PDO 层（NVMe 仿真）**：
+
 ```
 virtual-nvme-driver/
 ├── src/
-│   ├── vnvme/                  # ★ 单一内核驱动 (v2 架构)
-│   │   ├── vnvme.c             # 主驱动入口
-│   │   ├── bus.c               # 总线管理、PDO 创建
-│   │   ├── pdo.c               # PDO PnP IRP 处理
-│   │   ├── pcie_config.c       # PCIe 配置空间仿真
-│   │   ├── bar0.c              # BAR0 内存分配和寄存器初始化
-│   │   ├── doorbell.c          # Doorbell 轮询引擎
-│   │   ├── queue.c             # Admin/IO 队列管理
-│   │   ├── prp.c               # PRP 解析和数据复制
-│   │   ├── shared_memory.c     # 共享内存分配和映射
-│   │   ├── user_comm.c         # 用户态通信 (IOCTL/事件)
-│   │   ├── control_device.c    # \\.\VNVMEControl 设备
-│   │   ├── trace.h             # WPP 跟踪宏
-│   │   ├── vnvme.h             # 主头文件
-│   │   └── vnvme.inf           # INF 文件
+│   ├── vnvme/                      # ★ 单一内核驱动 (v2 架构)
+│   │   │
+│   │   │   ══════════════════════════════════════════════════════
+│   │   │   驱动入口
+│   │   │   ══════════════════════════════════════════════════════
+│   │   ├── vnvme.c                 # DriverEntry, IRP 分发路由
+│   │   ├── vnvme.h                 # 主头文件, FDO_CONTEXT/PDO_CONTEXT 定义
+│   │   │
+│   │   │   ══════════════════════════════════════════════════════
+│   │   │   FDO 层 - 总线功能 (操作 VNVME_FDO_CONTEXT)
+│   │   │   ══════════════════════════════════════════════════════
+│   │   ├── fdo.c                   # FDO PnP/Power IRP 处理
+│   │   ├── bus.c                   # 子设备枚举、PDO 创建/删除
+│   │   ├── control_device.c        # \\.\VNVMEControl 控制设备
+│   │   ├── shared_memory.c         # 共享内存分配 (内核侧)
+│   │   ├── user_comm.c             # 用户态通信 (IOCTL, 事件通知)
+│   │   │
+│   │   │   ══════════════════════════════════════════════════════
+│   │   │   PDO 层 - NVMe 仿真 (操作 VNVME_PDO_CONTEXT)
+│   │   │   ══════════════════════════════════════════════════════
+│   │   ├── pdo.c                   # PDO PnP/Power IRP 处理
+│   │   ├── pcie_config.c           # PCIe 配置空间仿真
+│   │   ├── bar0.c                  # BAR0 内存分配, NVMe 寄存器初始化
+│   │   ├── doorbell.c              # Doorbell 轮询引擎
+│   │   ├── queue.c                 # Admin/IO 队列管理
+│   │   ├── prp.c                   # PRP 解析和数据复制
+│   │   │
+│   │   │   ══════════════════════════════════════════════════════
+│   │   │   通用/支持
+│   │   │   ══════════════════════════════════════════════════════
+│   │   ├── trace.h                 # WPP 跟踪宏
+│   │   └── vnvme.inf               # INF 文件
 │   │
-│   ├── vnvme-server/           # ★ 用户态服务 (v2 架构)
-│   │   ├── main.c              # 服务入口
-│   │   ├── driver_comm.c       # 与内核驱动通信
-│   │   ├── command_engine.c    # NVMe 命令处理引擎
-│   │   ├── admin_commands.c    # Admin 命令处理
-│   │   ├── io_commands.c       # I/O 命令处理
-│   │   ├── backend.h           # 后端接口
-│   │   ├── backend_memory.c    # 内存后端
-│   │   ├── backend_file.c      # 文件后端
-│   │   ├── backend_vhd.c       # VHD 后端 (可选)
-│   │   ├── config.c            # 配置文件解析
-│   │   ├── logging.c           # 日志系统
-│   │   └── service.c           # Windows 服务包装
+│   ├── vnvme-server/               # ★ 用户态服务 (v2 架构)
+│   │   ├── main.c                  # 服务入口
+│   │   ├── driver_comm.c           # 与内核驱动通信
+│   │   ├── command_engine.c        # NVMe 命令处理引擎
+│   │   ├── admin_commands.c        # Admin 命令处理
+│   │   ├── io_commands.c           # I/O 命令处理
+│   │   ├── backend.h               # 后端接口
+│   │   ├── backend_memory.c        # 内存后端
+│   │   ├── backend_file.c          # 文件后端
+│   │   ├── backend_vhd.c           # VHD 后端 (可选)
+│   │   ├── config.c                # 配置文件解析
+│   │   ├── logging.c               # 日志系统
+│   │   └── service.c               # Windows 服务包装
 │   │
-│   └── vnvmectl/               # 用户模式管理工具
-│       ├── main.c              # CLI 入口
-│       ├── commands.c          # 命令实现
-│       └── vnvmelib.c          # 驱动通信库
+│   └── vnvmectl/                   # 用户模式管理工具
+│       ├── main.c                  # CLI 入口
+│       ├── commands.c              # 命令实现
+│       └── vnvmelib.c              # 驱动通信库
 │
 ├── include/
-│   ├── vnvme_common.h          # 内核/用户态共享定义
-│   ├── vnvme_ioctl.h           # IOCTL 接口定义
-│   ├── vnvme_shared.h          # 共享内存结构定义
-│   └── nvme_spec.h             # NVMe 规范定义
+│   ├── vnvme_common.h              # 内核/用户态共享定义
+│   ├── vnvme_ioctl.h               # IOCTL 接口定义
+│   ├── vnvme_shared.h              # 共享内存结构定义
+│   └── nvme_spec.h                 # NVMe 规范定义
 │
 ├── tests/
-│   ├── unit/                   # 单元测试
+│   ├── unit/                       # 单元测试
 │   │   ├── test_queue.c
 │   │   ├── test_prp.c
 │   │   └── test_backend.c
-│   └── functional/             # 功能测试
+│   └── functional/                 # 功能测试
 │       ├── test_install.ps1
 │       ├── test_io.ps1
 │       └── test_stress.ps1
 │
-├── docs/                       # 文档
+├── docs/                           # 文档
 │
 └── scripts/
-    ├── build.ps1               # 构建脚本
-    ├── install.ps1             # 安装脚本
-    ├── uninstall.ps1           # 卸载脚本
-    └── test.ps1                # 测试脚本
+    ├── build.ps1                   # 构建脚本
+    ├── install.ps1                 # 安装脚本
+    ├── uninstall.ps1               # 卸载脚本
+    └── test.ps1                    # 测试脚本
+```
+
+### 驱动层次关系图
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         vnvme.sys                                   │
+│                                                                     │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                    vnvme.c (入口 + 路由)                       │  │
+│  │                                                               │  │
+│  │    if (ctx->IsFdo)           else (PDO)                       │  │
+│  │         │                         │                           │  │
+│  │         ▼                         ▼                           │  │
+│  │  ┌─────────────┐           ┌─────────────┐                    │  │
+│  │  │   FDO 层    │           │   PDO 层    │                    │  │
+│  │  │             │ 创建/管理  │             │                    │  │
+│  │  │ • fdo.c     │──────────▶│ • pdo.c     │                    │  │
+│  │  │ • bus.c     │           │ • pcie.c    │                    │  │
+│  │  │ • user_comm │           │ • bar0.c    │                    │  │
+│  │  │ • shared_mem│◀─────────▶│ • doorbell  │                    │  │
+│  │  │             │ 共享内存   │ • queue.c   │                    │  │
+│  │  └─────────────┘           └─────────────┘                    │  │
+│  │         │                         │                           │  │
+│  └─────────│─────────────────────────│───────────────────────────┘  │
+│            │                         │                              │
+└────────────│─────────────────────────│──────────────────────────────┘
+             │                         │
+             ▼                         ▼
+    \\.\VNVMEControl            PDO (PCI\VEN_1B36...)
+    (用户态通信)                       │
+                                       ▼
+                                 stornvme.sys
 ```
 
 ## 创建解决方案

@@ -20,11 +20,11 @@
  * IOCTL 代码定义
  *===========================================================================*/
 
-/* 设备类型 - 使用自定义类型 */
-#define FILE_DEVICE_VNVME       0x8000
+/* 设备类型 - 使用自定义类型 (unsigned 避免符号扩展) */
+#define FILE_DEVICE_VNVME       0x8000U
 
 /* IOCTL 功能码 */
-#define VNVME_IOCTL_INDEX_BASE  0x800
+#define VNVME_IOCTL_INDEX_BASE  0x800U
 
 /* 
  * IOCTL 代码格式:

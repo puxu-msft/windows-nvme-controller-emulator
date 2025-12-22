@@ -19,6 +19,10 @@ typedef uint32_t UINT32;
 typedef uint64_t UINT64;
 #endif
 
+/* Disable warning C4201: nonstandard extension used: nameless struct/union */
+#pragma warning(push)
+#pragma warning(disable: 4201)
+
 #pragma pack(push, 1)
 
 /*===========================================================================
@@ -512,5 +516,6 @@ C_ASSERT(sizeof(PCIE_CONFIG_HEADER) == 64);
 #define PCIE_PROGIF_NVME                0x02
 
 #pragma pack(pop)
+#pragma warning(pop)
 
 #endif /* _NVME_SPEC_H_ */

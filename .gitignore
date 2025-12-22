@@ -1,0 +1,38 @@
+# IDE / Editor
+.idea/
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+
+# Build outputs
+**/build/
+
+# Windows Driver Kit
+*.cer
+*.cat
+*.inf.bak
+
+# WPP Tracing
+*.tmh
+
+# Visual Studio cache
+*.VC.db
+*.VC.VC.opendb
+ipch/
+*.opensdf
+*.sdf
+*.cachefile
+*.aps
+
+# User-specific files
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini

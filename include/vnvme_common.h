@@ -20,6 +20,10 @@ typedef uint32_t UINT32;
 typedef uint64_t UINT64;
 #endif
 
+/* 静态断言宏 - 使用唯一名称避免与 winnt.h 冲突 */
+#define VNVME_STATIC_ASSERT(expr, msg) \
+    typedef char vnvme_static_assert_##msg[(expr) ? 1 : -1]
+
 #pragma pack(push, 1)
 
 /*===========================================================================
@@ -93,7 +97,7 @@ typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
     
 } VNVME_SHARED_MEMORY_CONTROL_BLOCK, *PVNVME_SHARED_MEMORY_CONTROL_BLOCK;
 
-C_ASSERT(sizeof(VNVME_SHARED_MEMORY_CONTROL_BLOCK) == 4096);
+VNVME_STATIC_ASSERT(sizeof(VNVME_SHARED_MEMORY_CONTROL_BLOCK) == 4096, control_block_size);
 
 /*===========================================================================
  * 命令环
@@ -150,7 +154,7 @@ typedef struct _VNVME_RING_COMMAND {
     
 } VNVME_RING_COMMAND, *PVNVME_RING_COMMAND;
 
-C_ASSERT(sizeof(VNVME_RING_COMMAND) == 88);
+VNVME_STATIC_ASSERT(sizeof(VNVME_RING_COMMAND) == 80, ring_command_size);
 
 /**
  * @brief 命令环
@@ -178,7 +182,7 @@ typedef struct _VNVME_RING_COMPLETION {
     UINT32 Reserved;
 } VNVME_RING_COMPLETION, *PVNVME_RING_COMPLETION;
 
-C_ASSERT(sizeof(VNVME_RING_COMPLETION) == 16);
+VNVME_STATIC_ASSERT(sizeof(VNVME_RING_COMPLETION) == 16, ring_completion_size);
 
 /**
  * @brief 完成环

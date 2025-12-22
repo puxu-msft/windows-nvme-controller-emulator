@@ -99,41 +99,53 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 
 ## 文档结构
 
-### 📌 核心设计文档 (v2 - 请优先阅读)
+### 📌 开始阅读
 
 | 文档 | 说明 |
 |------|------|
-| [architecture-v2.md](architecture-v2.md) | **统一混合架构设计** - 内核/用户态分工 |
+| [ROADMAP.md](ROADMAP.md) | **开发路线图** - 阶段规划、任务清单、里程碑 |
+| [architecture-v2.md](architecture-v2.md) | **核心架构设计** - 内核/用户态分工、FDO/PDO 层 |
 | [core-mechanisms.md](core-mechanisms.md) | **核心机制详解** - 轮询、共享内存、PRP、数据路径 |
-| [architecture-analysis.md](architecture-analysis.md) | 架构分析和问题修复记录 |
 
-### 参考文档 (部分内容可能需要结合 v2 理解)
-
-| 文档 | 说明 | 状态 |
-|------|------|------|
-| [architecture.md](architecture.md) | 原全内核态设计 | ⚠️ 已被 v2 取代 |
-| [pcie-emulation.md](pcie-emulation.md) | PCIe 配置空间仿真 | ✅ 仍然适用 |
-| [nvme-controller.md](nvme-controller.md) | NVMe 寄存器定义 | ✅ 仍然适用 |
-| [nvme-commands.md](nvme-commands.md) | NVMe 命令格式 | ✅ 仍然适用 |
-| [queue-engine.md](queue-engine.md) | SQ/CQ 机制 | ✅ 仍然适用 |
-| [user-mode-architecture.md](user-mode-architecture.md) | 用户态分析 | ⚠️ 已整合到 v2 |
-
-### 实现参考
+### 🔧 开发文档
 
 | 文档 | 说明 |
 |------|------|
-| [data-structures.md](data-structures.md) | 核心数据结构定义 |
-| [backend-storage.md](backend-storage.md) | 存储后端实现 |
-| [interrupt-emulation.md](interrupt-emulation.md) | 中断机制参考 |
+| [build-guide.md](build-guide.md) | 构建环境、项目结构、编译流程 |
+| [inf-guide.md](inf-guide.md) | INF 文件详解、安装/卸载脚本、测试签名 |
+| [data-structures.md](data-structures.md) | 核心数据结构 (FDO/PDO Context、共享内存) |
+| [user-mode-service.md](user-mode-service.md) | vnvme-server.exe 详细设计 |
+
+### 📚 NVMe/PCIe 规范参考
+
+| 文档 | 说明 |
+|------|------|
+| [pcie-emulation.md](pcie-emulation.md) | PCIe 配置空间仿真 |
+| [nvme-controller.md](nvme-controller.md) | NVMe 控制器寄存器 (BAR0) |
+| [nvme-commands.md](nvme-commands.md) | NVMe 命令格式 (Admin/IO) |
+| [queue-engine.md](queue-engine.md) | SQ/CQ 队列机制 |
+
+### 📦 实现模块
+
+| 文档 | 说明 |
+|------|------|
+| [backend-storage.md](backend-storage.md) | 存储后端实现 (内存/文件) |
 | [ioctl-interface.md](ioctl-interface.md) | 用户态管理接口 |
+| [interrupt-emulation.md](interrupt-emulation.md) | 中断机制参考 |
 
-### 开发运维文档
+### 🔍 测试与运维
 
 | 文档 | 说明 |
 |------|------|
-| [build-guide.md](build-guide.md) | 构建环境和编译流程 |
 | [testing.md](testing.md) | 测试策略和验证方法 |
 | [troubleshooting.md](troubleshooting.md) | 故障排查指南 |
+
+### 📜 历史记录
+
+| 文档 | 说明 |
+|------|------|
+| [architecture-analysis.md](architecture-analysis.md) | 架构分析和问题修复记录 |
+| [history/](history/) | 评审记录、废弃设计等 |
 
 ---
 

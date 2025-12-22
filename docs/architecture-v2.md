@@ -202,6 +202,86 @@ stornvme.sys 初始化流程:
 
 **核心原则**：只做必须在内核态的事情，尽量简单。
 
+#### 1.0 根设备枚举
+
+Windows 需要知道 `ROOT\VNVME` 设备存在，有三种方式：
+
+**方式 1: devcon 手动安装 (开发测试推荐)**
+
+```powershell
+# 安装驱动并创建根设备实例
+devcon install vnvme.inf ROOT\VNVME
+```
+
+**方式 2: 驱动内部使用 IoReportDetectedDevice (自动枚举)**
+
+```c
+// 在 DriverEntry 中自动报告根设备
+NTSTATUS VnvmeReportRootDevice(PDRIVER_OBJECT DriverObject)
+{
+    NTSTATUS status;
+    PDEVICE_OBJECT pdo = NULL;
+    
+    // 报告根枚举设备
+    status = IoReportDetectedDevice(
+        DriverObject,
+        InterfaceTypeUndefined,  // 总线类型
+        -1,                      // 总线号 (未知)
+        -1,                      // 槽号 (未知)
+        NULL,                    // 资源列表
+        NULL,                    // 资源需求列表
+        FALSE,                   // 非重复检测
+        &pdo);                   // 输出 PDO
+    
+    if (NT_SUCCESS(status)) {
+        // 可选: 设置设备属性
+        // 调用 IoReportResourceForDetectedDevice 分配资源
+        
+        // 标记设备已启动
+        pdo->Flags &= ~DO_DEVICE_INITIALIZING;
+    }
+    
+    return status;
+}
+```
+
+**方式 3: 注册表预配置 (生产环境)**
+
+```powershell
+# 在注册表中添加根枚举设备
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\ROOT\VNVME\0000"
+New-Item -Path $regPath -Force
+New-ItemProperty -Path $regPath -Name "HardwareID" -Value "ROOT\VNVME" -PropertyType MultiString
+New-ItemProperty -Path $regPath -Name "ConfigFlags" -Value 0 -PropertyType DWord
+```
+
+**推荐流程**:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    根设备枚举流程                                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. 安装驱动: pnputil /add-driver vnvme.inf                         │
+│                    │                                                 │
+│                    ▼                                                 │
+│  2. 创建根设备: devcon install vnvme.inf ROOT\VNVME                 │
+│                    │                                                 │
+│                    ▼                                                 │
+│  3. Windows PnP 调用 VnvmeEvtDeviceAdd()                            │
+│                    │                                                 │
+│                    ▼                                                 │
+│  4. 驱动创建 FDO，初始化 BAR0 内存                                   │
+│                    │                                                 │
+│                    ▼                                                 │
+│  5. 驱动创建子设备 PDO (虚拟 NVMe 控制器)                           │
+│                    │                                                 │
+│                    ▼                                                 │
+│  6. Windows PnP 为 PDO 加载 stornvme.sys                            │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
 #### 1.1 总线管理
 
 ```c

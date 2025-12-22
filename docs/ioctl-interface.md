@@ -178,7 +178,166 @@ NTSTATUS VnvmeCreateControlDevice(
 
 #define IOCTL_VNVME_SET_DEBUG_LEVEL \
     CTL_CODE(FILE_DEVICE_VNVME, 0x841, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// ============ v2 架构: 用户态服务通信 ============
+
+// 共享内存映射 (用户态服务调用)
+#define IOCTL_VNVME_MAP_SHARED_MEMORY \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x850, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+
+// 通知内核用户态已就绪
+#define IOCTL_VNVME_USER_READY \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x851, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// 获取待处理命令事件句柄
+#define IOCTL_VNVME_GET_COMMAND_EVENT \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x852, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+// 提交完成条目
+#define IOCTL_VNVME_SUBMIT_COMPLETIONS \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x853, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// 用户态心跳
+#define IOCTL_VNVME_HEARTBEAT \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x854, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// 获取控制器配置
+#define IOCTL_VNVME_GET_CONTROLLER_CONFIG \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x855, METHOD_BUFFERED, FILE_READ_ACCESS)
 ```
+
+---
+
+## v2 用户态服务通信结构
+
+### 共享内存映射
+
+```c
+//
+// IOCTL_VNVME_MAP_SHARED_MEMORY 输入
+//
+typedef struct _VNVME_MAP_SHARED_MEMORY_IN {
+    ULONG ControllerIndex;          // 控制器索引
+} VNVME_MAP_SHARED_MEMORY_IN, *PVNVME_MAP_SHARED_MEMORY_IN;
+
+//
+// IOCTL_VNVME_MAP_SHARED_MEMORY 输出
+//
+typedef struct _VNVME_MAP_SHARED_MEMORY_OUT {
+    VNVME_IOCTL_RESULT Result;
+    
+    PVOID UserAddress;              // 映射到用户空间的地址
+    SIZE_T Size;                    // 共享内存总大小
+    
+    // 区域偏移 (相对于 UserAddress)
+    ULONG ControlBlockOffset;       // 控制块偏移
+    ULONG CommandRingOffset;        // 命令环偏移
+    ULONG CompletionRingOffset;     // 完成环偏移
+    ULONG DataBufferOffset;         // 数据缓冲区偏移
+    
+    // 区域大小
+    ULONG CommandRingSize;          // 命令环大小
+    ULONG CompletionRingSize;       // 完成环大小
+    ULONG DataBufferSize;           // 数据缓冲区大小
+    
+} VNVME_MAP_SHARED_MEMORY_OUT, *PVNVME_MAP_SHARED_MEMORY_OUT;
+
+//
+// IOCTL_VNVME_USER_READY 输入
+//
+typedef struct _VNVME_USER_READY_IN {
+    ULONG ControllerIndex;
+    ULONG UserPid;                  // 用户进程 PID (用于安全验证)
+} VNVME_USER_READY_IN, *PVNVME_USER_READY_IN;
+
+//
+// IOCTL_VNVME_GET_COMMAND_EVENT 输出
+//
+typedef struct _VNVME_GET_COMMAND_EVENT_OUT {
+    VNVME_IOCTL_RESULT Result;
+    HANDLE CommandReadyEvent;       // 用户态可等待的事件句柄
+    HANDLE ShutdownEvent;           // 关机事件句柄
+} VNVME_GET_COMMAND_EVENT_OUT, *PVNVME_GET_COMMAND_EVENT_OUT;
+
+//
+// IOCTL_VNVME_SUBMIT_COMPLETIONS 输入
+//
+typedef struct _VNVME_SUBMIT_COMPLETIONS_IN {
+    ULONG ControllerIndex;
+    ULONG CompletionCount;          // 完成条目数量
+    // 完成条目在共享内存的完成环中，内核直接读取
+} VNVME_SUBMIT_COMPLETIONS_IN, *PVNVME_SUBMIT_COMPLETIONS_IN;
+
+//
+// IOCTL_VNVME_HEARTBEAT 输入
+//
+typedef struct _VNVME_HEARTBEAT_IN {
+    ULONG ControllerIndex;
+    ULONG64 Timestamp;              // 用户态时间戳
+    ULONG64 CommandsProcessed;      // 已处理命令数
+} VNVME_HEARTBEAT_IN, *PVNVME_HEARTBEAT_IN;
+```
+
+### 共享内存控制块结构
+
+```c
+//
+// 共享内存控制块 (位于共享内存开头)
+// 内核和用户态都可以访问
+//
+typedef struct _VNVME_SHARED_CONTROL_BLOCK {
+    // 魔数和版本
+    ULONG Magic;                    // 0x454D564E ("VNME")
+    ULONG Version;                  // 结构版本
+    
+    // 状态
+    volatile LONG State;            // VNVME_SHARED_STATE_*
+    volatile LONG UserConnected;    // 用户态是否已连接
+    
+    // 心跳
+    volatile LONG64 KernelHeartbeat;  // 内核更新
+    volatile LONG64 UserHeartbeat;    // 用户态更新
+    
+    // 命令环 (内核写入，用户读取)
+    volatile ULONG CommandRingHead;   // 用户态读取位置
+    volatile ULONG CommandRingTail;   // 内核写入位置
+    ULONG CommandRingMask;            // Size - 1
+    ULONG CommandEntrySize;           // sizeof(VNVME_SHARED_COMMAND)
+    
+    // 完成环 (用户写入，内核读取)
+    volatile ULONG CompletionRingHead; // 内核读取位置
+    volatile ULONG CompletionRingTail; // 用户态写入位置
+    ULONG CompletionRingMask;
+    ULONG CompletionEntrySize;        // sizeof(VNVME_SHARED_COMPLETION)
+    
+    // 数据缓冲区
+    ULONG DataBufferBlockSize;        // 4096
+    ULONG DataBufferBlockCount;
+    volatile ULONG64 DataBufferBitmap[256]; // 位图 (支持 16K 块 = 64MB)
+    
+    // 统计
+    volatile ULONG64 TotalCommands;
+    volatile ULONG64 TotalCompletions;
+    volatile ULONG64 TotalBytesRead;
+    volatile ULONG64 TotalBytesWritten;
+    volatile ULONG64 TotalErrors;
+    
+    // 填充到 4KB
+    UCHAR Reserved[3584];
+    
+} VNVME_SHARED_CONTROL_BLOCK, *PVNVME_SHARED_CONTROL_BLOCK;
+
+C_ASSERT(sizeof(VNVME_SHARED_CONTROL_BLOCK) == 4096);
+
+// 共享内存状态
+#define VNVME_SHARED_STATE_INITIALIZING    0
+#define VNVME_SHARED_STATE_WAITING_USER    1
+#define VNVME_SHARED_STATE_RUNNING         2
+#define VNVME_SHARED_STATE_STOPPING        3
+#define VNVME_SHARED_STATE_ERROR           4
+```
+
+---
 
 ## 数据结构
 

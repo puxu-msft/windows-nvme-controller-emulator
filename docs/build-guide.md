@@ -54,50 +54,68 @@ Restart-Computer
 
 ## 项目结构
 
+> **注意**: v2 架构使用单一 `vnvme.sys` 内核驱动 + `vnvme-server.exe` 用户态服务
+
 ```
 virtual-nvme-driver/
 ├── src/
-│   ├── vnvme_bus/              # 虚拟 PCIe 总线驱动
-│   │   ├── vnvme_bus.c         # 主驱动入口
-│   │   ├── pnp.c               # PnP 处理
-│   │   ├── pdo.c               # PDO 管理
-│   │   ├── pcie_config.c       # PCIe 配置空间
-│   │   └── vnvme_bus.inf       # INF 文件
+│   ├── vnvme/                  # ★ 单一内核驱动 (v2 架构)
+│   │   ├── vnvme.c             # 主驱动入口
+│   │   ├── bus.c               # 总线管理、PDO 创建
+│   │   ├── pdo.c               # PDO PnP IRP 处理
+│   │   ├── pcie_config.c       # PCIe 配置空间仿真
+│   │   ├── bar0.c              # BAR0 内存分配和寄存器初始化
+│   │   ├── doorbell.c          # Doorbell 轮询引擎
+│   │   ├── queue.c             # Admin/IO 队列管理
+│   │   ├── prp.c               # PRP 解析和数据复制
+│   │   ├── shared_memory.c     # 共享内存分配和映射
+│   │   ├── user_comm.c         # 用户态通信 (IOCTL/事件)
+│   │   ├── control_device.c    # \\.\VNVMEControl 设备
+│   │   ├── trace.h             # WPP 跟踪宏
+│   │   ├── vnvme.h             # 主头文件
+│   │   └── vnvme.inf           # INF 文件
 │   │
-│   ├── vnvme_emu/              # NVMe 控制器仿真
-│   │   ├── vnvme_emu.c         # 主驱动入口
-│   │   ├── controller.c        # 控制器状态机
-│   │   ├── registers.c         # 寄存器 MMIO
-│   │   ├── doorbell.c          # 门铃处理
-│   │   ├── queue.c             # 队列管理
-│   │   ├── commands.c          # 命令处理
-│   │   ├── admin_cmds.c        # Admin 命令
-│   │   ├── io_cmds.c           # I/O 命令
-│   │   ├── msix.c              # MSI-X 中断
-│   │   ├── backend.c           # 后端抽象
+│   ├── vnvme-server/           # ★ 用户态服务 (v2 架构)
+│   │   ├── main.c              # 服务入口
+│   │   ├── driver_comm.c       # 与内核驱动通信
+│   │   ├── command_engine.c    # NVMe 命令处理引擎
+│   │   ├── admin_commands.c    # Admin 命令处理
+│   │   ├── io_commands.c       # I/O 命令处理
+│   │   ├── backend.h           # 后端接口
 │   │   ├── backend_memory.c    # 内存后端
 │   │   ├── backend_file.c      # 文件后端
-│   │   └── vnvme_emu.inf       # INF 文件
+│   │   ├── backend_vhd.c       # VHD 后端 (可选)
+│   │   ├── config.c            # 配置文件解析
+│   │   ├── logging.c           # 日志系统
+│   │   └── service.c           # Windows 服务包装
 │   │
 │   └── vnvmectl/               # 用户模式管理工具
-│       ├── main.c
-│       ├── commands.c
-│       └── vnvmelib.c
+│       ├── main.c              # CLI 入口
+│       ├── commands.c          # 命令实现
+│       └── vnvmelib.c          # 驱动通信库
 │
 ├── include/
-│   ├── vnvme_common.h          # 共享定义
-│   ├── vnvme_ioctl.h           # IOCTL 接口
+│   ├── vnvme_common.h          # 内核/用户态共享定义
+│   ├── vnvme_ioctl.h           # IOCTL 接口定义
+│   ├── vnvme_shared.h          # 共享内存结构定义
 │   └── nvme_spec.h             # NVMe 规范定义
 │
 ├── tests/
 │   ├── unit/                   # 单元测试
+│   │   ├── test_queue.c
+│   │   ├── test_prp.c
+│   │   └── test_backend.c
 │   └── functional/             # 功能测试
+│       ├── test_install.ps1
+│       ├── test_io.ps1
+│       └── test_stress.ps1
 │
 ├── docs/                       # 文档
 │
 └── scripts/
     ├── build.ps1               # 构建脚本
     ├── install.ps1             # 安装脚本
+    ├── uninstall.ps1           # 卸载脚本
     └── test.ps1                # 测试脚本
 ```
 
@@ -108,8 +126,8 @@ virtual-nvme-driver/
 1. 打开 Visual Studio
 2. 文件 → 新建 → 项目
 3. 选择 "Kernel Mode Driver, Empty (KMDF)"
-4. 设置项目名称为 `vnvme_bus`
-5. 重复步骤创建 `vnvme_emu` 项目
+4. 设置项目名称为 `vnvme`
+5. 添加一个控制台应用程序项目 `vnvme-server`
 6. 添加一个控制台应用程序项目 `vnvmectl`
 
 ### 方法 2: 使用项目文件模板
@@ -121,9 +139,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme_bus", "src\vnvme_bus\vnvme_bus.vcxproj", "{GUID-1}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme", "src\vnvme\vnvme.vcxproj", "{GUID-1}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme_emu", "src\vnvme_emu\vnvme_emu.vcxproj", "{GUID-2}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme-server", "src\vnvme-server\vnvme-server.vcxproj", "{GUID-2}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvmectl", "src\vnvmectl\vnvmectl.vcxproj", "{GUID-3}"
 EndProject
@@ -172,6 +190,169 @@ EndGlobal
 - Build Action: `Inf2Cat`
 - Driver Package: 启用
 - 签名: 测试签名或正式签名
+
+### INF 文件模板
+
+> **注意**: v2 架构使用单一 `vnvme.sys` 驱动，以下是完整的 INF 模板。
+
+**vnvme.inf** (主驱动 - 虚拟总线 + NVMe 控制器):
+
+```ini
+;
+; vnvme.inf - Virtual NVMe Controller Driver
+;
+; Copyright (c) 2025 Virtual NVMe Project
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = vnvme.cat
+DriverVer   = 12/23/2025,1.0.0.0
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir       = 13
+vnvme_Device_CoInstaller_CopyFiles = 11
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+vnvme.sys  = 1,,
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll = 1
+
+;*****************************************
+; vnvme 设备安装节
+;*****************************************
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
+
+[Standard.NT$ARCH$.10.0...19041]
+%vnvme.DeviceDesc% = vnvme_Device, ROOT\VNVME
+
+[vnvme_Device.NT]
+CopyFiles = Drivers_Dir
+
+[Drivers_Dir]
+vnvme.sys
+
+;-------------- Service 安装
+[vnvme_Device.NT.Services]
+AddService = vnvme,%SPSVCINST_ASSOCSERVICE%, vnvme_Service_Inst
+
+[vnvme_Service_Inst]
+DisplayName    = %vnvme.SVCDESC%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\vnvme.sys
+
+;-------------- WDF 共同安装程序
+[vnvme_Device.NT.CoInstallers]
+AddReg    = vnvme_Device_CoInstaller_AddReg
+CopyFiles = vnvme_Device_CoInstaller_CopyFiles
+
+[vnvme_Device_CoInstaller_AddReg]
+HKR,,CoInstallers32,0x00010000, "WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll,WdfCoInstaller"
+
+[vnvme_Device_CoInstaller_CopyFiles]
+WdfCoInstaller$KMDFCOINSTALLERVERSION$.dll
+
+[vnvme_Device.NT.Wdf]
+KmdfService = vnvme, vnvme_wdfsect
+
+[vnvme_wdfsect]
+KmdfLibraryVersion = $KMDFVERSION$
+
+;-------------- 字符串
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "Virtual NVMe Project"
+DiskName               = "Virtual NVMe Installation Disk"
+vnvme.DeviceDesc       = "Virtual NVMe Bus Controller"
+vnvme.SVCDESC          = "Virtual NVMe Driver"
+```
+
+**vnvme_child.inf** (子设备 - stornvme 加载目标):
+
+```ini
+;
+; vnvme_child.inf - Virtual NVMe Controller Child Device
+;
+; 此 INF 文件使 Windows 将 stornvme.sys 加载到我们的虚拟 NVMe 设备上
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = SCSIAdapter
+ClassGuid   = {4D36E97B-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = vnvme_child.cat
+DriverVer   = 12/23/2025,1.0.0.0
+PnpLockDown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...19041
+
+; 硬件 ID 必须匹配我们在 PDO 中报告的 ID
+[Standard.NT$ARCH$.10.0...19041]
+%vnvme_child.DeviceDesc% = vnvme_child_Device, PCI\VEN_1B36&DEV_0010&SUBSYS_00011B36&REV_02
+
+; 使用 stornvme.sys (Windows 原生 NVMe 驱动)
+[vnvme_child_Device.NT]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT
+
+[vnvme_child_Device.NT.HW]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT.HW
+
+[vnvme_child_Device.NT.Services]
+Include   = stornvme.inf
+Needs     = stornvme_Inst.NT.Services
+
+[Strings]
+ManufacturerName        = "Virtual NVMe Project"
+vnvme_child.DeviceDesc  = "Virtual NVMe SSD Controller"
+```
+
+### 安装根设备
+
+驱动安装后，需要手动创建根设备实例：
+
+```powershell
+# 方法 1: 使用 devcon (推荐用于开发测试)
+devcon install vnvme.inf ROOT\VNVME
+
+# 方法 2: 使用 pnputil (Windows 10+)
+pnputil /add-driver vnvme.inf /install
+
+# 然后手动添加根设备
+pnputil /add-device /instanceid ROOT\VNVME\0001 /deviceid ROOT\VNVME
+
+# 方法 3: 在驱动代码中使用 IoReportRootDevice (自动创建)
+# 见 architecture-v2.md 中的说明
+```
+
+### 验证安装
+
+```powershell
+# 检查驱动是否加载
+sc query vnvme
+
+# 检查设备管理器中的设备
+Get-PnpDevice | Where-Object { $_.FriendlyName -like "*VNVME*" }
+
+# 检查子设备是否被 stornvme 驱动
+Get-PnpDevice -Class SCSIAdapter | Where-Object { $_.FriendlyName -like "*NVMe*" }
+```
 
 ## 构建
 

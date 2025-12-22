@@ -504,6 +504,224 @@ NTSTATUS VnvmePdoQueryResourceRequirements(
 }
 ```
 
+### 资源分配报告
+
+```c
+//
+// 处理 IRP_MN_QUERY_RESOURCES
+// 返回设备当前使用的资源 (对于我们来说是 BAR0 物理地址)
+//
+NTSTATUS VnvmePdoQueryResources(
+    _In_ PCHILD_PDO_EXTENSION PdoExt,
+    _In_ PIRP Irp)
+{
+    PCM_RESOURCE_LIST resourceList;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR desc;
+    ULONG listSize;
+    
+    // 计算所需大小: 1 个内存资源 + 1 个中断资源
+    listSize = sizeof(CM_RESOURCE_LIST) + 
+               sizeof(CM_PARTIAL_RESOURCE_DESCRIPTOR);
+    
+    resourceList = ExAllocatePool2(POOL_FLAG_PAGED, listSize, 'RSRV');
+    if (!resourceList) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    RtlZeroMemory(resourceList, listSize);
+    
+    resourceList->Count = 1;
+    resourceList->List[0].InterfaceType = PCIBus;
+    resourceList->List[0].BusNumber = 0;
+    resourceList->List[0].PartialResourceList.Version = 1;
+    resourceList->List[0].PartialResourceList.Revision = 1;
+    resourceList->List[0].PartialResourceList.Count = 2;
+    
+    // BAR0 内存资源 - 关键: 报告我们分配的真实物理地址
+    desc = &resourceList->List[0].PartialResourceList.PartialDescriptors[0];
+    desc->Type = CmResourceTypeMemory;
+    desc->ShareDisposition = CmResourceShareDeviceExclusive;
+    desc->Flags = CM_RESOURCE_MEMORY_READ_WRITE;
+    desc->u.Memory.Start = PdoExt->Bar0PhysAddr;  // 真实物理地址!
+    desc->u.Memory.Length = (ULONG)PdoExt->Bar0Size;
+    
+    // 中断资源 (MSI-X 模式)
+    desc = &resourceList->List[0].PartialResourceList.PartialDescriptors[1];
+    desc->Type = CmResourceTypeInterrupt;
+    desc->ShareDisposition = CmResourceShareDeviceExclusive;
+    desc->Flags = CM_RESOURCE_INTERRUPT_LATCHED | 
+                  CM_RESOURCE_INTERRUPT_MESSAGE;
+    desc->u.Interrupt.Level = 0;
+    desc->u.Interrupt.Vector = 0;
+    desc->u.Interrupt.Affinity = (KAFFINITY)-1;
+    
+    Irp->IoStatus.Information = (ULONG_PTR)resourceList;
+    return STATUS_SUCCESS;
+}
+
+//
+// 处理 IRP_MN_START_DEVICE
+// stornvme.sys 会使用我们报告的资源来映射 BAR0
+//
+NTSTATUS VnvmePdoStartDevice(
+    _In_ PCHILD_PDO_EXTENSION PdoExt,
+    _In_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    PCM_RESOURCE_LIST allocatedResources = 
+        stack->Parameters.StartDevice.AllocatedResources;
+    
+    // 对于 PDO，我们不需要做太多处理
+    // stornvme 会使用 AllocatedResources 中的地址调用 MmMapIoSpace
+    // 我们的 BAR0 物理地址已经指向我们分配的真实内存
+    
+    if (allocatedResources) {
+        // 可选: 记录分配的资源用于调试
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR desc = 
+            &allocatedResources->List[0].PartialResourceList.PartialDescriptors[0];
+        
+        if (desc->Type == CmResourceTypeMemory) {
+            // 验证系统分配的地址与我们期望的一致
+            if (desc->u.Memory.Start.QuadPart != PdoExt->Bar0PhysAddr.QuadPart) {
+                // 警告: 地址不匹配，可能需要重新映射
+                // 这在使用真实物理内存时通常不会发生
+            }
+        }
+    }
+    
+    PdoExt->Started = TRUE;
+    return STATUS_SUCCESS;
+}
+```
+
+### PDO PnP IRP 分发
+
+```c
+//
+// PDO 的 PnP IRP 处理入口
+//
+NTSTATUS VnvmePdoPnp(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp)
+{
+    PCHILD_PDO_EXTENSION pdoExt = DeviceObject->DeviceExtension;
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS status;
+    
+    switch (stack->MinorFunction) {
+    
+    case IRP_MN_QUERY_ID:
+        status = VnvmePdoQueryId(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_QUERY_DEVICE_TEXT:
+        status = VnvmePdoQueryDeviceText(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_QUERY_RESOURCE_REQUIREMENTS:
+        status = VnvmePdoQueryResourceRequirements(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_QUERY_RESOURCES:
+        status = VnvmePdoQueryResources(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_START_DEVICE:
+        status = VnvmePdoStartDevice(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_STOP_DEVICE:
+        pdoExt->Started = FALSE;
+        status = STATUS_SUCCESS;
+        break;
+        
+    case IRP_MN_REMOVE_DEVICE:
+        pdoExt->Present = FALSE;
+        status = STATUS_SUCCESS;
+        break;
+        
+    case IRP_MN_QUERY_CAPABILITIES:
+        status = VnvmePdoQueryCapabilities(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_QUERY_BUS_INFORMATION:
+        status = VnvmePdoQueryBusInformation(pdoExt, Irp);
+        break;
+        
+    case IRP_MN_QUERY_INTERFACE:
+        // 处理 PCI 配置空间接口请求
+        status = VnvmePdoQueryInterface(pdoExt, Irp);
+        break;
+        
+    default:
+        status = Irp->IoStatus.Status;
+        break;
+    }
+    
+    Irp->IoStatus.Status = status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}
+
+//
+// 处理 IRP_MN_QUERY_CAPABILITIES
+// 声明设备能力 (热插拔、电源管理等)
+//
+NTSTATUS VnvmePdoQueryCapabilities(
+    _In_ PCHILD_PDO_EXTENSION PdoExt,
+    _In_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    PDEVICE_CAPABILITIES caps = stack->Parameters.DeviceCapabilities.Capabilities;
+    
+    // 基本能力
+    caps->Removable = FALSE;         // 不支持热拔
+    caps->EjectSupported = FALSE;
+    caps->UniqueID = TRUE;           // 实例 ID 是唯一的
+    caps->SilentInstall = TRUE;      // 静默安装
+    caps->RawDeviceOK = FALSE;       // 需要驱动
+    caps->SurpriseRemovalOK = FALSE;
+    
+    // 电源状态映射
+    caps->DeviceState[PowerSystemWorking] = PowerDeviceD0;
+    caps->DeviceState[PowerSystemSleeping1] = PowerDeviceD3;
+    caps->DeviceState[PowerSystemSleeping2] = PowerDeviceD3;
+    caps->DeviceState[PowerSystemSleeping3] = PowerDeviceD3;
+    caps->DeviceState[PowerSystemHibernate] = PowerDeviceD3;
+    caps->DeviceState[PowerSystemShutdown] = PowerDeviceD3;
+    
+    // 地址: 用于 PCI 设备的 Bus/Device/Function
+    caps->Address = PdoExt->ControllerId;
+    caps->UINumber = PdoExt->ControllerId;
+    
+    return STATUS_SUCCESS;
+}
+
+//
+// 处理 IRP_MN_QUERY_BUS_INFORMATION
+// 告诉上层驱动我们是 PCI 总线
+//
+NTSTATUS VnvmePdoQueryBusInformation(
+    _In_ PCHILD_PDO_EXTENSION PdoExt,
+    _In_ PIRP Irp)
+{
+    PPNP_BUS_INFORMATION busInfo;
+    
+    busInfo = ExAllocatePool2(POOL_FLAG_PAGED, sizeof(PNP_BUS_INFORMATION), 'IBSV');
+    if (!busInfo) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    // 声明为 PCI 总线 - 这让 stornvme.sys 认为我们是真正的 PCI 设备
+    busInfo->BusTypeGuid = GUID_BUS_TYPE_PCI;
+    busInfo->LegacyBusType = PCIBus;
+    busInfo->BusNumber = 0;
+    
+    Irp->IoStatus.Information = (ULONG_PTR)busInfo;
+    return STATUS_SUCCESS;
+}
+```
+
 ---
 
 ## INF 文件

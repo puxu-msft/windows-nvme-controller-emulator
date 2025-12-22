@@ -824,6 +824,235 @@ NTSTATUS VnvmeProcessFlush(
 }
 ```
 
+---
+
+## Admin 命令 (续)
+
+### Get Features (Opcode 0x0A) / Set Features (Opcode 0x09)
+
+stornvme.sys 初始化时会调用 Set Features 来配置 I/O 队列数量，这是必须支持的命令。
+
+```c
+// Feature Identifiers (FID)
+#define NVME_FEATURE_ARBITRATION           0x01
+#define NVME_FEATURE_POWER_MANAGEMENT      0x02
+#define NVME_FEATURE_LBA_RANGE_TYPE        0x03
+#define NVME_FEATURE_TEMPERATURE_THRESHOLD 0x04
+#define NVME_FEATURE_ERROR_RECOVERY        0x05
+#define NVME_FEATURE_VOLATILE_WRITE_CACHE  0x06
+#define NVME_FEATURE_NUMBER_OF_QUEUES      0x07   // ★ 关键
+#define NVME_FEATURE_INTERRUPT_COALESCING  0x08
+#define NVME_FEATURE_INTERRUPT_VECTOR_CONFIG 0x09
+#define NVME_FEATURE_WRITE_ATOMICITY       0x0A
+#define NVME_FEATURE_ASYNC_EVENT_CONFIG    0x0B
+
+typedef union _NVME_FEATURES_CDW10 {
+    struct {
+        ULONG FID   : 8;     // Feature Identifier
+        ULONG SEL   : 3;     // Select (Get Features only)
+        ULONG Rsvd  : 21;
+    };
+    ULONG AsUlong;
+} NVME_FEATURES_CDW10;
+
+//
+// Set Features 处理 (Opcode 0x09)
+//
+NTSTATUS VnvmeProcessSetFeatures(
+    _In_ PVNVME_CONTROLLER Controller,
+    _In_ PNVME_COMMAND Cmd,
+    _Out_ PNVME_COMPLETION Completion)
+{
+    NVME_FEATURES_CDW10 cdw10;
+    ULONG cdw11 = Cmd->CDW11;
+    
+    cdw10.AsUlong = Cmd->CDW10;
+    
+    switch (cdw10.FID) {
+    
+    case NVME_FEATURE_NUMBER_OF_QUEUES:
+        {
+            // CDW11: 请求的 I/O 队列数量
+            // Bits 15:0  = 请求的 I/O Submission Queue 数量 (0-based)
+            // Bits 31:16 = 请求的 I/O Completion Queue 数量 (0-based)
+            USHORT requestedSQ = (cdw11 & 0xFFFF);
+            USHORT requestedCQ = ((cdw11 >> 16) & 0xFFFF);
+            
+            // 限制在我们支持的最大值
+            USHORT allocatedSQ = min(requestedSQ, Controller->MaxIoQueues - 1);
+            USHORT allocatedCQ = min(requestedCQ, Controller->MaxIoQueues - 1);
+            
+            // 保存分配的队列数
+            Controller->AllocatedIoSqCount = allocatedSQ + 1;
+            Controller->AllocatedIoCqCount = allocatedCQ + 1;
+            
+            // 完成条目 DW0 返回实际分配的数量
+            Completion->DW0 = ((ULONG)allocatedCQ << 16) | allocatedSQ;
+            
+            VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        }
+        break;
+        
+    case NVME_FEATURE_VOLATILE_WRITE_CACHE:
+        {
+            // CDW11 Bit 0 = Volatile Write Cache Enable
+            Controller->WriteCache.Enabled = (cdw11 & 1) ? TRUE : FALSE;
+            VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        }
+        break;
+        
+    case NVME_FEATURE_ARBITRATION:
+    case NVME_FEATURE_POWER_MANAGEMENT:
+    case NVME_FEATURE_TEMPERATURE_THRESHOLD:
+    case NVME_FEATURE_ERROR_RECOVERY:
+    case NVME_FEATURE_INTERRUPT_COALESCING:
+    case NVME_FEATURE_INTERRUPT_VECTOR_CONFIG:
+    case NVME_FEATURE_WRITE_ATOMICITY:
+    case NVME_FEATURE_ASYNC_EVENT_CONFIG:
+        // 这些功能我们接受但不做实际处理
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        break;
+        
+    default:
+        // 不支持的功能
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC,
+                          NVME_SC_INVALID_FIELD, 1);
+        return STATUS_NOT_SUPPORTED;
+    }
+    
+    return STATUS_SUCCESS;
+}
+
+//
+// Get Features 处理 (Opcode 0x0A)
+//
+NTSTATUS VnvmeProcessGetFeatures(
+    _In_ PVNVME_CONTROLLER Controller,
+    _In_ PNVME_COMMAND Cmd,
+    _Out_ PNVME_COMPLETION Completion)
+{
+    NVME_FEATURES_CDW10 cdw10;
+    
+    cdw10.AsUlong = Cmd->CDW10;
+    
+    switch (cdw10.FID) {
+    
+    case NVME_FEATURE_NUMBER_OF_QUEUES:
+        {
+            // 返回已分配的队列数量
+            USHORT sqCount = Controller->AllocatedIoSqCount - 1;  // 0-based
+            USHORT cqCount = Controller->AllocatedIoCqCount - 1;
+            Completion->DW0 = ((ULONG)cqCount << 16) | sqCount;
+            VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        }
+        break;
+        
+    case NVME_FEATURE_VOLATILE_WRITE_CACHE:
+        Completion->DW0 = Controller->WriteCache.Enabled ? 1 : 0;
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        break;
+        
+    case NVME_FEATURE_ARBITRATION:
+        Completion->DW0 = 0;  // 默认仲裁
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        break;
+        
+    case NVME_FEATURE_POWER_MANAGEMENT:
+        Completion->DW0 = 0;  // 电源状态 0
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        break;
+        
+    case NVME_FEATURE_TEMPERATURE_THRESHOLD:
+        Completion->DW0 = 0;  // 默认阈值
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        break;
+        
+    default:
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC,
+                          NVME_SC_INVALID_FIELD, 1);
+        return STATUS_NOT_SUPPORTED;
+    }
+    
+    return STATUS_SUCCESS;
+}
+```
+
+### Admin 命令分发
+
+```c
+//
+// Admin 命令 Opcode 定义
+//
+#define NVME_ADMIN_OPC_DELETE_IO_SQ     0x00
+#define NVME_ADMIN_OPC_CREATE_IO_SQ     0x01
+#define NVME_ADMIN_OPC_GET_LOG_PAGE     0x02
+#define NVME_ADMIN_OPC_DELETE_IO_CQ     0x04
+#define NVME_ADMIN_OPC_CREATE_IO_CQ     0x05
+#define NVME_ADMIN_OPC_IDENTIFY         0x06
+#define NVME_ADMIN_OPC_ABORT            0x08
+#define NVME_ADMIN_OPC_SET_FEATURES     0x09
+#define NVME_ADMIN_OPC_GET_FEATURES     0x0A
+#define NVME_ADMIN_OPC_ASYNC_EVENT_REQ  0x0C
+#define NVME_ADMIN_OPC_NS_MANAGEMENT    0x0D
+#define NVME_ADMIN_OPC_FW_COMMIT        0x10
+#define NVME_ADMIN_OPC_FW_DOWNLOAD      0x11
+
+//
+// Admin 命令处理入口
+//
+NTSTATUS VnvmeProcessAdminCommand(
+    _In_ PVNVME_CONTROLLER Controller,
+    _In_ PNVME_COMMAND Cmd,
+    _Out_ PNVME_COMPLETION Completion)
+{
+    UCHAR opcode = (UCHAR)(Cmd->CDW0.OPC);
+    
+    switch (opcode) {
+    
+    case NVME_ADMIN_OPC_IDENTIFY:
+        return VnvmeProcessIdentify(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_CREATE_IO_CQ:
+        return VnvmeProcessCreateIoCq(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_CREATE_IO_SQ:
+        return VnvmeProcessCreateIoSq(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_DELETE_IO_SQ:
+        return VnvmeProcessDeleteIoSq(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_DELETE_IO_CQ:
+        return VnvmeProcessDeleteIoCq(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_SET_FEATURES:
+        return VnvmeProcessSetFeatures(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_GET_FEATURES:
+        return VnvmeProcessGetFeatures(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_GET_LOG_PAGE:
+        return VnvmeProcessGetLogPage(Controller, Cmd, Completion);
+        
+    case NVME_ADMIN_OPC_ABORT:
+        // Abort 命令 - 简单返回成功
+        Completion->DW0 = 0;  // Abort 未找到命令
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC, NVME_SC_SUCCESS, 0);
+        return STATUS_SUCCESS;
+        
+    case NVME_ADMIN_OPC_ASYNC_EVENT_REQ:
+        // 异步事件 - 排队等待，暂不完成
+        return VnvmeQueueAsyncEvent(Controller, Cmd);
+        
+    default:
+        VnvmeSetCompletion(Completion, NVME_SCT_GENERIC,
+                          NVME_SC_INVALID_OPCODE, 1);
+        return STATUS_NOT_SUPPORTED;
+    }
+}
+```
+
+---
+
 ### Dataset Management (TRIM, Opcode 0x09)
 
 ```c

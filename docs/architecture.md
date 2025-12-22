@@ -127,6 +127,90 @@ NVMe 协议专为 PCIe 直连 SSD 设计，其命令执行依赖以下**物理�
 
 ---
 
+## 对用户而言，我们是什么？
+
+### 设备呈现形式
+
+作为 StorPort Virtual Miniport，我们的设备在系统中呈现为 **SCSI 磁盘设备**，而非 NVMe 设备：
+
+```
+设备管理器中的显示:
+
+磁盘驱动器
+├── Samsung SSD 980 PRO 1TB          ← 真实 NVMe (由 stornvme.sys 驱动)
+├── WDC WD10EZEX-00WN4A0             ← 真实 SATA (由 storahci.sys 驱动)
+└── Virtual NVMe Disk                 ← 我们的设备 (由 vnvme.sys 驱动)
+                                         ↑
+                                         显示为普通磁盘，不是 NVMe 类别
+```
+
+### 用户视角对比
+
+| 方面 | 真实 NVMe 设备 | 我们的虚拟设备 |
+|------|---------------|---------------|
+| **设备管理器分类** | "NVMe Controller" 子项 | "磁盘驱动器" |
+| **驱动程序** | stornvme.sys (Microsoft) | vnvme.sys (我们) |
+| **硬件 ID** | `PCI\VEN_xxxx&DEV_xxxx` | `ROOT\VNVME` 或自定义 |
+| **NVMe-CLI 工具** | ✅ 可识别、可管理 | ❌ 不可识别 |
+| **Crystal Disk Info** | 显示 NVMe SMART | 显示通用信息或不支持 |
+| **Windows 磁盘管理** | ✅ 正常使用 | ✅ 正常使用 |
+| **格式化/分区** | ✅ 正常 | ✅ 正常 |
+| **ReadFile/WriteFile** | ✅ 正常 | ✅ 正常 |
+
+### 应用程序兼容性
+
+对于**普通应用程序**（文件读写），完全透明：
+
+```c
+// 应用程序代码 - 无需修改，真实/虚拟设备均可用
+HANDLE hFile = CreateFile(L"V:\\data.txt", ...);  // V: 是虚拟磁盘上的卷
+WriteFile(hFile, buffer, size, &written, NULL);   // 正常工作
+ReadFile(hFile, buffer, size, &read, NULL);       // 正常工作
+CloseHandle(hFile);
+```
+
+对于 **NVMe 专用工具**（如 nvme-cli、厂商工具），无法识别：
+
+```powershell
+# nvme-cli 只识别真实 NVMe 设备
+PS> nvme list
+Node             SN                   Model                  ...
+---------------- -------------------- ---------------------- ...
+/dev/nvme0       S5GXNZ0R123456       Samsung SSD 980 PRO    ...
+# 我们的虚拟设备不会出现在这里
+```
+
+### Windows 能帮我们模拟真实 NVMe 吗？
+
+**简短回答：不能**。Windows 本身不提供 NVMe 设备仿真框架。
+
+| 方案 | 可行性 | 说明 |
+|------|--------|------|
+| **Windows 原生** | ❌ 不支持 | 没有 "Virtual NVMe" 框架 |
+| **Hyper-V** | ⚠️ 有限 | 虚拟机内可见 NVMe，但宿主机看不到 |
+| **QEMU/KVM** | ✅ 可以 | 完整 NVMe 控制器仿真，但需要虚拟化环境 |
+| **SPDK vhost** | ✅ 可以 | 高性能 NVMe 仿真，需要特殊配置 |
+
+如果确实需要**真正的 NVMe 设备仿真**（让 nvme-cli 能识别），需要：
+
+1. **虚拟机方案**：在 Hyper-V/VMware 中将虚拟磁盘以 NVMe 控制器形式呈现给 Guest OS
+2. **自己实现 NVMe 控制器仿真**：极其复杂，需要仿真完整的 PCIe 设备
+
+### 那我们的价值是什么？
+
+| 价值 | 说明 |
+|------|------|
+| **通用存储虚拟化** | 99% 的应用场景不需要 "真正的 NVMe"，只需要高性能磁盘 |
+| **灵活后端** | 内存、文件、VHD、网络存储都可以作为后端 |
+| **高性能** | StorPort 250 队列深度，媲美真实 NVMe 性能 |
+| **企业功能** | MPIO、热插拔、动态调整大小 |
+| **开发测试** | 无需真实硬件即可测试存储相关功能 |
+| **特殊用途** | RAM Disk、加密磁盘、压缩磁盘、远程存储等 |
+
+> **总结**：我们的虚拟设备对普通应用程序**完全透明**，表现为高性能 SCSI 磁盘。只有 NVMe 专用管理工具无法识别我们，但这在绝大多数场景下不是问题。
+
+---
+
 ## StorPort Virtual Miniport 优势
 
 ### 为什么选择 StorPort Virtual Miniport？

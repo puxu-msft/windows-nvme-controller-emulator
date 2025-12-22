@@ -2,7 +2,12 @@
 
 ## 项目概述
 
-本项目实现一个 **Windows 软件 NVMe 控制器仿真器**，目标是在 Windows 宿主机上创建**真正的虚拟 NVMe 设备**，让 Windows 原生 NVMe 驱动 (stornvme.sys) 可以正常加载和使用。
+本项目实现一个 **Windows 软件 NVMe 控制器仿真器**，采用**混合用户态/内核态架构**，在 Windows 宿主机上创建**真正的虚拟 NVMe 设备**，让 Windows 原生 NVMe 驱动 (stornvme.sys) 可以正常加载和使用。
+
+> **📌 重要**: 本项目已采用 v2 混合架构设计。请优先阅读：
+> - [architecture-v2.md](architecture-v2.md) - 新的统一混合架构设计
+> - [core-mechanisms.md](core-mechanisms.md) - 核心机制详解 (Doorbell 轮询、共享内存、PRP 解析)
+> - [architecture-analysis.md](architecture-analysis.md) - 架构分析和问题修复记录
 
 ### 核心目标
 
@@ -11,8 +16,9 @@
 | **真实 NVMe 呈现** | 设备管理器中显示为 NVMe 控制器，而非普通 SCSI 磁盘 |
 | **原生驱动兼容** | 使用 Windows 自带的 stornvme.sys 驱动 |
 | **工具链支持** | nvme-cli、Crystal Disk Info 等工具可识别 |
-| **完整协议实现** | 支持 NVMe Admin/I/O 命令集 |
-| **灵活后端** | 支持内存、文件、VHD 等存储后端 |
+| **类 SPDK 架构** | 用户态处理业务逻辑，内核态仅处理必要的硬件接口 |
+| **开发友好** | 用户态代码易于调试，崩溃不导致蓝屏 |
+| **灵活后端** | 支持内存、文件、VHD、网络等存储后端 |
 
 ### 最终效果
 
@@ -40,79 +46,85 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 
 ---
 
-## 技术架构
+## 技术架构 (v2 混合模式)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        用户态                                    │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────┐ │
-│  │  应用程序      │  │  vnvmectl.exe  │  │  nvme-cli         │ │
-│  │  (文件 I/O)    │  │  (管理工具)    │  │  (NVMe 管理)      │ │
-│  └────────────────┘  └────────────────┘  └────────────────────┘ │
-└───────────────────────────┬─────────────────────────────────────┘
-                            │
-┌───────────────────────────┼─────────────────────────────────────┐
-│                        内核态                                    │
-│                           │                                      │
-│  ┌────────────────────────▼────────────────────────────────┐    │
-│  │              Windows 存储栈                              │    │
-│  │  NTFS → volmgr → partmgr → disk.sys                     │    │
-│  └────────────────────────┬────────────────────────────────┘    │
-│                           │                                      │
-│  ┌────────────────────────▼────────────────────────────────┐    │
-│  │           stornvme.sys (Windows 原生 NVMe 驱动)          │    │
-│  │           • 发送 NVMe 命令                               │    │
-│  │           • 管理 Submission/Completion Queue             │    │
-│  └────────────────────────┬────────────────────────────────┘    │
-│                           │ NVMe 寄存器访问                      │
-│                           ▼                                      │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │        ★ vnvme_emu.sys (NVMe 控制器仿真) ★              │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌────────────────┐   │    │
-│  │  │ 寄存器仿真  │  │ Queue 引擎  │  │ NVMe 命令处理  │   │    │
-│  │  └─────────────┘  └─────────────┘  └────────────────┘   │    │
-│  └────────────────────────┬────────────────────────────────┘    │
-│                           │                                      │
-│  ┌────────────────────────▼────────────────────────────────┐    │
-│  │          vnvme_bus.sys (虚拟 PCIe 总线)                  │    │
-│  │          • 枚举虚拟 NVMe 控制器                          │    │
-│  │          • PCIe 配置空间仿真                             │    │
-│  │          • BAR 内存映射                                  │    │
-│  └─────────────────────────────────────────────────────────┘    │
 │                                                                  │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                   vnvme-server.exe                          ││
+│  │                                                             ││
+│  │   ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌─────────┐ ││
+│  │   │ 命令引擎  │  │ 后端存储  │  │ 管理接口  │  │ 监控/   │ ││
+│  │   │ Admin/IO  │  │ Mem/File  │  │ REST/CLI  │  │ 日志    │ ││
+│  │   └───────────┘  └───────────┘  └───────────┘  └─────────┘ ││
+│  │                          │                                  ││
+│  │   共享内存: [控制块│命令环│完成环│数据缓冲池]               ││
+│  │                          │                                  ││
+│  └──────────────────────────│──────────────────────────────────┘│
+│                             │ IOCTL / 事件                       │
+├─────────────────────────────│───────────────────────────────────┤
+│                        内核态                                    │
+│                             │                                    │
+│  ┌──────────────────────────▼──────────────────────────────────┐│
+│  │                      vnvme.sys                               ││
+│  │   ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  ││
+│  │   │ 总线管理     │  │ BAR0 仿真    │  │ Doorbell 轮询    │  ││
+│  │   │ PCIe 枚举    │  │ 真实物理内存 │  │ 高精度定时器     │  ││
+│  │   └──────────────┘  └──────────────┘  └──────────────────┘  ││
+│  │   ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  ││
+│  │   │ PRP 解析     │  │ 共享内存     │  │ 完成处理         │  ││
+│  │   │ 数据复制     │  │ 环形缓冲区   │  │ Phase Tag        │  ││
+│  │   └──────────────┘  └──────────────┘  └──────────────────┘  ││
+│  └──────────────────────────────────────────────────────────────┘│
+│                             │                                    │
+│  ┌──────────────────────────▼──────────────────────────────────┐│
+│  │   stornvme.sys (Windows 原生 NVMe 驱动)                      ││
+│  └──────────────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    存储后端                                      │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                   │
-│  │  Memory  │    │   File   │    │   VHD    │                   │
-│  │ (RAM)    │    │ (本地)   │    │ (虚拟盘) │                   │
-│  └──────────┘    └──────────┘    └──────────┘                   │
-└─────────────────────────────────────────────────────────────────┘
 ```
+
+### 核心设计决策
+
+| 决策 | 说明 |
+|------|------|
+| **单一内核驱动** | 合并 bus 和 emu 功能到 vnvme.sys |
+| **真实内存 BAR0** | 不使用 MMIO 拦截，提供真实物理内存 |
+| **Doorbell 轮询** | 高频定时器检测 stornvme 的命令提交 |
+| **用户态命令处理** | 所有业务逻辑在用户态 vnvme-server.exe |
+| **共享缓冲区** | 预分配大缓冲区用于内核/用户态数据传输 |
 
 ---
 
 ## 文档结构
 
-### 核心设计文档
+### 📌 核心设计文档 (v2 - 请优先阅读)
 
 | 文档 | 说明 |
 |------|------|
-| [architecture.md](architecture.md) | 系统架构设计，技术方案选择 |
-| [pcie-emulation.md](pcie-emulation.md) | 虚拟 PCIe 总线和配置空间仿真 |
-| [nvme-controller.md](nvme-controller.md) | NVMe 控制器仿真，寄存器实现 |
-| [nvme-commands.md](nvme-commands.md) | NVMe Admin/I/O 命令处理 |
-| [queue-engine.md](queue-engine.md) | Submission/Completion Queue 引擎 |
+| [architecture-v2.md](architecture-v2.md) | **统一混合架构设计** - 内核/用户态分工 |
+| [core-mechanisms.md](core-mechanisms.md) | **核心机制详解** - 轮询、共享内存、PRP、数据路径 |
+| [architecture-analysis.md](architecture-analysis.md) | 架构分析和问题修复记录 |
 
-### 实现文档
+### 参考文档 (部分内容可能需要结合 v2 理解)
+
+| 文档 | 说明 | 状态 |
+|------|------|------|
+| [architecture.md](architecture.md) | 原全内核态设计 | ⚠️ 已被 v2 取代 |
+| [pcie-emulation.md](pcie-emulation.md) | PCIe 配置空间仿真 | ✅ 仍然适用 |
+| [nvme-controller.md](nvme-controller.md) | NVMe 寄存器定义 | ✅ 仍然适用 |
+| [nvme-commands.md](nvme-commands.md) | NVMe 命令格式 | ✅ 仍然适用 |
+| [queue-engine.md](queue-engine.md) | SQ/CQ 机制 | ✅ 仍然适用 |
+| [user-mode-architecture.md](user-mode-architecture.md) | 用户态分析 | ⚠️ 已整合到 v2 |
+
+### 实现参考
 
 | 文档 | 说明 |
 |------|------|
 | [data-structures.md](data-structures.md) | 核心数据结构定义 |
 | [backend-storage.md](backend-storage.md) | 存储后端实现 |
-| [interrupt-emulation.md](interrupt-emulation.md) | MSI-X 中断仿真 |
+| [interrupt-emulation.md](interrupt-emulation.md) | 中断机制参考 |
 | [ioctl-interface.md](ioctl-interface.md) | 用户态管理接口 |
 
 ### 开发运维文档
@@ -155,12 +167,14 @@ msbuild vnvme.sln /p:Configuration=Release /p:Platform=x64
 bcdedit /set testsigning on
 # 重启
 
-# 安装驱动
-pnputil /add-driver vnvme_bus.inf /install
-pnputil /add-driver vnvme_emu.inf /install
+# 安装内核驱动
+pnputil /add-driver vnvme.inf /install
+
+# 启动用户态服务
+vnvme-server.exe --config vnvme.conf
 
 # 创建虚拟 NVMe 设备
-vnvmectl create --size 100GB --backend memory
+vnvmectl create --size 100GB --backend file --path C:\vnvme\disk.img
 ```
 
 ### 验证
@@ -180,55 +194,56 @@ Get-PhysicalDisk | Where-Object BusType -eq "NVMe"
 
 ---
 
-## 与普通虚拟磁盘的区别
+## 与其他方案的对比
 
-| 方面 | 普通虚拟磁盘 (StorPort) | 本项目 (NVMe 仿真) |
-|------|------------------------|-------------------|
-| **Windows 识别** | SCSI 磁盘 | NVMe 控制器 + 命名空间 |
-| **驱动** | 自定义 miniport | Windows 原生 stornvme.sys |
-| **nvme-cli** | ❌ 不可用 | ✅ 完全支持 |
-| **SMART 信息** | 通用或无 | NVMe 原生日志页 |
-| **设备管理器** | 磁盘驱动器 | 存储控制器 (NVMe) |
-| **BusType** | SAS/RAID | NVMe |
-| **协议** | SCSI/SRB | NVMe 命令 |
-| **复杂度** | 中等 | 高 |
+| 方面 | StorPort Virtual Miniport | 本项目 (NVMe 仿真) | SPDK |
+|------|---------------------------|-------------------|------|
+| **设备呈现** | SCSI 磁盘 | NVMe 控制器 | 用户态直接访问 |
+| **驱动** | 自定义 miniport | stornvme.sys | 无内核驱动 |
+| **nvme-cli** | ❌ 不支持 | ✅ 完全支持 | ✅ 需要改造 |
+| **用户态灵活性** | ❌ 全内核 | ✅ 类 SPDK | ✅ 完全用户态 |
+| **与内核栈兼容** | ✅ 是 | ✅ 是 | ❌ 否 |
+| **开发难度** | 中等 | 中高 | 高 |
 
 ---
 
-## 项目组成
+## 项目组成 (v2 混合架构)
 
 ```
 virtual-nvme-driver/
-├── vnvme_bus/              # 虚拟 PCIe 总线驱动
-│   ├── vnvme_bus.c         # 总线驱动主文件
-│   ├── pcie_config.c       # PCIe 配置空间仿真
-│   ├── pnp.c               # PnP 处理
-│   └── vnvme_bus.inf       # 安装文件
+├── vnvme/                  # 内核驱动 (单一驱动)
+│   ├── vnvme.c             # 驱动入口
+│   ├── bus.c               # 总线管理模块
+│   ├── bar0.c              # BAR0 内存管理
+│   ├── poll.c              # Doorbell 轮询引擎
+│   ├── prp.c               # PRP 解析
+│   ├── shared_mem.c        # 共享内存管理
+│   ├── completion.c        # 完成处理
+│   └── vnvme.inf           # 安装文件
 │
-├── vnvme_emu/              # NVMe 控制器仿真驱动
-│   ├── vnvme_emu.c         # 仿真驱动主文件
-│   ├── nvme_regs.c         # NVMe 寄存器仿真
-│   ├── nvme_admin.c        # Admin 命令处理
-│   ├── nvme_io.c           # I/O 命令处理
-│   ├── queue_engine.c      # SQ/CQ 引擎
-│   ├── interrupt.c         # 中断仿真
-│   └── vnvme_emu.inf       # 安装文件
+├── vnvme-server/           # 用户态服务
+│   ├── main.c              # 服务入口
+│   ├── command_engine.c    # 命令处理引擎
+│   ├── admin_cmds.c        # Admin 命令实现
+│   ├── io_cmds.c           # I/O 命令实现
+│   └── backend/            # 存储后端
+│       ├── backend.c       # 后端抽象
+│       ├── memory.c        # 内存后端
+│       ├── file.c          # 文件后端
+│       └── vhd.c           # VHD 后端
 │
-├── vnvme_backend/          # 存储后端
-│   ├── backend.c           # 后端抽象层
-│   ├── memory_backend.c    # 内存后端
-│   ├── file_backend.c      # 文件后端
-│   └── vhd_backend.c       # VHD 后端
-│
-├── vnvmectl/               # 用户态管理工具
-│   ├── vnvmectl.c          # 命令行工具
-│   └── vnvmectl.exe        # 编译产物
+├── vnvmectl/               # 命令行管理工具
+│   └── vnvmectl.c          # 主程序
 │
 ├── docs/                   # 文档
-│   └── ...
+│   ├── README.md           # 本文件
+│   ├── architecture-v2.md  # ★ 混合架构设计
+│   ├── core-mechanisms.md  # ★ 核心机制详解
+│   └── ...                 # 其他文档
 │
 └── tests/                  # 测试
-    └── ...
+    ├── unit/               # 单元测试
+    └── integration/        # 集成测试
 ```
 
 ---

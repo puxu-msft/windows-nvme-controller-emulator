@@ -365,6 +365,355 @@ verifier /reset
 
 ---
 
+## 内存泄漏检测
+
+### 使用 Pool Tagging
+
+所有内存分配都应使用唯一的 Pool Tag，便于追踪：
+
+```c
+// 定义 Pool Tags
+#define VNVME_TAG_GENERAL   'mvnV'  // Vnvm - 通用分配
+#define VNVME_TAG_QUEUE     'qvnV'  // Vnvq - 队列
+#define VNVME_TAG_BACKEND   'bvnV'  // Vnvb - 后端
+#define VNVME_TAG_IO        'ivnV'  // Vnvi - I/O 上下文
+#define VNVME_TAG_BUFFER    'fvnV'  // Vnvf - 数据缓冲区
+
+// 分配内存
+PVOID AllocateWithTag(SIZE_T Size, ULONG Tag) {
+    return ExAllocatePoolWithTag(NonPagedPoolNx, Size, Tag);
+}
+
+// 释放内存
+VOID FreeWithTag(PVOID Ptr, ULONG Tag) {
+    if (Ptr) {
+        ExFreePoolWithTag(Ptr, Tag);
+    }
+}
+```
+
+### 启用 Pool Tracking
+
+```powershell
+# 启用全局 Pool Tagging
+reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" `
+    /v PoolTag /t REG_DWORD /d 1 /f
+
+# 重启生效
+Restart-Computer
+
+# 或启用 Driver Verifier Pool Tracking
+verifier /flags 0x8 /driver vnvme.sys
+```
+
+### 检查内存泄漏
+
+**方法 1: poolmon 工具**
+```powershell
+# 启动 poolmon (WDK 工具)
+poolmon -b  # 按字节排序
+
+# 查找我们的 Tag (Vnvm, Vnvq, 等)
+# 观察 Allocs 和 Frees 列
+# 如果 Allocs >> Frees，可能有泄漏
+```
+
+**方法 2: WinDbg !poolused**
+```windbg
+# 查看所有池使用情况
+!poolused 2
+
+# 按 Tag 搜索
+!poolused 4 Vnvm
+
+# 输出示例:
+# Tag    Allocs  Frees   Diff   Bytes
+# Vnvm      100     95      5   5120  ← 可能泄漏
+```
+
+**方法 3: !poolfind 定位泄漏**
+```windbg
+# 查找特定 Tag 的所有分配
+!poolfind Vnvm
+
+# 对每个地址检查内容
+dt vnvme!DEVICE_CONTEXT <address>
+```
+
+### 常见泄漏模式
+
+```c
+// 泄漏模式 1: 错误路径未释放
+NTSTATUS Function() {
+    PVOID ptr = AllocateWithTag(size, VNVME_TAG_GENERAL);
+    if (!ptr) return STATUS_INSUFFICIENT_RESOURCES;
+    
+    status = DoSomething();
+    if (!NT_SUCCESS(status)) {
+        return status;  // 错误! ptr 未释放
+    }
+    
+    // 正确做法:
+    if (!NT_SUCCESS(status)) {
+        FreeWithTag(ptr, VNVME_TAG_GENERAL);
+        return status;
+    }
+    
+    FreeWithTag(ptr, VNVME_TAG_GENERAL);
+    return STATUS_SUCCESS;
+}
+
+// 泄漏模式 2: 对象销毁时未清理
+VOID DestroyDevice(PDEVICE_CONTEXT ctx) {
+    // 错误: 忘记释放某些成员
+    FreeWithTag(ctx->Buffer1, VNVME_TAG_BUFFER);
+    // ctx->Buffer2 忘记释放了!
+    
+    // 正确做法: 释放所有分配
+    FreeWithTag(ctx->Buffer1, VNVME_TAG_BUFFER);
+    FreeWithTag(ctx->Buffer2, VNVME_TAG_BUFFER);
+}
+
+// 泄漏模式 3: 循环中分配未释放
+VOID ProcessCommands(PDEVICE_CONTEXT ctx) {
+    while (HasPendingCommands(ctx)) {
+        PIO_CONTEXT ioCtx = AllocateIoContext();  // 每次循环分配
+        ProcessCommand(ioCtx);
+        // 错误: 忘记释放 ioCtx!
+        
+        // 正确: 使用完后释放
+        FreeIoContext(ioCtx);
+    }
+}
+```
+
+### 使用 Lookaside List 避免泄漏
+
+Lookaside List 提供自动管理的内存池：
+
+```c
+// 定义 Lookaside List
+LOOKASIDE_LIST_EX g_IoContextLookaside;
+
+// 初始化 (在 DriverEntry)
+NTSTATUS InitLookaside() {
+    return ExInitializeLookasideListEx(
+        &g_IoContextLookaside,
+        NULL,                       // 自定义分配函数 (NULL = 默认)
+        NULL,                       // 自定义释放函数
+        NonPagedPoolNx,
+        0,
+        sizeof(IO_CONTEXT),
+        VNVME_TAG_IO,
+        0                           // 深度 (0 = 自动)
+    );
+}
+
+// 分配
+PIO_CONTEXT AllocIoContext() {
+    return ExAllocateFromLookasideListEx(&g_IoContextLookaside);
+}
+
+// 释放 (实际上返回到池中)
+VOID FreeIoContext(PIO_CONTEXT ctx) {
+    ExFreeToLookasideListEx(&g_IoContextLookaside, ctx);
+}
+
+// 清理 (在 DriverUnload)
+VOID CleanupLookaside() {
+    ExDeleteLookasideListEx(&g_IoContextLookaside);
+}
+```
+
+### 内存泄漏调试检查清单
+
+1. **DriverEntry 失败路径**
+   - [ ] 所有分配都在失败时释放
+
+2. **EvtDeviceAdd 失败路径**
+   - [ ] 创建的对象在失败时销毁
+
+3. **请求处理**
+   - [ ] 每个请求的临时分配都已释放
+   - [ ] 取消的请求也正确清理
+
+4. **设备移除**
+   - [ ] EvtCleanupCallback 释放所有资源
+   - [ ] WDF 对象层次正确 (子对象自动清理)
+
+5. **错误处理**
+   - [ ] 所有 goto cleanup 路径正确清理
+   - [ ] 嵌套分配在内层失败时清理外层
+
+---
+
+## 死锁调试
+
+### 常见死锁模式
+
+**模式 1: 锁顺序不一致**
+```c
+// 线程 A:
+AcquireLock(&Lock1);
+AcquireLock(&Lock2);  // 等待 Lock2
+
+// 线程 B:
+AcquireLock(&Lock2);
+AcquireLock(&Lock1);  // 等待 Lock1 → 死锁!
+
+// 解决: 始终按相同顺序获取锁
+// 例如: 总是先 Lock1 后 Lock2
+```
+
+**模式 2: 持有自旋锁调用阻塞函数**
+```c
+// 错误
+KeAcquireSpinLock(&SpinLock, &OldIrql);
+ZwReadFile(...);  // 阻塞! 可能死锁
+KeReleaseSpinLock(&SpinLock, OldIrql);
+
+// 正确: 在持有自旋锁时只做快速操作
+KeAcquireSpinLock(&SpinLock, &OldIrql);
+CopyDataToLocalBuffer();  // 快速操作
+KeReleaseSpinLock(&SpinLock, OldIrql);
+ZwReadFile(...);  // 锁外调用
+```
+
+**模式 3: 递归锁获取**
+```c
+// 某些锁不支持递归
+AcquireLock(&Lock);
+CallFunction();  // 内部又尝试获取 Lock → 死锁!
+ReleaseLock(&Lock);
+
+// 解决: 使用递归锁或重构代码
+```
+
+### 启用死锁检测
+
+```powershell
+# Driver Verifier 死锁检测
+verifier /flags 0x20 /driver vnvme.sys
+
+# 标志:
+# 0x20 = 死锁检测 (Deadlock Detection)
+```
+
+### WinDbg 死锁分析
+
+**检测死锁**
+```windbg
+# 查看所有锁
+!locks
+
+# 如果系统挂起，查看等待链
+!process 0 17  # 列出所有进程和线程
+
+# 查看特定线程的等待
+!thread <thread_address>
+
+# 查看持有的资源
+!kdexts.locks -v
+```
+
+**分析等待链**
+```windbg
+# 查看 WDF 自旋锁
+!wdfkd.wdfspinlock <handle>
+
+# 查看 WDF 等待锁
+!wdfkd.wdfwaitlock <handle>
+
+# 分析线程栈
+~*k  # 所有线程调用栈
+```
+
+### 死锁预防代码模式
+
+**使用锁层次结构**
+```c
+// 定义锁层次 (数字越小越先获取)
+typedef enum _LOCK_LEVEL {
+    LOCK_LEVEL_CONTROLLER = 1,  // 最先获取
+    LOCK_LEVEL_QUEUE = 2,
+    LOCK_LEVEL_IO = 3,          // 最后获取
+} LOCK_LEVEL;
+
+// 调试版本验证锁顺序
+#ifdef DEBUG
+ULONG g_CurrentLockLevel = 0;
+
+VOID AcquireOrderedLock(PKSPIN_LOCK Lock, LOCK_LEVEL Level, PKIRQL OldIrql) {
+    ASSERT(Level > g_CurrentLockLevel);  // 验证顺序
+    KeAcquireSpinLock(Lock, OldIrql);
+    g_CurrentLockLevel = Level;
+}
+
+VOID ReleaseOrderedLock(PKSPIN_LOCK Lock, LOCK_LEVEL Level, KIRQL OldIrql) {
+    ASSERT(Level == g_CurrentLockLevel);
+    g_CurrentLockLevel = Level - 1;
+    KeReleaseSpinLock(Lock, OldIrql);
+}
+#endif
+```
+
+**使用超时避免永久阻塞**
+```c
+NTSTATUS WaitWithTimeout(PKEVENT Event, ULONG TimeoutMs) {
+    LARGE_INTEGER timeout;
+    timeout.QuadPart = -(LONGLONG)TimeoutMs * 10000;  // 相对时间
+    
+    NTSTATUS status = KeWaitForSingleObject(
+        Event,
+        Executive,
+        KernelMode,
+        FALSE,
+        &timeout
+    );
+    
+    if (status == STATUS_TIMEOUT) {
+        // 记录警告 - 可能有死锁
+        DbgPrint("WARNING: Wait timed out, possible deadlock\n");
+    }
+    
+    return status;
+}
+```
+
+**使用 TryAcquire 避免阻塞**
+```c
+BOOLEAN TryAcquireWithBackoff(PKSPIN_LOCK Lock, PKIRQL OldIrql) {
+    for (int retry = 0; retry < 3; retry++) {
+        if (KeTryToAcquireSpinLockAtDpcLevel(Lock)) {
+            return TRUE;
+        }
+        // 短暂延迟后重试
+        KeStallExecutionProcessor(10);  // 10 微秒
+    }
+    return FALSE;
+}
+```
+
+### 死锁调试检查清单
+
+1. **锁顺序**
+   - [ ] 文档化所有锁及其获取顺序
+   - [ ] 代码审查验证顺序一致
+
+2. **IRQL 约束**
+   - [ ] 自旋锁持有时不调用阻塞函数
+   - [ ] 使用 SAL 注释 `_IRQL_requires_max_`
+
+3. **超时机制**
+   - [ ] 所有等待操作有合理超时
+   - [ ] 超时后有恢复或报告机制
+
+4. **资源获取**
+   - [ ] 避免嵌套锁 (如必须，遵循严格顺序)
+   - [ ] 考虑使用无锁算法
+
+---
+
 ## 获取帮助
 
 如果以上方法无法解决问题:

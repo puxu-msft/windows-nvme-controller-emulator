@@ -142,6 +142,33 @@ CDW15        = ELBAT/ELBATM (期望逻辑块应用标签)
 | 0x1000+ | 4 | SQnTDBL | 提交队列 n 尾部门铃 |
 | 0x1000+ | 4 | CQnHDBL | 完成队列 n 头部门铃 |
 
+### Doorbell 寄存器计算公式
+
+门铃寄存器地址根据队列 ID 计算，公式如下：
+
+```
+SQyTDBL (Submission Queue y Tail Doorbell):
+    Offset = 0x1000 + (2y × (4 << CAP.DSTRD))
+
+CQyHDBL (Completion Queue y Head Doorbell):
+    Offset = 0x1000 + ((2y + 1) × (4 << CAP.DSTRD))
+```
+
+其中:
+- `y` = 队列 ID (0 = Admin Queue, ≥1 = I/O Queue)
+- `CAP.DSTRD` = 门铃跨度 (Doorbell Stride)
+- 当 `CAP.DSTRD = 0` 时，跨度为 4 字节
+
+**示例 (DSTRD = 0)**:
+| 队列 | 寄存器 | 偏移计算 | 偏移值 |
+|------|--------|----------|--------|
+| Admin SQ (y=0) | SQ0TDBL | 0x1000 + (0 × 4) | 0x1000 |
+| Admin CQ (y=0) | CQ0HDBL | 0x1000 + (1 × 4) | 0x1004 |
+| I/O SQ 1 (y=1) | SQ1TDBL | 0x1000 + (2 × 4) | 0x1008 |
+| I/O CQ 1 (y=1) | CQ1HDBL | 0x1000 + (3 × 4) | 0x100C |
+| I/O SQ 2 (y=2) | SQ2TDBL | 0x1000 + (4 × 4) | 0x1010 |
+| I/O CQ 2 (y=2) | CQ2HDBL | 0x1000 + (5 × 4) | 0x1014 |
+
 ### CAP 寄存器位定义 (64-bit)
 ```
 Bits    Field    Description
@@ -182,4 +209,167 @@ Bits    Field    Description
 3:2     SHST     关机状态 (00=正常, 01=进行中, 10=完成)
 1       CFS      控制器致命状态
 0       RDY      就绪 (控制器准备好处理命令)
+```
+
+## Features ID 列表
+
+Features 是控制器/命名空间的可配置属性，通过 Get Features (0x0A) 和 Set Features (0x09) 命令访问。
+
+### Mandatory Features (必须实现)
+
+| Feature ID | 名称 | 说明 | CDW11 参数 |
+|------------|------|------|------------|
+| 0x01 | Arbitration | 仲裁机制设置 | HPW[31:24], MPW[23:16], LPW[15:8], AB[2:0] |
+| 0x02 | Power Management | 电源管理 | PS[4:0] 电源状态 |
+| 0x04 | Temperature Threshold | 温度阈值 | TMPTH[15:0], TMPSEL[19:16], THSEL[21:20] |
+| 0x05 | Error Recovery | 错误恢复 | TLER[15:0], DULBE[16] |
+| 0x06 | Volatile Write Cache | 易失性写缓存 | WCE[0] 写缓存启用 |
+| 0x07 | Number of Queues | 队列数量 | NCQR[31:16], NSQR[15:0] |
+| 0x08 | Interrupt Coalescing | 中断合并 | TIME[15:8], THR[7:0] |
+| 0x09 | Interrupt Vector Config | 中断向量配置 | IV[15:0], CD[16] |
+| 0x0A | Write Atomicity Normal | 正常写原子性 | DN[0] |
+| 0x0B | Async Event Config | 异步事件配置 | 事件掩码位 |
+
+### Optional Features (可选实现)
+
+| Feature ID | 名称 | 说明 |
+|------------|------|------|
+| 0x03 | LBA Range Type | LBA 范围类型 (已废弃) |
+| 0x0C | Autonomous Power State Transition | 自主电源状态转换 |
+| 0x0D | Host Memory Buffer | 主机内存缓冲区 |
+| 0x0E | Timestamp | 时间戳 |
+| 0x0F | Keep Alive Timer | 保持活动定时器 |
+| 0x10 | Host Controlled Thermal Management | 主机控制的热管理 |
+| 0x11 | Non-Operational Power State Config | 非操作电源状态配置 |
+
+## Get Log Page 参数
+
+Get Log Page (Opcode 0x02) 命令用于获取控制器维护的各种日志。
+
+### 命令 CDW10-CDW13 参数
+```
+CDW10:
+    [7:0]   LID    - Log Page Identifier
+    [14:8]  LSP    - Log Specific Parameter
+    [15]    RAE    - Retain Async Event
+    [27:16] NUMDL  - Number of Dwords Lower (0's based)
+CDW11:
+    [15:0]  NUMDU  - Number of Dwords Upper
+CDW12:
+    [31:0]  LPOL   - Log Page Offset Lower
+CDW13:
+    [31:0]  LPOU   - Log Page Offset Upper
+```
+
+### 必须支持的日志页
+
+| LID | 名称 | 大小 | 说明 |
+|-----|------|------|------|
+| 0x01 | Error Information | 64 × n | 错误信息日志 (每条目 64 字节) |
+| 0x02 | SMART / Health Information | 512 | SMART 健康信息 |
+| 0x03 | Firmware Slot Information | 512 | 固件槽位信息 |
+
+### SMART / Health Information 日志 (LID = 0x02)
+
+```
+Offset  Size  Field                      Description
+0x00    1     Critical Warning           临界警告标志
+                                           [0] 可用备用空间低于阈值
+                                           [1] 温度超过阈值
+                                           [2] 可靠性降级
+                                           [3] 只读模式
+                                           [4] 易失性备份失败
+0x01    2     Composite Temperature      复合温度 (Kelvin)
+0x03    1     Available Spare            可用备用空间 (%)
+0x04    1     Available Spare Threshold  可用备用阈值 (%)
+0x05    1     Percentage Used            已使用寿命百分比
+0x06    26    Reserved                   保留
+0x20    16    Data Units Read            读取数据单元 (× 1000 × 512B)
+0x30    16    Data Units Written         写入数据单元 (× 1000 × 512B)
+0x40    16    Host Read Commands         主机读命令数
+0x50    16    Host Write Commands        主机写命令数
+0x60    16    Controller Busy Time       控制器忙时间 (分钟)
+0x70    16    Power Cycles               上电周期数
+0x80    16    Power On Hours             上电小时数
+0x90    16    Unsafe Shutdowns           非安全关机次数
+0xA0    16    Media Errors               介质/数据完整性错误数
+0xB0    16    Error Log Entries          错误日志条目数
+0xC0    4     Warning Composite Temp Time 警告温度时间
+0xC4    4     Critical Composite Temp Time 临界温度时间
+0xC8    2×8   Temperature Sensors        温度传感器 1-8
+0xD8    296   Reserved                   保留
+```
+
+## Read/Write 命令 FUA 位
+
+FUA (Force Unit Access) 位控制数据是否绕过易失性缓存直接写入/读取非易失性介质。
+
+### CDW12 位定义 (Read/Write 命令)
+
+```
+Bits    Field    Description
+15:0    NLB      Number of Logical Blocks (0's based)
+25:16   Reserved 保留
+26      DTYPE    Dataset Type (Write only)
+29:27   Reserved 保留
+30      FUA      Force Unit Access
+31      LR       Limited Retry
+```
+
+### FUA 位行为
+
+| 命令 | FUA=0 | FUA=1 |
+|------|-------|-------|
+| Read | 可从易失性缓存返回数据 | 必须从非易失性介质读取 |
+| Write | 数据可暂存于易失性缓存 | 数据必须写入非易失性介质后才返回完成 |
+
+### 实现建议
+
+对于虚拟 NVMe 驱动:
+
+```c
+typedef struct _NVME_RW_COMMAND {
+    // CDW0-CDW9 (标准 SQE 字段)
+    UINT32 CDW0;
+    UINT32 NSID;
+    UINT64 Reserved;
+    UINT64 MPTR;
+    UINT64 PRP1;
+    UINT64 PRP2;
+    
+    // CDW10-CDW11: SLBA (起始 LBA)
+    UINT64 SLBA;
+    
+    // CDW12
+    union {
+        struct {
+            UINT32 NLB      : 16;   // 逻辑块数量 (0's based)
+            UINT32 Reserved1: 10;
+            UINT32 DTYPE    : 4;    // 仅 Write
+            UINT32 Reserved2: 1;
+            UINT32 FUA      : 1;    // Force Unit Access
+            UINT32 LR       : 1;    // Limited Retry
+        };
+        UINT32 CDW12;
+    };
+    
+    UINT32 CDW13;   // DSM (Dataset Management)
+    UINT32 CDW14;   // EILBRT
+    UINT32 CDW15;   // ELBAT/ELBATM
+    
+} NVME_RW_COMMAND, *PNVME_RW_COMMAND;
+
+// FUA 处理示例
+NTSTATUS ProcessWriteCommand(PNVME_RW_COMMAND pCmd)
+{
+    // ... 写入数据 ...
+    
+    if (pCmd->FUA) {
+        // FUA=1: 确保数据持久化
+        FlushToPersistentStorage();
+    }
+    // FUA=0: 可以稍后刷新
+    
+    return STATUS_SUCCESS;
+}
 ```

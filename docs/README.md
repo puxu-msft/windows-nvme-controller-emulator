@@ -21,6 +21,8 @@ Virtual NVMe Driver 是一个纯软件实现的虚拟 NVMe SSD 设备驱动程�
 | [driver-design.md](driver-design.md) | 驱动详细设计 |
 | [data-structures.md](data-structures.md) | 核心数据结构 |
 | [command-handling.md](command-handling.md) | 命令处理流程 |
+| [power-management.md](power-management.md) | 电源管理 |
+| [ioctl-interface.md](ioctl-interface.md) | IOCTL 用户态接口 |
 | [build-guide.md](build-guide.md) | 构建与部署指南 |
 | [testing.md](testing.md) | 测试策略 |
 | [inf-template.md](inf-template.md) | INF 文件模板 |

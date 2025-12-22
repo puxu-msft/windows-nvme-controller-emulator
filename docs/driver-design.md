@@ -289,3 +289,411 @@ WDFREQUEST
 │ 完成请求         │
 └───────────────────┘
 ```
+
+## WDF 对象层次结构
+
+WDF 框架采用对象层次模型管理驱动资源，父对象销毁时自动清理子对象。
+
+### 对象层次图
+
+```
+WDFDRIVER (根对象)
+    │
+    ├── WDFDEVICE (FDO - 功能设备对象)
+    │       │
+    │       ├── WDFQUEUE (默认 I/O 队列)
+    │       │       │
+    │       │       └── WDFREQUEST (I/O 请求)
+    │       │
+    │       ├── WDFQUEUE (Admin 命令队列)
+    │       │
+    │       ├── WDFINTERRUPT (中断对象 - 虚拟设备可选)
+    │       │
+    │       ├── WDFTIMER (定时器对象)
+    │       │       │
+    │       │       ├── 心跳定时器 (SMART 更新)
+    │       │       └── 空闲检测定时器
+    │       │
+    │       ├── WDFWORKITEM (工作项)
+    │       │
+    │       ├── WDFSPINLOCK (自旋锁)
+    │       │
+    │       ├── WDFWAITLOCK (等待锁)
+    │       │
+    │       ├── WDFMEMORY (内存对象)
+    │       │
+    │       └── WDFFILEOBJECT (文件对象 - 每个用户态句柄)
+    │
+    └── WDFDEVICE (Bus FDO - 总线设备)
+            │
+            ├── WDFCHILDLIST (子设备列表)
+            │
+            └── WDFDEVICE (PDO - 物理设备对象)
+                    │
+                    └── [关联的功能驱动 FDO]
+```
+
+### 对象生命周期管理
+
+```c
+// 设备上下文结构
+typedef struct _DEVICE_CONTEXT {
+    WDFDEVICE           Device;
+    WDFQUEUE            DefaultQueue;
+    WDFQUEUE            AdminQueue;
+    WDFTIMER            HeartbeatTimer;
+    WDFSPINLOCK         ControllerLock;
+    WDFWAITLOCK         IoLock;
+    
+    // NVMe 控制器状态
+    VNVME_CONTROLLER    Controller;
+    
+    // 后端存储
+    VNVME_BACKEND       Backend;
+    
+    // 统计信息
+    VNVME_STATISTICS    Stats;
+    
+} DEVICE_CONTEXT, *PDEVICE_CONTEXT;
+
+WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DEVICE_CONTEXT, GetDeviceContext)
+
+// 对象创建示例
+NTSTATUS CreateDeviceObjects(WDFDEVICE Device)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext(Device);
+    WDF_OBJECT_ATTRIBUTES objAttr;
+    NTSTATUS status;
+    
+    // 创建自旋锁 (父对象 = Device)
+    WDF_OBJECT_ATTRIBUTES_INIT(&objAttr);
+    objAttr.ParentObject = Device;
+    
+    status = WdfSpinLockCreate(&objAttr, &ctx->ControllerLock);
+    if (!NT_SUCCESS(status)) return status;
+    
+    // 创建等待锁 (父对象 = Device)
+    status = WdfWaitLockCreate(&objAttr, &ctx->IoLock);
+    if (!NT_SUCCESS(status)) return status;
+    
+    // 创建定时器 (父对象 = Device)
+    WDF_TIMER_CONFIG timerConfig;
+    WDF_TIMER_CONFIG_INIT_PERIODIC(
+        &timerConfig,
+        EvtHeartbeatTimer,
+        1000    // 1秒周期
+    );
+    
+    status = WdfTimerCreate(&timerConfig, &objAttr, &ctx->HeartbeatTimer);
+    if (!NT_SUCCESS(status)) return status;
+    
+    // 当 Device 销毁时，所有子对象自动清理
+    return STATUS_SUCCESS;
+}
+```
+
+## 电源状态机
+
+### 设备电源状态转换图
+
+```
+                        ┌──────────────────┐
+                        │   DriverEntry    │
+                        └────────┬─────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+                        │ EvtDeviceAdd     │
+                        └────────┬─────────┘
+                                 │
+                                 ▼
+                        ┌──────────────────┐
+         ┌─────────────│ PrepareHardware  │
+         │              └────────┬─────────┘
+         │                       │
+         │                       ▼
+         │              ┌──────────────────┐
+         │    ┌────────│     D0Entry      │◄─────────┐
+         │    │         └────────┬─────────┘          │
+         │    │                  │                    │
+         │    │                  ▼                    │
+         │    │         ┌──────────────────┐          │
+         │    │         │  设备运行 (D0)    │          │
+         │    │         │  处理 I/O 请求   │          │
+         │    │         └────────┬─────────┘          │
+         │    │                  │                    │
+         │    │    ┌─────────────┼─────────────┐      │
+         │    │    │             │             │      │
+         │    │    ▼             ▼             ▼      │
+         │    │ ┌──────┐    ┌──────┐    ┌──────┐      │
+         │    │ │ Idle │    │ S3   │    │ S4   │      │
+         │    │ │ D3   │    │ D3   │    │ D3   │      │
+         │    │ └──┬───┘    └──┬───┘    └──┬───┘      │
+         │    │    │           │           │          │
+         │    │    ▼           ▼           ▼          │
+         │    │ ┌──────────────────────────────┐      │
+         │    │ │          D0Exit              │      │
+         │    │ │  刷新缓存，保存状态           │      │
+         │    │ └──────────────┬───────────────┘      │
+         │    │                │                      │
+         │    │                ▼                      │
+         │    │ ┌──────────────────────────────┐      │
+         │    │ │       设备睡眠 (D3)          │──────┘
+         │    │ │                              │ (唤醒)
+         │    │ └──────────────────────────────┘
+         │    │
+         │    │ (设备移除)
+         │    │
+         │    ▼
+         │ ┌──────────────────┐
+         │ │  ReleaseHardware │
+         │ └────────┬─────────┘
+         │          │
+         │          ▼
+         └────► ┌──────────────────┐
+                │  设备已卸载      │
+                └──────────────────┘
+```
+
+### 电源回调顺序
+
+**进入低功耗 (D0 → D3)**:
+1. `EvtDeviceD0ExitPreInterruptsDisabled` (可选)
+2. 中断断开
+3. `EvtDeviceD0Exit` - **主要清理点**
+4. 队列自动停止 (如果 PowerManaged = TRUE)
+
+**恢复全功率 (D3 → D0)**:
+1. `EvtDeviceD0Entry` - **主要初始化点**
+2. 中断连接
+3. `EvtDeviceD0EntryPostInterruptsEnabled` (可选)
+4. 队列自动启动 (如果 PowerManaged = TRUE)
+
+```c
+// 电源回调注册
+WDF_PNPPOWER_EVENT_CALLBACKS pnpPowerCallbacks;
+WDF_PNPPOWER_EVENT_CALLBACKS_INIT(&pnpPowerCallbacks);
+
+pnpPowerCallbacks.EvtDevicePrepareHardware = EvtDevicePrepareHardware;
+pnpPowerCallbacks.EvtDeviceReleaseHardware = EvtDeviceReleaseHardware;
+pnpPowerCallbacks.EvtDeviceD0Entry = EvtDeviceD0Entry;
+pnpPowerCallbacks.EvtDeviceD0Exit = EvtDeviceD0Exit;
+pnpPowerCallbacks.EvtDeviceSelfManagedIoInit = EvtDeviceSelfManagedIoInit;
+pnpPowerCallbacks.EvtDeviceSelfManagedIoCleanup = EvtDeviceSelfManagedIoCleanup;
+
+WdfDeviceInitSetPnpPowerEventCallbacks(DeviceInit, &pnpPowerCallbacks);
+```
+
+## I/O 请求取消处理
+
+### 取消机制概述
+
+用户可能在 I/O 完成前取消请求，驱动必须正确处理以避免资源泄漏和死锁。
+
+### WDF 取消回调
+
+```c
+// 为请求设置取消回调
+VOID EvtIoRead(
+    WDFQUEUE Queue,
+    WDFREQUEST Request,
+    size_t Length)
+{
+    PDEVICE_CONTEXT ctx = GetDeviceContext(WdfIoQueueGetDevice(Queue));
+    NTSTATUS status;
+    
+    // 创建 I/O 上下文
+    PREQUEST_CONTEXT reqCtx = GetRequestContext(Request);
+    reqCtx->Request = Request;
+    reqCtx->StartTime = KeQueryPerformanceCounter(NULL);
+    
+    // 标记请求为可取消
+    status = WdfRequestMarkCancelableEx(Request, EvtRequestCancel);
+    if (!NT_SUCCESS(status)) {
+        // 请求已被取消
+        WdfRequestComplete(Request, status);
+        return;
+    }
+    
+    // 将请求排入内部队列
+    InsertPendingRequest(ctx, reqCtx);
+    
+    // 开始异步处理
+    StartAsyncRead(ctx, reqCtx);
+}
+
+// 取消回调
+VOID EvtRequestCancel(WDFREQUEST Request)
+{
+    PREQUEST_CONTEXT reqCtx = GetRequestContext(Request);
+    PDEVICE_CONTEXT ctx = GetDeviceContext(
+        WdfIoQueueGetDevice(WdfRequestGetIoQueue(Request)));
+    
+    TraceEvents(TRACE_LEVEL_WARNING, DBG_IO,
+        "Request %p cancelled", Request);
+    
+    // 从待处理队列移除
+    if (RemovePendingRequest(ctx, reqCtx)) {
+        // 请求尚未开始处理，直接完成
+        WdfRequestComplete(Request, STATUS_CANCELLED);
+    }
+    // 如果请求正在处理中，处理完成时会检查取消状态
+}
+```
+
+### 安全完成取消的请求
+
+```c
+VOID CompleteAsyncRequest(PREQUEST_CONTEXT reqCtx, NTSTATUS Status)
+{
+    WDFREQUEST request = reqCtx->Request;
+    NTSTATUS unmarkStatus;
+    
+    // 尝试取消可取消状态
+    unmarkStatus = WdfRequestUnmarkCancelable(request);
+    
+    if (unmarkStatus == STATUS_CANCELLED) {
+        // 请求正在被取消回调处理
+        // 不要在这里完成请求！取消回调会处理
+        return;
+    }
+    
+    // 正常完成请求
+    WdfRequestCompleteWithInformation(request, Status, reqCtx->BytesTransferred);
+}
+```
+
+### 取消安全队列
+
+使用 WDF 手动分发队列实现取消安全：
+
+```c
+NTSTATUS CreateCancelSafeQueue(PDEVICE_CONTEXT ctx)
+{
+    WDF_IO_QUEUE_CONFIG queueConfig;
+    WDF_OBJECT_ATTRIBUTES queueAttr;
+    
+    WDF_IO_QUEUE_CONFIG_INIT(&queueConfig, WdfIoQueueDispatchManual);
+    
+    WDF_OBJECT_ATTRIBUTES_INIT(&queueAttr);
+    queueAttr.ParentObject = ctx->Device;
+    
+    return WdfIoQueueCreate(
+        ctx->Device,
+        &queueConfig,
+        &queueAttr,
+        &ctx->PendingQueue
+    );
+}
+
+// 从队列获取请求（自动处理取消）
+NTSTATUS GetNextPendingRequest(PDEVICE_CONTEXT ctx, WDFREQUEST *pRequest)
+{
+    return WdfIoQueueRetrieveNextRequest(ctx->PendingQueue, pRequest);
+}
+
+// 转发请求到待处理队列
+VOID QueuePendingRequest(PDEVICE_CONTEXT ctx, WDFREQUEST Request)
+{
+    NTSTATUS status = WdfRequestForwardToIoQueue(Request, ctx->PendingQueue);
+    if (!NT_SUCCESS(status)) {
+        WdfRequestComplete(Request, status);
+    }
+}
+```
+
+### 超时与取消结合
+
+```c
+typedef struct _REQUEST_CONTEXT {
+    WDFREQUEST      Request;
+    WDFTIMER        TimeoutTimer;
+    LONG            Completed;      // 原子完成标志
+    LARGE_INTEGER   StartTime;
+    
+} REQUEST_CONTEXT, *PREQUEST_CONTEXT;
+
+// 创建带超时的请求
+NTSTATUS StartRequestWithTimeout(PREQUEST_CONTEXT reqCtx, ULONG TimeoutMs)
+{
+    WDF_TIMER_CONFIG timerConfig;
+    WDF_OBJECT_ATTRIBUTES timerAttr;
+    
+    WDF_TIMER_CONFIG_INIT(&timerConfig, EvtRequestTimeout);
+    timerConfig.AutomaticSerialization = FALSE;
+    
+    WDF_OBJECT_ATTRIBUTES_INIT(&timerAttr);
+    timerAttr.ParentObject = reqCtx->Request;
+    
+    NTSTATUS status = WdfTimerCreate(
+        &timerConfig, 
+        &timerAttr, 
+        &reqCtx->TimeoutTimer);
+    
+    if (NT_SUCCESS(status)) {
+        // 启动超时定时器
+        WdfTimerStart(reqCtx->TimeoutTimer, 
+            WDF_REL_TIMEOUT_IN_MS(TimeoutMs));
+    }
+    
+    return status;
+}
+
+// 超时回调
+VOID EvtRequestTimeout(WDFTIMER Timer)
+{
+    WDFREQUEST request = (WDFREQUEST)WdfTimerGetParentObject(Timer);
+    PREQUEST_CONTEXT reqCtx = GetRequestContext(request);
+    
+    // 原子地标记为已完成
+    if (InterlockedCompareExchange(&reqCtx->Completed, 1, 0) == 0) {
+        // 取消请求
+        if (NT_SUCCESS(WdfRequestUnmarkCancelable(request))) {
+            WdfRequestComplete(request, STATUS_IO_TIMEOUT);
+        }
+    }
+}
+
+// 正常完成时
+VOID CompleteRequestNormal(PREQUEST_CONTEXT reqCtx, NTSTATUS Status)
+{
+    // 停止超时定时器
+    WdfTimerStop(reqCtx->TimeoutTimer, FALSE);
+    
+    // 原子地标记为已完成
+    if (InterlockedCompareExchange(&reqCtx->Completed, 1, 0) == 0) {
+        if (NT_SUCCESS(WdfRequestUnmarkCancelable(reqCtx->Request))) {
+            WdfRequestComplete(reqCtx->Request, Status);
+        }
+    }
+}
+```
+
+### 取消处理最佳实践
+
+1. **始终检查 WdfRequestUnmarkCancelable 返回值**
+   - STATUS_CANCELLED 表示取消回调正在运行
+
+2. **使用原子操作防止双重完成**
+   - InterlockedCompareExchange 确保只完成一次
+
+3. **清理与完成分离**
+   - 完成请求后不要访问请求上下文
+
+4. **正确处理队列停止**
+   ```c
+   // 停止队列并等待进行中的请求
+   WdfIoQueueStop(ctx->IoQueue, EvtQueueStopComplete, ctx);
+   
+   VOID EvtQueueStopComplete(WDFQUEUE Queue, WDFCONTEXT Context)
+   {
+       // 所有请求已完成或取消
+   }
+   ```
+
+5. **驱动卸载时清理**
+   ```c
+   // 清空待处理队列
+   WdfIoQueuePurgeSynchronously(ctx->PendingQueue);
+   ```
+

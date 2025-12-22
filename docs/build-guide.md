@@ -298,3 +298,392 @@ BackendPath     REG_SZ      文件后端路径
 DiskSizeMB      REG_DWORD   虚拟磁盘大小(MB)
 BlockSize       REG_DWORD   块大小(512/4096)
 ```
+
+## 静态代码分析
+
+### PREfast (代码分析)
+
+PREfast 是 WDK 内置的静态代码分析工具，可检测驱动中的常见错误。
+
+#### 启用 PREfast
+
+**方法 1: Visual Studio 项目属性**
+```
+项目属性 → Code Analysis → General
+→ Enable Code Analysis: Yes
+→ Run Code Analysis on Build: Yes
+```
+
+**方法 2: MSBuild 命令行**
+```powershell
+msbuild VirtualNvme.sln /p:Configuration=Debug /p:Platform=x64 /p:EnablePREfast=true
+```
+
+**方法 3: 项目文件配置**
+```xml
+<PropertyGroup>
+  <EnablePREfast>true</EnablePREfast>
+  <PREfastLog>prefast.xml</PREfastLog>
+  <PREfastAdditionalOptions>/analyze:plugin EspXEngine.dll</PREfastAdditionalOptions>
+</PropertyGroup>
+```
+
+#### 常见 PREfast 警告
+
+| 代码 | 说明 | 修复建议 |
+|------|------|----------|
+| C6001 | 使用未初始化的内存 | 初始化变量 |
+| C6011 | 取消引用 NULL 指针 | 添加 NULL 检查 |
+| C6014 | 内存泄漏 | 确保释放分配的内存 |
+| C6031 | 忽略返回值 | 检查函数返回值 |
+| C6054 | 字符串可能未终止 | 确保 null 终止 |
+| C6200 | 缓冲区溢出 (非栈) | 检查缓冲区边界 |
+| C6201 | 栈缓冲区溢出 | 检查数组索引 |
+| C6385 | 读取无效数据 | 检查读取范围 |
+| C6386 | 写入缓冲区溢出 | 检查写入范围 |
+| C28615 | 调用 MustCheck 函数 | 检查返回状态 |
+| C28719 | 禁止的 API (POOL_TYPE) | 使用 NonPagedPoolNx |
+
+#### SAL 注释
+
+使用 SAL (Source-code Annotation Language) 提高分析精度：
+
+```c
+// 参数注释
+NTSTATUS ProcessCommand(
+    _In_        PDEVICE_CONTEXT     DeviceContext,
+    _In_        ULONG               CommandId,
+    _Inout_     PVOID               Buffer,
+    _In_        SIZE_T              BufferSize,
+    _Out_       PSIZE_T             BytesReturned
+);
+
+// 返回值注释
+_Must_inspect_result_
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTSTATUS AllocateResource(
+    _Outptr_result_nullonfailure_ PVOID* Resource
+);
+
+// 锁注释
+_Acquires_lock_(Lock)
+VOID AcquireLock(_Inout_ PKSPIN_LOCK Lock);
+
+_Releases_lock_(Lock)
+VOID ReleaseLock(_Inout_ PKSPIN_LOCK Lock);
+```
+
+### SDV (Static Driver Verifier)
+
+SDV 执行更深入的规则验证，检测驱动是否正确遵循 Windows 驱动规则。
+
+#### 运行 SDV
+
+```powershell
+# 在驱动项目目录中
+cd src\driver
+
+# 清理之前的运行
+msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/clean"
+
+# 运行 SDV
+msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/check:*"
+
+# 查看结果
+msbuild /t:sdv /p:Configuration=Release /p:Platform=x64 /p:Inputs="/view"
+```
+
+#### 重要 SDV 规则
+
+| 规则 | 说明 |
+|------|------|
+| IrqlKeDispatchLte | KeXxx 函数的 IRQL 要求 |
+| IrqlZwPassive | Zw 函数必须在 PASSIVE_LEVEL |
+| SpinLock | 自旋锁正确获取/释放 |
+| RequestCompleted | 请求必须被完成 |
+| DoubleCompletion | 不能双重完成请求 |
+| DeferredRequestCompleted | 延迟请求必须完成 |
+| MarkCancOnCancReqLocal | 取消处理正确性 |
+| PnpSurpriseRemove | 意外移除处理 |
+
+## CI/CD 集成
+
+### GitHub Actions 配置
+
+创建 `.github/workflows/build.yml`:
+
+```yaml
+name: Build Driver
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        configuration: [Debug, Release]
+        platform: [x64, ARM64]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.3
+    
+    - name: Install WDK
+      run: |
+        # 下载并安装 WDK
+        Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/?linkid=2196230" -OutFile "wdksetup.exe"
+        Start-Process -FilePath "wdksetup.exe" -ArgumentList "/quiet", "/norestart" -Wait
+    
+    - name: Build
+      run: |
+        msbuild VirtualNvme.sln `
+          /p:Configuration=${{ matrix.configuration }} `
+          /p:Platform=${{ matrix.platform }} `
+          /p:EnablePREfast=true
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: driver-${{ matrix.configuration }}-${{ matrix.platform }}
+        path: |
+          ${{ matrix.configuration }}/${{ matrix.platform }}/*.sys
+          ${{ matrix.configuration }}/${{ matrix.platform }}/*.inf
+          ${{ matrix.configuration }}/${{ matrix.platform }}/*.pdb
+
+  test:
+    needs: build
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: driver-Debug-x64
+        path: driver
+    
+    - name: Run Static Analysis
+      run: |
+        # 运行额外的静态分析检查
+        # ...
+    
+    - name: Package
+      run: |
+        # 创建发布包
+        Compress-Archive -Path driver\* -DestinationPath vnvme-driver.zip
+```
+
+### Azure DevOps Pipeline
+
+创建 `azure-pipelines.yml`:
+
+```yaml
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  solution: 'VirtualNvme.sln'
+  buildConfiguration: 'Release'
+
+stages:
+- stage: Build
+  jobs:
+  - job: BuildDriver
+    strategy:
+      matrix:
+        x64:
+          buildPlatform: 'x64'
+        ARM64:
+          buildPlatform: 'ARM64'
+    
+    steps:
+    - task: PowerShell@2
+      displayName: 'Install WDK'
+      inputs:
+        targetType: 'inline'
+        script: |
+          # WDK 安装脚本
+          choco install windows-driver-kit -y
+    
+    - task: VSBuild@1
+      displayName: 'Build Driver'
+      inputs:
+        solution: '$(solution)'
+        platform: '$(buildPlatform)'
+        configuration: '$(buildConfiguration)'
+        msbuildArgs: '/p:EnablePREfast=true'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifacts'
+      inputs:
+        PathtoPublish: '$(buildConfiguration)\$(buildPlatform)'
+        ArtifactName: 'driver-$(buildPlatform)'
+
+- stage: Test
+  dependsOn: Build
+  jobs:
+  - job: RunTests
+    steps:
+    - task: DownloadBuildArtifacts@1
+      inputs:
+        buildType: 'current'
+        downloadType: 'single'
+        artifactName: 'driver-x64'
+        downloadPath: '$(System.ArtifactsDirectory)'
+    
+    - task: PowerShell@2
+      displayName: 'Verify INF'
+      inputs:
+        targetType: 'inline'
+        script: |
+          & "C:\Program Files (x86)\Windows Kits\10\Tools\x64\infverif.exe" `
+            /v /w $(System.ArtifactsDirectory)\driver-x64\vnvme.inf
+```
+
+### 本地构建脚本
+
+创建 `build.ps1`:
+
+```powershell
+#Requires -RunAsAdministrator
+param(
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug",
+    
+    [ValidateSet("x64", "ARM64")]
+    [string]$Platform = "x64",
+    
+    [switch]$Clean,
+    [switch]$EnablePREfast,
+    [switch]$RunSDV,
+    [switch]$Sign,
+    [switch]$Package
+)
+
+$ErrorActionPreference = "Stop"
+$SolutionPath = Join-Path $PSScriptRoot "VirtualNvme.sln"
+$OutputPath = Join-Path $PSScriptRoot "$Configuration\$Platform"
+
+Write-Host "=== Virtual NVMe Driver Build ===" -ForegroundColor Cyan
+Write-Host "Configuration: $Configuration"
+Write-Host "Platform: $Platform"
+Write-Host "Output: $OutputPath"
+Write-Host ""
+
+# 查找 MSBuild
+$MSBuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+    -latest -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | 
+    Select-Object -First 1
+
+if (-not $MSBuild) {
+    throw "MSBuild not found"
+}
+
+# 清理
+if ($Clean) {
+    Write-Host "Cleaning..." -ForegroundColor Yellow
+    & $MSBuild $SolutionPath /t:Clean /p:Configuration=$Configuration /p:Platform=$Platform
+    Remove-Item -Path $OutputPath -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 构建参数
+$BuildArgs = @(
+    $SolutionPath,
+    "/p:Configuration=$Configuration",
+    "/p:Platform=$Platform",
+    "/m"  # 并行构建
+)
+
+if ($EnablePREfast) {
+    $BuildArgs += "/p:EnablePREfast=true"
+    Write-Host "PREfast enabled" -ForegroundColor Yellow
+}
+
+# 构建
+Write-Host "Building..." -ForegroundColor Yellow
+& $MSBuild @BuildArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Build failed"
+}
+
+# SDV 分析
+if ($RunSDV) {
+    Write-Host "Running Static Driver Verifier..." -ForegroundColor Yellow
+    Push-Location (Join-Path $PSScriptRoot "src\driver")
+    try {
+        & $MSBuild /t:sdv /p:Configuration=$Configuration /p:Platform=$Platform /p:Inputs="/check:*"
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+# 签名
+if ($Sign) {
+    Write-Host "Signing driver..." -ForegroundColor Yellow
+    $SignTool = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+    
+    & $SignTool sign /v /s PrivateCertStore /n "VNvme Test Certificate" `
+        /t http://timestamp.digicert.com "$OutputPath\vnvme.sys"
+    
+    # 创建 CAT 文件
+    & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\inf2cat.exe" `
+        /driver:$OutputPath /os:10_$Platform
+    
+    & $SignTool sign /v /s PrivateCertStore /n "VNvme Test Certificate" `
+        /t http://timestamp.digicert.com "$OutputPath\vnvme.cat"
+}
+
+# 打包
+if ($Package) {
+    Write-Host "Creating package..." -ForegroundColor Yellow
+    $PackagePath = Join-Path $PSScriptRoot "vnvme-$Configuration-$Platform.zip"
+    
+    $FilesToPackage = @(
+        "$OutputPath\vnvme.sys",
+        "$OutputPath\vnvme.pdb",
+        "$OutputPath\vnvme.inf"
+    )
+    
+    if (Test-Path "$OutputPath\vnvme.cat") {
+        $FilesToPackage += "$OutputPath\vnvme.cat"
+    }
+    
+    Compress-Archive -Path $FilesToPackage -DestinationPath $PackagePath -Force
+    Write-Host "Package created: $PackagePath" -ForegroundColor Green
+}
+
+Write-Host ""
+Write-Host "=== Build Complete ===" -ForegroundColor Green
+Write-Host "Output: $OutputPath"
+Get-ChildItem $OutputPath -Filter "*.sys" | ForEach-Object {
+    Write-Host "  $($_.Name) - $([math]::Round($_.Length / 1KB, 2)) KB"
+}
+```
+
+使用示例:
+```powershell
+# 基本构建
+.\build.ps1
+
+# 发布构建 (带签名和打包)
+.\build.ps1 -Configuration Release -EnablePREfast -Sign -Package
+
+# 完整分析
+.\build.ps1 -Configuration Release -EnablePREfast -RunSDV
+```

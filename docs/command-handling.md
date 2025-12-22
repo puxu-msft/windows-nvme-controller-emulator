@@ -3,20 +3,21 @@
 ## 总体流程
 
 ```
-  StorPort 请求
+  disk.sys (SRB 请求)
        │
        ▼
   ┌─────────────┐
-  │ 请求分发器  │
+  │ SRB 分发器  │  ← 解析 SCSI 命令
   └──────┬──────┘
          │
     ┌────┴────┐
     ▼         ▼
- Admin      I/O
- 命令       命令
+ 管理命令   块 I/O
+ (IOCTL)    命令
     │         │
     ▼         ▼
- 处理器    处理器
+ NVMe      后端
+ 模拟器    读写
     │         │
     └────┬────┘
          ▼
@@ -25,8 +26,22 @@
   └─────────────┘
          │
          ▼
-    完成响应
+    完成 SRB
 ```
+
+### SRB 请求处理
+
+由于 Windows 存储栈通过 disk.sys 发送 SCSI Request Block (SRB)，我们需要处理以下常见的 SCSI 命令：
+
+| SCSI 命令 | 操作码 | 对应操作 |
+|-----------|--------|----------|
+| READ(10/16) | 0x28/0x88 | 读取数据块 |
+| WRITE(10/16) | 0x2A/0x8A | 写入数据块 |
+| SYNCHRONIZE_CACHE | 0x35 | 刷新缓存 (Flush) |
+| READ_CAPACITY | 0x25 | 返回磁盘容量 |
+| INQUIRY | 0x12 | 返回设备信息 |
+| MODE_SENSE | 0x1A | 返回模式页 |
+| TEST_UNIT_READY | 0x00 | 检查设备就绪状态 |
 
 ## Admin 命令处理
 

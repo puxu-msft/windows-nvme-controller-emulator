@@ -8,7 +8,7 @@
 ;
 ; vnvmebus.inf - Virtual NVMe Bus Driver
 ;
-; Copyright (c) 2024 Virtual NVMe Project
+; Copyright (c) 2025 Virtual NVMe Project
 ;
 
 [Version]
@@ -17,7 +17,7 @@ Class       = System
 ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider    = %ManufacturerName%
 CatalogFile = vnvmebus.cat
-DriverVer   = 12/23/2024,1.0.0.0
+DriverVer   = 01/01/2025,1.0.0.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -89,7 +89,7 @@ VNvmeBus.SVCDESC       = "Virtual NVMe Bus Driver"
 ;
 ; vnvme.inf - Virtual NVMe Function Driver
 ;
-; Copyright (c) 2024 Virtual NVMe Project
+; Copyright (c) 2025 Virtual NVMe Project
 ;
 
 [Version]
@@ -98,7 +98,7 @@ Class       = DiskDrive
 ClassGuid   = {4D36E967-E325-11CE-BFC1-08002BE10318}
 Provider    = %ManufacturerName%
 CatalogFile = vnvme.cat
-DriverVer   = 12/23/2024,1.0.0.0
+DriverVer   = 01/01/2025,1.0.0.0
 PnpLockdown = 1
 
 [DestinationDirs]
@@ -127,9 +127,10 @@ CopyFiles = Drivers_Dir
 vnvme.sys
 
 ;-------------- Service installation
+; 注意: disk.sys 是系统内置驱动，不需要在此安装
+; 当设备类型为 DiskDrive 时，PnP 管理器会自动加载 disk.sys
 [VNvme_Device.NT.Services]
 AddService = vnvme,%SPSVCINST_ASSOCSERVICE%,VNvme_Service_Inst
-AddService = disk,,disk_Service_Inst
 
 [VNvme_Service_Inst]
 DisplayName    = %VNvme.SVCDESC%
@@ -137,13 +138,6 @@ ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
 ServiceBinary  = %13%\vnvme.sys
-
-[disk_Service_Inst]
-DisplayName    = "Disk Driver"
-ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
-StartType      = 3               ; SERVICE_DEMAND_START
-ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %12%\disk.sys
 
 ;-------------- Parameters
 [VNvme_Device.NT.HW]

@@ -1,5 +1,16 @@
 # 用户态架构分析
 
+> ✅ **已整合到 v2**
+> 
+> 本文档的内容已整合到 [architecture-v2.md](architecture-v2.md) 和 [core-mechanisms.md](core-mechanisms.md)。
+> 
+> **保留本文档作为设计历史参考**。如有冲突，请以 v2 文档为准。
+> 
+> v2 架构的核心变化：
+> - 合并为单一 `vnvme.sys` 内核驱动 + `vnvme-server.exe` 用户态服务
+> - 使用 Doorbell 轮询代替 MMIO 拦截
+> - 利用 stornvme 轮询 CQ 的行为，简化中断处理
+
 本文档分析将虚拟 NVMe 控制器的部分功能从内核态移动到用户态的可行性。
 
 ## 动机

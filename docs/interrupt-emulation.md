@@ -1,5 +1,18 @@
 # 中断仿真
 
+> ⚠️ **重要更新 (v2)**
+> 
+> 经分析发现，**stornvme.sys 在高负载时使用轮询模式检查 CQ**，而不是依赖中断。
+> 
+> **v2 架构的变化**：
+> - 实际实现可能不需要真正的 MSI-X 中断注入
+> - 只需正确设置 CQ 条目的 **Phase Tag**，stornvme 会自动检测到新完成
+> - 本文档描述的 MSI-X 实现是 "完美方案"，可用于优化低负载情况下的响应速度
+> 
+> 请优先参考：
+> - [architecture-v2.md](architecture-v2.md) - 中断处理策略
+> - [architecture-analysis.md](architecture-analysis.md) - 中断注入问题分析
+
 本文档详细说明 MSI-X 中断的仿真实现。
 
 ## 概述

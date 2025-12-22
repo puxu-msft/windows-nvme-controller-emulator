@@ -1,5 +1,20 @@
 # NVMe 控制器仿真
 
+> ⚠️ **架构更新说明 (v2)**
+> 
+> 本文档基于 v1 全内核态架构编写，描述了 `vnvme_emu.sys` 独立驱动。
+> 
+> **v2 架构的变化**：
+> - `vnvme_emu.sys` 已合并到 `vnvme.sys` 单一驱动
+> - 命令处理已移至用户态 `vnvme-server.exe`
+> - 内核只负责 Doorbell 轮询和 PRP 解析
+> 
+> 本文档中关于 **NVMe 寄存器定义、数据结构、寄存器初始化** 的内容仍然适用。
+> 
+> 请优先参考：
+> - [architecture-v2.md](architecture-v2.md) - 整体架构
+> - [core-mechanisms.md](core-mechanisms.md) - Doorbell 轮询和完成处理
+
 本文档详细说明 NVMe 控制器仿真驱动 (vnvme_emu.sys) 的设计和实现。
 
 ## 概述

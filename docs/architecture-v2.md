@@ -9,6 +9,17 @@
 
 ---
 
+## 相关文档
+
+| 文档 | 说明 |
+|------|------|
+| [core-mechanisms.md](core-mechanisms.md) | 核心机制详细实现 (Doorbell 轮询、共享内存、PRP 解析) |
+| [architecture-analysis.md](architecture-analysis.md) | 架构决策分析和问题修复记录 |
+| [pcie-emulation.md](pcie-emulation.md) | PCIe 配置空间仿真细节 |
+| [nvme-controller.md](nvme-controller.md) | NVMe 寄存器和命令定义 |
+
+---
+
 ## 项目目标
 
 本项目实现一个 **Windows 软件 NVMe 控制器仿真器**，目标：
@@ -126,7 +137,7 @@ stornvme.sys 初始化流程:
 │  │                                                                 │  │
 │  │  ┌───────────────────────────────────────────────────────────┐  │  │
 │  │  │ Doorbell 轮询引擎                                          │  │  │
-│  │  │ • 高精度定时器 (10-100μs)                                  │  │  │
+│  │  │ • 高精度定时器 (10μs-1000μs 自适应)                        │  │  │
 │  │  │ • 检测 SQ Tail 变化 → 提取命令 → 转发到用户态              │  │  │
 │  │  │ • 检测 CQ Head 变化 → 更新内部状态                         │  │  │
 │  │  │ • 自适应轮询频率 (负载感知)                                │  │  │
@@ -396,6 +407,14 @@ VOID VnvmeProcessAdminCommands(
     USHORT NewTail)
 {
     PVNVME_QUEUE sq = Ctx->AdminSQ;
+    
+    // 安全检查: 确保队列已初始化
+    if (!sq || !sq->MappedAddr) {
+        TraceEvents(TRACE_LEVEL_WARNING, TRACE_QUEUE,
+                   "Admin SQ not initialized");
+        return;
+    }
+    
     PNVME_COMMAND sqBase = (PNVME_COMMAND)sq->MappedAddr;
     
     // 遍历新提交的命令
@@ -412,7 +431,15 @@ VOID VnvmeProcessAdminCommands(
             
             // 如果是 I/O 命令，解析 PRP 并复制数据
             if (cmd->CDW0.OPC == NVME_OPC_WRITE) {
-                VnvmeCopyDataFromPrp(Ctx, cmd, sharedCmd);
+                NTSTATUS status = VnvmeCopyDataFromPrp(Ctx, cmd, sharedCmd);
+                if (!NT_SUCCESS(status)) {
+                    // PRP 解析或数据复制失败，释放槽位并跳过
+                    TraceEvents(TRACE_LEVEL_ERROR, TRACE_COMMAND,
+                               "Failed to copy PRP data: 0x%08X", status);
+                    VnvmeReleaseCommandSlot(Ctx, sharedCmd);
+                    idx = (idx + 1) % sq->Size;
+                    continue;
+                }
             }
             
             VnvmeSubmitCommandToUser(Ctx, sharedCmd);
@@ -440,8 +467,10 @@ VOID VnvmePostCompletion(
     
     PNVME_COMPLETION cqBase = (PNVME_COMPLETION)cq->MappedAddr;
     
-    // 设置 Phase Tag
-    Completion->Status = (Completion->Status & ~1) | (cq->Phase ? 1 : 0);
+    // 设置 Phase Tag (bit 0)
+    // 先清除原有 Phase 位，再根据当前队列 Phase 设置
+    USHORT statusWithPhase = (Completion->Status & 0xFFFE) | (cq->Phase ? 1 : 0);
+    Completion->Status = statusWithPhase;
     
     // 写入 CQ
     RtlCopyMemory(&cqBase[cq->Tail], Completion, sizeof(NVME_COMPLETION));

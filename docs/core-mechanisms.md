@@ -4,6 +4,100 @@
 
 ---
 
+## 前置要求
+
+### 头文件依赖
+
+实现本文档中的代码需要以下头文件：
+
+```c
+// Windows 内核驱动必需
+#include <ntddk.h>
+#include <wdf.h>
+#include <wdm.h>
+#include <ntstrsafe.h>
+
+// 可选: ETW 跟踪
+#include <evntrace.h>
+
+// 项目头文件
+#include "vnvme_defs.h"     // 常量定义 (见下方)
+#include "vnvme_types.h"    // 类型定义
+#include "trace.h"          // WPP 跟踪宏
+```
+
+### 参考规范
+
+| 规范 | 版本 | 用途 |
+|------|------|------|
+| [NVM Express Base Specification](https://nvmexpress.org/specifications/) | 2.0 | 寄存器、命令、队列定义 |
+| [PCI Express Base Specification](https://pcisig.com/specifications) | 5.0 | 配置空间、BAR、MSI-X |
+| [Windows Driver Kit 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/) | 最新 | WDF API、内存管理 |
+
+---
+
+## 0. 常量定义
+
+在开始之前，定义本项目使用的关键常量：
+
+```c
+// ============ vnvme_defs.h ============
+
+#pragma once
+
+// NVMe 寄存器偏移 (NVMe Spec 3.1.1)
+#define NVME_REG_CAP          0x00    // Controller Capabilities (64-bit)
+#define NVME_REG_VS           0x08    // Version (32-bit)
+#define NVME_REG_INTMS        0x0C    // Interrupt Mask Set (32-bit)
+#define NVME_REG_INTMC        0x10    // Interrupt Mask Clear (32-bit)
+#define NVME_REG_CC           0x14    // Controller Configuration (32-bit)
+#define NVME_REG_CSTS         0x1C    // Controller Status (32-bit)
+#define NVME_REG_AQA          0x24    // Admin Queue Attributes (32-bit)
+#define NVME_REG_ASQ          0x28    // Admin SQ Base Address (64-bit)
+#define NVME_REG_ACQ          0x30    // Admin CQ Base Address (64-bit)
+#define NVME_REG_DOORBELL     0x1000  // Doorbell 区域起始
+
+// CC 寄存器位域
+#define NVME_CC_EN_MASK       0x00000001  // Controller Enable
+
+// CSTS 寄存器位域
+#define NVME_CSTS_RDY         0x00000001  // Ready
+#define NVME_CSTS_CFS         0x00000002  // Controller Fatal Status
+
+// BAR0 布局
+#define VNVME_BAR0_SIZE             0x10000   // 64KB
+#define VNVME_BAR0_REGS_OFFSET      0x0000    // 寄存器区域
+#define VNVME_BAR0_DOORBELL_OFFSET  0x1000    // Doorbell 区域
+#define VNVME_BAR0_MSIX_TABLE_OFF   0x2000    // MSI-X Table
+#define VNVME_BAR0_MSIX_PBA_OFF     0x2400    // MSI-X PBA
+
+// 轮询参数
+#define VNVME_MIN_POLL_INTERVAL_US  10        // 最小轮询间隔 10μs
+#define VNVME_MAX_POLL_INTERVAL_US  1000      // 最大轮询间隔 1ms
+#define VNVME_INITIAL_POLL_US       100       // 初始轮询间隔 100μs
+
+// 队列限制
+#define VNVME_MAX_IO_QUEUES         64        // 最大 I/O 队列数
+#define VNVME_MAX_QUEUE_ENTRIES     4096      // 每队列最大条目数
+#define VNVME_MAX_PRP_SEGMENTS      256       // PRP 解析最大段数
+
+// 共享内存
+#define VNVME_SHARED_MAGIC          0x454D564E  // "VNME"
+#define VNVME_SHARED_VERSION        1
+#define VNVME_COMMAND_RING_SIZE     (1 << 20)   // 1MB
+#define VNVME_COMPLETION_RING_SIZE  (256 << 10) // 256KB
+#define VNVME_DATA_BUFFER_SIZE      (62 << 20)  // 62MB
+#define VNVME_DATA_BUFFER_BLOCK_SIZE 4096       // 4KB 块
+
+// 心跳
+#define VNVME_MAX_MISSED_HEARTBEATS 5
+
+// 批处理
+#define VNVME_MAX_BATCH_SIZE        32
+```
+
+---
+
 ## 1. Doorbell 轮询引擎
 
 ### 为什么需要轮询？
@@ -94,9 +188,12 @@ VOID VnvmePollTimerCallback(WDFTIMER Timer)
             poll->AdminCQHead = newAdminCQHead;
         }
         
-        // I/O Queues (每个 SQ/CQ 对占用 8 字节)
+        // I/O Queues Doorbell 计算
+        // 对于 QID n: SQ Tail @ 0x1000 + 2n * stride, CQ Head @ 0x1000 + (2n+1) * stride
+        // 当 stride=4 (CAP.DSTRD=0): 每个 QID 占用 8 字节 (SQ 4 + CQ 4)
+        // 公式简化: offset_from_doorbell_base = qid * 2 * stride = qid * 8
         for (USHORT qid = 1; qid <= ctx->ActiveIoQueueCount; qid++) {
-            ULONG offset = qid * 8;  // Doorbell Stride = 4, 每对 8 字节
+            ULONG offset = qid * 2 * 4;  // = qid * 8 when stride=4 (DSTRD=0)
             
             USHORT newSQTail = *(volatile USHORT*)(doorbellBase + offset);
             if (newSQTail != poll->IoSQTails[qid]) {
@@ -151,15 +248,19 @@ VOID VnvmePollTimerCallback(WDFTIMER Timer)
 VOID VnvmeBatchReadDoorbells(PVNVME_CONTROLLER_CONTEXT Ctx)
 {
     // 读取前 64 字节 (覆盖 Admin + 7 个 I/O 队列)
-    // 使用 SIMD 指令一次性读取
-    __m256i doorbells1 = _mm256_load_si256(
-        (__m256i*)(Ctx->Bar0VirtAddr + VNVME_BAR0_DOORBELL_OFFSET));
-    __m256i doorbells2 = _mm256_load_si256(
-        (__m256i*)(Ctx->Bar0VirtAddr + VNVME_BAR0_DOORBELL_OFFSET + 32));
+    // 使用 RtlCopyMemory，编译器会自动优化为适当的指令
+    // 注意：在内核态使用 SIMD 需要 KeSaveExtendedProcessorState
+    RtlCopyMemory(
+        Ctx->DoorbellCache,
+        (PUCHAR)Ctx->Bar0VirtAddr + VNVME_BAR0_DOORBELL_OFFSET,
+        64);
     
-    // 存储到本地缓存
-    _mm256_store_si256((__m256i*)&Ctx->DoorbellCache[0], doorbells1);
-    _mm256_store_si256((__m256i*)&Ctx->DoorbellCache[8], doorbells2);
+    // 如果确实需要 SIMD 优化，必须保存/恢复扩展处理器状态：
+    // XSTATE_SAVE xstateSave;
+    // if (NT_SUCCESS(KeSaveExtendedProcessorState(XSTATE_MASK_LEGACY_SSE, &xstateSave))) {
+    //     // 使用 SSE/AVX 指令
+    //     KeRestoreExtendedProcessorState(&xstateSave);
+    // }
 }
 
 // 2. 使用 DPC 级别处理
@@ -225,6 +326,21 @@ NTSTATUS VnvmeAllocateSharedMemory(
     return STATUS_SUCCESS;
 }
 
+/*
+ * 安全注意事项:
+ * 
+ * 1. 进程跟踪: 应记录哪个进程映射了共享内存，以便在进程退出时取消映射
+ * 2. 权限验证: 应检查调用进程是否有权访问此控制器
+ * 3. CLEANUP 处理: 在 IRP_MJ_CLEANUP 中取消映射以防止悬空指针
+ * 
+ * 示例:
+ * typedef struct _VNVME_USER_MAPPING {
+ *     PEPROCESS Process;
+ *     PVOID UserAddress;
+ *     LIST_ENTRY ListEntry;
+ * } VNVME_USER_MAPPING;
+ */
+
 // 映射到用户态
 NTSTATUS VnvmeMapSharedMemoryToUser(
     PVNVME_CONTROLLER_CONTEXT Ctx,
@@ -259,6 +375,17 @@ typedef struct _VNVME_RING_BUFFER {
     ULONG EntrySize;            // 每个条目大小
     // 数据紧随其后
 } VNVME_RING_BUFFER, *PVNVME_RING_BUFFER;
+
+/*
+ * 环形缓冲区设计说明:
+ * 
+ * 1. 容量限制: 为了区分“空”和“满”状态，实际可用槽位 = Size - 1
+ *    例如: Size=4096 时，最多存放 4095 个条目
+ * 
+ * 2. 无锁设计: 使用单生产者/单消费者模型，通过内存屏障保证顺序
+ * 
+ * 3. Size 必须是 2 的幂，以便使用 (index & Mask) 进行快速取模
+ */
 
 // 检查是否有空间 (生产者调用)
 FORCEINLINE BOOLEAN VnvmeRingHasSpace(PVNVME_RING_BUFFER Ring)
@@ -426,6 +553,23 @@ NTSTATUS VnvmeParsePrp(
 ### 数据复制
 
 ```c
+/*
+ * PRP 内存映射注意事项:
+ * 
+ * PRP 指向的是普通 RAM，不是 I/O 空间。虽然 MmMapIoSpace 可以工作，
+ * 但更优的方案是使用 MDL:
+ * 
+ * 方案 1 (当前): MmMapIoSpace - 简单但可能影响缓存策略
+ * 方案 2 (推荐): 使用 MDL + MmMapLockedPagesSpecifyCache
+ * 
+ * PMDL mdl = IoAllocateMdl(NULL, length, FALSE, FALSE, NULL);
+ * MmBuildMdlForNonPagedPool(mdl);
+ * PVOID mapped = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+ * // ... 使用 mapped ...
+ * MmUnmapLockedPages(mapped, mdl);
+ * IoFreeMdl(mdl);
+ */
+
 // 从 PRP 复制数据到共享缓冲区 (用于 Write 命令)
 NTSTATUS VnvmeCopyFromPrp(
     PVNVME_CONTROLLER_CONTEXT Ctx,
@@ -782,6 +926,10 @@ VOID VnvmeHeartbeatTimerCallback(WDFTIMER Timer)
     PVNVME_SHARED_CONTROL ctrl = 
         (PVNVME_SHARED_CONTROL)Ctx->SharedMemoryKernel;
     
+    // 读取用户态心跳计数器
+    // 注意: InterlockedCompareExchange64(&x, 0, 0) 是原子读取 x 的技巧
+    // 替代方案: InterlockedOr64(&ctrl->UserHeartbeat, 0) 也可返回原值
+    // 或直接: *(volatile LONG64*)&ctrl->UserHeartbeat
     LONG64 userHeartbeat = InterlockedCompareExchange64(
         &ctrl->UserHeartbeat, 0, 0);
     

@@ -1,798 +1,804 @@
 # 核心数据结构
 
-本文档定义 Virtual NVMe StorPort Miniport 驱动的核心数据结构。
+本文档定义虚拟 NVMe 控制器仿真器的核心数据结构。
 
-## 编译器和平台注意事项
+## 控制器上下文
 
-```c
-// 使用 StorPort 头文件
-#include <storport.h>
-#include <ntddscsi.h>
-#include <srb.h>
-
-// 结构对齐设置
-#pragma pack(push, 1)   // NVMe 规范结构使用 1 字节对齐
-// ... NVMe 结构定义 ...
-#pragma pack(pop)
-
-// 驱动池标签
-#define VNVME_POOL_TAG          'vmNV'
-#define VNVME_BACKEND_TAG       'eBNV'
-#define VNVME_LUN_TAG           'uLNV'
-
-// 限制常量
-#define VNVME_MAX_TARGETS       1       // 目标数量
-#define VNVME_MAX_LUNS          64      // 每目标最大 LUN 数
-#define VNVME_MAX_TRANSFER_SIZE (4 * 1024 * 1024)  // 4MB
-```
-
-## StorPort 扩展结构
-
-### 适配器扩展 (DeviceExtension)
+### 主控制器结构
 
 ```c
 //
-// 适配器状态枚举
+// 控制器状态
 //
-typedef enum _VNVME_ADAPTER_STATE {
-    VNVME_ADAPTER_STATE_UNINITIALIZED = 0,  // 未初始化
-    VNVME_ADAPTER_STATE_INITIALIZING,       // 初始化中
-    VNVME_ADAPTER_STATE_RUNNING,            // 运行中
-    VNVME_ADAPTER_STATE_STOPPED,            // 已停止
-    VNVME_ADAPTER_STATE_RESETTING,          // 重置中
-    VNVME_ADAPTER_STATE_ERROR               // 错误状态
-} VNVME_ADAPTER_STATE;
+typedef enum _VNVME_CONTROLLER_STATE {
+    VnvmeStateNotInitialized = 0,
+    VnvmeStateDisabled,          // CC.EN = 0
+    VnvmeStateEnabled,           // CC.EN = 1, 等待 Ready
+    VnvmeStateReady,             // CSTS.RDY = 1
+    VnvmeStateShuttingDown,      // CC.SHN 设置
+    VnvmeStateShutdownComplete,  // CSTS.SHST = 10b
+    VnvmeStateFailed             // 致命错误
+} VNVME_CONTROLLER_STATE;
 
 //
-// 适配器扩展结构 (HW_INITIALIZATION_DATA.DeviceExtensionSize)
+// 主控制器上下文
 //
-typedef struct _VNVME_ADAPTER_EXTENSION {
-    //
-    // 自引用 (便于从回调中获取)
-    //
-    struct _VNVME_ADAPTER_EXTENSION* Self;
+typedef struct _VNVME_CONTROLLER {
+    // === 设备标识 ===
+    ULONG Signature;             // 'VNVM'
+    ULONG ControllerIndex;       // 控制器索引 (0-based)
+    WCHAR DeviceName[64];        // 设备名称
     
-    //
-    // 适配器状态
-    //
-    VNVME_ADAPTER_STATE State;
+    // === WDF 对象 ===
+    WDFDEVICE WdfDevice;
+    WDFQUEUE DefaultQueue;
+    WDFINTERRUPT Interrupt;
     
-    //
-    // 适配器配置
-    //
-    VNVME_ADAPTER_CONFIG Config;
+    // === 设备对象 ===
+    PDEVICE_OBJECT FunctionalDeviceObject;
+    PDEVICE_OBJECT PhysicalDeviceObject;
+    PDEVICE_OBJECT LowerDeviceObject;
     
-    //
-    // LUN 管理
-    //
-    KSPIN_LOCK      LunListLock;        // LUN 列表锁
-    LIST_ENTRY      LunList;            // LUN 链表头
-    ULONG           LunCount;           // LUN 数量
+    // === 控制器状态 ===
+    VNVME_CONTROLLER_STATE State;
+    BOOLEAN ShutdownNotification;
     
-    //
-    // 后端管理器
-    //
-    PVNVME_BACKEND_MANAGER BackendManager;
+    // === NVMe 寄存器 ===
+    VNVME_REGISTERS Registers;
     
-    //
-    // 统计信息
-    //
-    VNVME_ADAPTER_STATS Stats;
+    // === BAR0 内存 ===
+    PVOID Bar0VirtualAddress;
+    ULONG Bar0Size;
+    PHYSICAL_ADDRESS Bar0PhysicalAddress;
     
-    //
-    // 注册表配置路径
-    //
-    UNICODE_STRING RegistryPath;
+    // === Admin Queue ===
+    VNVME_SUBMISSION_QUEUE AdminSQ;
+    VNVME_COMPLETION_QUEUE AdminCQ;
     
-#if DBG
-    //
-    // 调试: 故障注入
-    //
-    VNVME_FAULT_INJECTION FaultInjection;
-#endif
-
-} VNVME_ADAPTER_EXTENSION, *PVNVME_ADAPTER_EXTENSION;
-```
-
-### LUN 扩展 (SpecificLuExtension)
-
-```c
-//
-// LUN 状态枚举
-//
-typedef enum _VNVME_LUN_STATE {
-    VNVME_LUN_STATE_NOT_PRESENT = 0,    // 不存在
-    VNVME_LUN_STATE_INITIALIZING,       // 初始化中
-    VNVME_LUN_STATE_READY,              // 就绪
-    VNVME_LUN_STATE_OFFLINE,            // 离线
-    VNVME_LUN_STATE_ERROR               // 错误
-} VNVME_LUN_STATE;
-
-//
-// LUN 扩展结构 (HW_INITIALIZATION_DATA.SpecificLuExtensionSize)
-//
-typedef struct _VNVME_LU_EXTENSION {
-    //
-    // 链表节点 (用于适配器 LunList)
-    //
-    LIST_ENTRY ListEntry;
+    // === I/O Queues ===
+    LIST_ENTRY IoSqList;         // I/O Submission Queue 列表
+    LIST_ENTRY IoCqList;         // I/O Completion Queue 列表
+    KSPIN_LOCK QueueLock;        // 队列列表锁
+    USHORT MaxIoQueues;          // 最大 I/O 队列数 (CAP.MQES)
     
-    //
-    // 所属适配器
-    //
-    PVNVME_ADAPTER_EXTENSION AdapterExtension;
+    // === 命名空间 ===
+    LIST_ENTRY NamespaceList;    // 命名空间列表
+    KSPIN_LOCK NamespaceLock;
+    ULONG NamespaceCount;
     
-    //
-    // 地址三元组
-    //
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    
-    //
-    // LUN 状态
-    //
-    VNVME_LUN_STATE State;
-    
-    //
-    // 磁盘属性
-    //
-    ULONGLONG TotalSectors;             // 总扇区数
-    ULONG SectorSize;                   // 扇区大小 (512/4096)
-    ULONGLONG TotalSize;                // 总容量 (字节)
-    BOOLEAN ReadOnly;                   // 只读标志
-    BOOLEAN RemovableMedia;             // 可移除介质
-    
-    //
-    // 设备标识
-    //
-    CHAR VendorId[8 + 1];               // 厂商标识 (8字符)
-    CHAR ProductId[16 + 1];             // 产品标识 (16字符)
-    CHAR SerialNumber[20 + 1];          // 序列号 (20字符)
-    UCHAR DeviceIdentifier[16];         // 唯一标识符 (用于 MPIO)
-    
-    //
-    // 存储后端
-    //
+    // === 后端存储 ===
     PVNVME_BACKEND Backend;
     
-    //
-    // 同步锁
-    //
-    KSPIN_LOCK Lock;
+    // === 工作线程 ===
+    VNVME_QUEUE_WORKER QueueWorker;
     
-    //
-    // 统计信息
-    //
-    VNVME_LUN_STATS Stats;
+    // === 中断 ===
+    VNVME_INTERRUPT_STATE InterruptState;
+    VNVME_INTERRUPT_COALESCING IntCoalescing;
     
-} VNVME_LU_EXTENSION, *PVNVME_LU_EXTENSION;
+    // === 电源管理 ===
+    DEVICE_POWER_STATE DevicePowerState;
+    SYSTEM_POWER_STATE SystemPowerState;
+    
+    // === 性能计数器 ===
+    ULONG64 PerformanceFrequency;
+    VNVME_STATISTICS Statistics;
+    
+    // === 配置 ===
+    VNVME_CONFIG Config;
+    
+} VNVME_CONTROLLER, *PVNVME_CONTROLLER;
+
+#define VNVME_CONTROLLER_SIGNATURE 'MVNV'
 ```
 
-### SRB 扩展 (SrbExtension)
+### NVMe 寄存器结构
 
 ```c
 //
-// SRB 扩展结构 (HW_INITIALIZATION_DATA.SrbExtensionSize)
+// NVMe 控制器寄存器 (BAR0)
 //
-typedef struct _VNVME_SRB_EXTENSION {
-    //
-    // 关联的 LUN
-    //
-    PVNVME_LU_EXTENSION LuExtension;
+typedef struct _VNVME_REGISTERS {
+    // 0x00: Controller Capabilities
+    NVME_CAP CAP;
     
-    //
-    // I/O 上下文
-    //
-    ULONGLONG StartLba;                 // 起始 LBA
-    ULONG SectorCount;                  // 扇区数
-    ULONG BytesTransferred;             // 已传输字节数
+    // 0x08: Version
+    NVME_VS VS;
     
-    //
-    // 异步 I/O 支持
-    //
-    PVNVME_BACKEND_IO BackendIo;        // 后端 I/O 上下文
+    // 0x0C: Interrupt Mask Set
+    ULONG INTMS;
     
-    //
-    // 时间戳 (性能分析)
-    //
+    // 0x10: Interrupt Mask Clear
+    ULONG INTMC;
+    
+    // 0x14: Controller Configuration
+    NVME_CC CC;
+    
+    // 0x18: Reserved
+    ULONG Reserved1;
+    
+    // 0x1C: Controller Status
+    NVME_CSTS CSTS;
+    
+    // 0x20: NVM Subsystem Reset
+    ULONG NSSR;
+    
+    // 0x24: Admin Queue Attributes
+    NVME_AQA AQA;
+    
+    // 0x28: Admin Submission Queue Base Address
+    ULONG64 ASQ;
+    
+    // 0x30: Admin Completion Queue Base Address
+    ULONG64 ACQ;
+    
+    // 0x38: Controller Memory Buffer Location
+    ULONG CMBLOC;
+    
+    // 0x3C: Controller Memory Buffer Size
+    ULONG CMBSZ;
+    
+} VNVME_REGISTERS, *PVNVME_REGISTERS;
+```
+
+### 寄存器位定义
+
+```c
+//
+// CAP - Controller Capabilities (64-bit)
+//
+typedef union _NVME_CAP {
+    struct {
+        ULONG64 MQES   : 16;  // Maximum Queue Entries Supported (0-based)
+        ULONG64 CQR    : 1;   // Contiguous Queues Required
+        ULONG64 AMS    : 2;   // Arbitration Mechanism Supported
+        ULONG64 Rsvd1  : 5;
+        ULONG64 TO     : 8;   // Timeout (in 500ms units)
+        ULONG64 DSTRD  : 4;   // Doorbell Stride (2^(2+DSTRD) bytes)
+        ULONG64 NSSRS  : 1;   // NVM Subsystem Reset Supported
+        ULONG64 CSS    : 8;   // Command Sets Supported
+        ULONG64 BPS    : 1;   // Boot Partition Support
+        ULONG64 CPS    : 2;   // Controller Power Scope
+        ULONG64 MPSMIN : 4;   // Memory Page Size Minimum (2^(12+MPSMIN))
+        ULONG64 MPSMAX : 4;   // Memory Page Size Maximum
+        ULONG64 PMRS   : 1;   // Persistent Memory Region Supported
+        ULONG64 CMBS   : 1;   // Controller Memory Buffer Supported
+        ULONG64 NSSS   : 1;   // NVM Subsystem Shutdown Supported
+        ULONG64 CRMS   : 2;   // Controller Ready Modes Supported
+        ULONG64 Rsvd2  : 3;
+    };
+    ULONG64 AsUlong64;
+} NVME_CAP;
+
+//
+// VS - Version (32-bit)
+//
+typedef union _NVME_VS {
+    struct {
+        ULONG TER : 8;   // Tertiary Version
+        ULONG MNR : 8;   // Minor Version
+        ULONG MJR : 16;  // Major Version
+    };
+    ULONG AsUlong;
+} NVME_VS;
+
+//
+// CC - Controller Configuration (32-bit)
+//
+typedef union _NVME_CC {
+    struct {
+        ULONG EN     : 1;   // Enable
+        ULONG Rsvd1  : 3;
+        ULONG CSS    : 3;   // I/O Command Set Selected
+        ULONG MPS    : 4;   // Memory Page Size (2^(12+MPS))
+        ULONG AMS    : 3;   // Arbitration Mechanism Selected
+        ULONG SHN    : 2;   // Shutdown Notification
+        ULONG IOSQES : 4;   // I/O Submission Queue Entry Size (2^n)
+        ULONG IOCQES : 4;   // I/O Completion Queue Entry Size (2^n)
+        ULONG CRIME  : 1;   // Controller Ready Independent of Media Enable
+        ULONG Rsvd2  : 7;
+    };
+    ULONG AsUlong;
+} NVME_CC;
+
+//
+// CSTS - Controller Status (32-bit)
+//
+typedef union _NVME_CSTS {
+    struct {
+        ULONG RDY   : 1;   // Ready
+        ULONG CFS   : 1;   // Controller Fatal Status
+        ULONG SHST  : 2;   // Shutdown Status
+        ULONG NSSRO : 1;   // NVM Subsystem Reset Occurred
+        ULONG PP    : 1;   // Processing Paused
+        ULONG ST    : 1;   // Shutdown Type
+        ULONG Rsvd  : 25;
+    };
+    ULONG AsUlong;
+} NVME_CSTS;
+
+//
+// AQA - Admin Queue Attributes (32-bit)
+//
+typedef union _NVME_AQA {
+    struct {
+        ULONG ASQS  : 12;  // Admin Submission Queue Size (0-based)
+        ULONG Rsvd1 : 4;
+        ULONG ACQS  : 12;  // Admin Completion Queue Size (0-based)
+        ULONG Rsvd2 : 4;
+    };
+    ULONG AsUlong;
+} NVME_AQA;
+```
+
+## 命名空间
+
+### 命名空间结构
+
+```c
+//
+// 命名空间
+//
+typedef struct _VNVME_NAMESPACE {
+    // 链表节点
+    LIST_ENTRY ListEntry;
+    
+    // 命名空间 ID (1-based)
+    ULONG NsId;
+    
+    // 唯一标识
+    GUID Guid;
+    UCHAR Nguid[16];
+    UCHAR Eui64[8];
+    
+    // 容量信息
+    ULONG64 TotalBlocks;     // 总逻辑块数
+    ULONG BlockSize;         // 逻辑块大小 (512 或 4096)
+    ULONG64 TotalBytes;      // 总字节数
+    
+    // 后端偏移
+    ULONG64 BackendOffset;   // 在后端存储中的偏移
+    
+    // 状态
+    BOOLEAN Active;
+    BOOLEAN ReadOnly;
+    BOOLEAN ThinProvisioned;
+    
+    // 格式信息
+    UCHAR FormattedLbaSize;  // FLBAS
+    UCHAR NumberOfLbaFormats;// NLBAF
+    
+    // LBA 格式数组
+    NVME_LBAF LbaFormats[64];
+    
+    // 特性
+    UCHAR NsFeatures;        // NSFEAT
+    
+    // 统计
+    ULONG64 ReadCommands;
+    ULONG64 WriteCommands;
+    ULONG64 ReadBytes;
+    ULONG64 WriteBytes;
+    
+} VNVME_NAMESPACE, *PVNVME_NAMESPACE;
+
+//
+// LBA 格式
+//
+typedef struct _NVME_LBAF {
+    USHORT MetadataSize;     // MS: Metadata Size
+    UCHAR LbaDataSize;       // LBADS: LBA Data Size (2^n bytes)
+    UCHAR RelativePerformance; // RP: 00b-Best, 01b-Better, 10b-Good, 11b-Degraded
+} NVME_LBAF, *PNVME_LBAF;
+```
+
+## 队列结构
+
+### Submission Queue
+
+```c
+//
+// Submission Queue
+//
+typedef struct _VNVME_SUBMISSION_QUEUE {
+    // 链表节点
+    LIST_ENTRY ListEntry;
+    
+    // 队列属性
+    USHORT QueueId;
+    USHORT Size;             // 条目数
+    UCHAR Priority;          // 0=Urgent, 1=High, 2=Medium, 3=Low
+    
+    // 内存地址
+    ULONG64 BaseAddr;        // 物理地址
+    PVOID VirtAddr;          // 映射的虚拟地址
+    PMDL Mdl;               // 内存描述符列表
+    
+    // 队列指针
+    volatile USHORT Head;    // 控制器消费位置
+    volatile USHORT Tail;    // 主机生产位置
+    
+    // 关联的 CQ
+    struct _VNVME_COMPLETION_QUEUE* CQ;
+    
+    // 流控
+    ULONG MaxOutstanding;    // 最大未完成命令数
+    volatile LONG Outstanding; // 当前未完成命令数
+    
+    // 统计
+    ULONG64 CommandsProcessed;
+    ULONG64 CommandErrors;
+    
+    // 同步
+    KSPIN_LOCK Lock;
+    
+} VNVME_SUBMISSION_QUEUE, *PVNVME_SUBMISSION_QUEUE;
+```
+
+### Completion Queue
+
+```c
+//
+// Completion Queue
+//
+typedef struct _VNVME_COMPLETION_QUEUE {
+    // 链表节点
+    LIST_ENTRY ListEntry;
+    
+    // 队列属性
+    USHORT QueueId;
+    USHORT Size;             // 条目数
+    
+    // 内存地址
+    ULONG64 BaseAddr;        // 物理地址
+    PVOID VirtAddr;          // 映射的虚拟地址
+    PMDL Mdl;               // 内存描述符列表
+    
+    // 队列指针
+    volatile USHORT Head;    // 主机消费位置
+    volatile USHORT Tail;    // 控制器生产位置
+    
+    // Phase Tag
+    BOOLEAN Phase;
+    
+    // 中断配置
+    BOOLEAN InterruptEnabled;
+    USHORT Vector;
+    
+    // 关联的 SQ 列表
+    LIST_ENTRY SqList;
+    ULONG SqCount;
+    
+    // 统计
+    ULONG64 CompletionsPosted;
+    
+    // 同步
+    KSPIN_LOCK Lock;
+    
+} VNVME_COMPLETION_QUEUE, *PVNVME_COMPLETION_QUEUE;
+```
+
+## 后端存储
+
+### 后端接口
+
+```c
+//
+// 后端类型
+//
+typedef enum _VNVME_BACKEND_TYPE {
+    VnvmeBackendMemory,      // 内存后端 (RAM Disk)
+    VnvmeBackendFile,        // 文件后端
+    VnvmeBackendVhd,         // VHD/VHDX 后端
+    VnvmeBackendPhysical     // 物理磁盘后端
+} VNVME_BACKEND_TYPE;
+
+//
+// 后端操作函数表
+//
+typedef struct _VNVME_BACKEND_OPERATIONS {
+    // 初始化
+    NTSTATUS (*Initialize)(
+        _In_ struct _VNVME_BACKEND* Backend,
+        _In_ PVOID InitParams);
+    
+    // 关闭
+    VOID (*Shutdown)(
+        _In_ struct _VNVME_BACKEND* Backend);
+    
+    // 读取
+    NTSTATUS (*Read)(
+        _In_ struct _VNVME_BACKEND* Backend,
+        _In_ ULONG64 Offset,
+        _In_ ULONG Length,
+        _Out_writes_bytes_(Length) PVOID Buffer);
+    
+    // 写入
+    NTSTATUS (*Write)(
+        _In_ struct _VNVME_BACKEND* Backend,
+        _In_ ULONG64 Offset,
+        _In_ ULONG Length,
+        _In_reads_bytes_(Length) PVOID Buffer);
+    
+    // 刷新
+    NTSTATUS (*Flush)(
+        _In_ struct _VNVME_BACKEND* Backend);
+    
+    // TRIM/Unmap
+    NTSTATUS (*Trim)(
+        _In_ struct _VNVME_BACKEND* Backend,
+        _In_ ULONG64 Offset,
+        _In_ ULONG64 Length);
+    
+    // 获取信息
+    NTSTATUS (*GetInfo)(
+        _In_ struct _VNVME_BACKEND* Backend,
+        _Out_ struct _VNVME_BACKEND_INFO* Info);
+    
+} VNVME_BACKEND_OPERATIONS, *PVNVME_BACKEND_OPERATIONS;
+
+//
+// 后端基本结构
+//
+typedef struct _VNVME_BACKEND {
+    VNVME_BACKEND_TYPE Type;
+    PVNVME_BACKEND_OPERATIONS Operations;
+    ULONG64 Capacity;        // 总容量 (字节)
+    ULONG SectorSize;        // 扇区大小
+    BOOLEAN ReadOnly;
+    PVOID PrivateData;       // 类型特定数据
+} VNVME_BACKEND, *PVNVME_BACKEND;
+
+//
+// 后端信息
+//
+typedef struct _VNVME_BACKEND_INFO {
+    VNVME_BACKEND_TYPE Type;
+    ULONG64 Capacity;
+    ULONG64 UsedBytes;
+    ULONG SectorSize;
+    BOOLEAN SupportsTrim;
+    BOOLEAN SupportsFlush;
+    WCHAR Path[260];
+} VNVME_BACKEND_INFO, *PVNVME_BACKEND_INFO;
+```
+
+### 内存后端
+
+```c
+//
+// 内存后端私有数据
+//
+typedef struct _VNVME_MEMORY_BACKEND {
+    PVOID Memory;
+    ULONG64 Size;
+    PMDL Mdl;
+} VNVME_MEMORY_BACKEND, *PVNVME_MEMORY_BACKEND;
+
+//
+// 内存后端操作实现
+//
+static VNVME_BACKEND_OPERATIONS VnvmeMemoryBackendOps = {
+    .Initialize = VnvmeMemoryBackendInit,
+    .Shutdown   = VnvmeMemoryBackendShutdown,
+    .Read       = VnvmeMemoryBackendRead,
+    .Write      = VnvmeMemoryBackendWrite,
+    .Flush      = VnvmeMemoryBackendFlush,
+    .Trim       = VnvmeMemoryBackendTrim,
+    .GetInfo    = VnvmeMemoryBackendGetInfo
+};
+```
+
+### 文件后端
+
+```c
+//
+// 文件后端私有数据
+//
+typedef struct _VNVME_FILE_BACKEND {
+    HANDLE FileHandle;
+    PFILE_OBJECT FileObject;
+    UNICODE_STRING FilePath;
+    ULONG64 FileSize;
+    BOOLEAN SparseFile;
+} VNVME_FILE_BACKEND, *PVNVME_FILE_BACKEND;
+
+//
+// 文件后端操作实现
+//
+static VNVME_BACKEND_OPERATIONS VnvmeFileBackendOps = {
+    .Initialize = VnvmeFileBackendInit,
+    .Shutdown   = VnvmeFileBackendShutdown,
+    .Read       = VnvmeFileBackendRead,
+    .Write      = VnvmeFileBackendWrite,
+    .Flush      = VnvmeFileBackendFlush,
+    .Trim       = VnvmeFileBackendTrim,
+    .GetInfo    = VnvmeFileBackendGetInfo
+};
+```
+
+## 中断状态
+
+```c
+//
+// 中断类型
+//
+typedef enum _VNVME_INTERRUPT_TYPE {
+    VnvmeInterruptPin,       // INTx
+    VnvmeInterruptMsi,       // MSI
+    VnvmeInterruptMsix       // MSI-X
+} VNVME_INTERRUPT_TYPE;
+
+//
+// MSI-X 向量
+//
+typedef struct _VNVME_MSIX_VECTOR {
+    ULONG64 MessageAddress;
+    ULONG MessageData;
+    BOOLEAN Masked;
+    BOOLEAN Pending;
+} VNVME_MSIX_VECTOR, *PVNVME_MSIX_VECTOR;
+
+//
+// 中断状态
+//
+typedef struct _VNVME_INTERRUPT_STATE {
+    VNVME_INTERRUPT_TYPE Type;
+    
+    // MSI-X 配置
+    ULONG MsixVectorCount;
+    VNVME_MSIX_VECTOR MsixVectors[64];  // 最多 64 个向量
+    
+    // MSI-X Table BAR
+    PVOID MsixTableVa;
+    ULONG MsixTableSize;
+    
+    // 中断掩码
+    ULONG InterruptMask;
+    
+} VNVME_INTERRUPT_STATE, *PVNVME_INTERRUPT_STATE;
+```
+
+## 统计信息
+
+```c
+//
+// 控制器统计
+//
+typedef struct _VNVME_STATISTICS {
+    // 命令计数
+    ULONG64 AdminCommandsReceived;
+    ULONG64 AdminCommandsCompleted;
+    ULONG64 IoCommandsReceived;
+    ULONG64 IoCommandsCompleted;
+    
+    // 数据传输
+    ULONG64 TotalReadBytes;
+    ULONG64 TotalWriteBytes;
+    ULONG64 TotalReadCommands;
+    ULONG64 TotalWriteCommands;
+    
+    // 错误计数
+    ULONG64 CommandErrors;
+    ULONG64 MediaErrors;
+    ULONG64 InternalErrors;
+    
+    // 中断
+    ULONG64 InterruptsGenerated;
+    
+    // 时间戳
     LARGE_INTEGER StartTime;
+    LARGE_INTEGER LastCommandTime;
     
-} VNVME_SRB_EXTENSION, *PVNVME_SRB_EXTENSION;
+} VNVME_STATISTICS, *PVNVME_STATISTICS;
 ```
 
 ## 配置结构
 
-### 适配器配置
-
 ```c
 //
-// 适配器配置 (从注册表加载)
+// 控制器配置
 //
-typedef struct _VNVME_ADAPTER_CONFIG {
-    //
-    // 最大 LUN 数量
-    //
-    ULONG MaxLuns;
+typedef struct _VNVME_CONFIG {
+    // 设备 ID
+    USHORT VendorId;
+    USHORT DeviceId;
+    USHORT SubsystemVendorId;
+    USHORT SubsystemDeviceId;
+    UCHAR RevisionId;
     
-    //
-    // 最大传输大小
-    //
-    ULONG MaxTransferSize;
+    // 容量配置
+    ULONG64 TotalCapacityBytes;
+    ULONG BlockSize;
     
-    //
-    // 默认后端类型
-    //
-    VNVME_BACKEND_TYPE DefaultBackendType;
+    // 队列配置
+    USHORT MaxQueueEntries;     // CAP.MQES
+    USHORT MaxIoQueues;
     
-    //
-    // 默认后端路径 (文件后端)
-    //
-    WCHAR DefaultBackendPath[260];
+    // 性能配置
+    ULONG MaxTransferSize;      // 最大传输大小 (字节)
+    BOOLEAN EnableCoalescing;   // 中断合并
+    ULONG CoalesceThreshold;    // 合并阈值
+    ULONG CoalesceTimeUs;       // 合并时间 (微秒)
     
-    //
-    // 启用 UNMAP/TRIM 支持
-    //
-    BOOLEAN EnableUnmap;
-    
-    //
-    // 启用 FUA (Force Unit Access)
-    //
-    BOOLEAN EnableFua;
-    
-    //
-    // 启用 Write Cache
-    //
-    BOOLEAN EnableWriteCache;
-    
-    //
-    // 启用 MPIO 支持
-    //
-    BOOLEAN EnableMpio;
-    
-} VNVME_ADAPTER_CONFIG, *PVNVME_ADAPTER_CONFIG;
-```
-
-### LUN 创建配置
-
-```c
-//
-// LUN 创建输入参数
-//
-typedef struct _VNVME_LUN_CONFIG {
-    //
-    // 地址 (可选，0 表示自动分配)
-    //
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    
-    //
-    // 磁盘大小
-    //
-    ULONGLONG SizeInBytes;
-    
-    //
-    // 扇区大小
-    //
-    ULONG SectorSize;                   // 512 或 4096
-    
-    //
-    // 只读标志
-    //
-    BOOLEAN ReadOnly;
-    
-    //
-    // 设备标识 (可选)
-    //
-    CHAR VendorId[8];
-    CHAR ProductId[16];
-    CHAR SerialNumber[20];
-    
-    //
     // 后端配置
-    //
-    VNVME_BACKEND_CONFIG BackendConfig;
-    
-} VNVME_LUN_CONFIG, *PVNVME_LUN_CONFIG;
-```
-
-## 存储后端结构
-
-### 后端类型枚举
-
-```c
-typedef enum _VNVME_BACKEND_TYPE {
-    VNVME_BACKEND_MEMORY = 0,   // 内存后端 (非持久)
-    VNVME_BACKEND_FILE   = 1,   // 文件后端 (持久)
-    VNVME_BACKEND_VHD    = 2,   // VHD/VHDX 后端 (持久)
-    VNVME_BACKEND_REMOTE = 3,   // 远程后端 (预留)
-    VNVME_BACKEND_MAX
-} VNVME_BACKEND_TYPE;
-```
-
-### 后端能力标志
-
-```c
-typedef enum _VNVME_BACKEND_CAPS {
-    VNVME_BACKEND_CAP_READ       = 0x00000001,  // 支持读取
-    VNVME_BACKEND_CAP_WRITE      = 0x00000002,  // 支持写入
-    VNVME_BACKEND_CAP_FLUSH      = 0x00000004,  // 支持刷新
-    VNVME_BACKEND_CAP_TRIM       = 0x00000008,  // 支持 TRIM/UNMAP
-    VNVME_BACKEND_CAP_FUA        = 0x00000010,  // 支持 Force Unit Access
-    VNVME_BACKEND_CAP_RESIZE     = 0x00000020,  // 支持动态调整大小
-    VNVME_BACKEND_CAP_SNAPSHOT   = 0x00000040,  // 支持快照
-    VNVME_BACKEND_CAP_PERSISTENT = 0x00000080,  // 数据持久化
-    VNVME_BACKEND_CAP_ASYNC      = 0x00000100,  // 支持异步 I/O
-} VNVME_BACKEND_CAPS;
-```
-
-### 后端配置结构
-
-```c
-//
-// 后端创建配置
-//
-typedef struct _VNVME_BACKEND_CONFIG {
-    //
-    // 后端类型
-    //
-    VNVME_BACKEND_TYPE Type;
-    
-    //
-    // 大小 (字节)
-    //
-    ULONGLONG Size;
-    
-    //
-    // 块大小
-    //
-    ULONG BlockSize;
-    
-    //
-    // 只读
-    //
-    BOOLEAN ReadOnly;
-    
-    //
-    // 创建新后端 vs 打开现有
-    //
-    BOOLEAN CreateNew;
-    
-    //
-    // 类型特定配置
-    //
-    union {
-        // 内存后端
-        struct {
-            BOOLEAN PreAllocate;        // 预分配全部内存
-        } Memory;
-        
-        // 文件后端
-        struct {
-            WCHAR FilePath[260];        // 文件路径
-            BOOLEAN SparseFile;         // 使用稀疏文件
-            BOOLEAN NoBuffering;        // 直接 I/O
-            BOOLEAN WriteThrough;       // 写透模式
-        } File;
-        
-        // VHD 后端
-        struct {
-            WCHAR VhdPath[260];         // VHD 路径
-            ULONG VhdType;              // Fixed/Dynamic/Differencing
-        } Vhd;
-    };
-    
-} VNVME_BACKEND_CONFIG, *PVNVME_BACKEND_CONFIG;
-```
-
-### 后端实例结构
-
-```c
-//
-// 后端实例
-//
-typedef struct _VNVME_BACKEND {
-    //
-    // 后端类型
-    //
-    VNVME_BACKEND_TYPE Type;
-    
-    //
-    // 能力标志
-    //
-    ULONG Capabilities;
-    
-    //
-    // 大小信息
-    //
-    ULONGLONG TotalSize;
-    ULONG BlockSize;
-    BOOLEAN ReadOnly;
-    
-    //
-    // 类型特定数据
-    //
-    union {
-        // 内存后端
-        struct {
-            PVOID Buffer;
-            SIZE_T BufferSize;
-        } Memory;
-        
-        // 文件后端
-        struct {
-            HANDLE FileHandle;
-            PFILE_OBJECT FileObject;
-            UNICODE_STRING FilePath;
-        } File;
-        
-        // VHD 后端
-        struct {
-            HANDLE VhdHandle;
-            UNICODE_STRING VhdPath;
-        } Vhd;
-    };
-    
-    //
-    // 操作函数表
-    //
-    PVNVME_BACKEND_OPS Operations;
-    
-    //
-    // 同步锁
-    //
-    ERESOURCE Lock;
-    
-} VNVME_BACKEND, *PVNVME_BACKEND;
-```
-
-### 后端操作函数表
-
-```c
-//
-// 后端操作接口 (虚函数表)
-//
-typedef struct _VNVME_BACKEND_OPS {
-    //
-    // 初始化后端
-    //
-    NTSTATUS (*Initialize)(
-        _Out_ PVNVME_BACKEND* Backend,
-        _In_ PVNVME_BACKEND_CONFIG Config);
-    
-    //
-    // 获取后端信息
-    //
-    NTSTATUS (*GetInfo)(
-        _In_ PVNVME_BACKEND Backend,
-        _Out_ PVNVME_BACKEND_INFO Info);
-    
-    //
-    // 同步读取
-    //
-    NTSTATUS (*Read)(
-        _In_ PVNVME_BACKEND Backend,
-        _In_ ULONGLONG Offset,
-        _In_ ULONG Length,
-        _Out_writes_bytes_(Length) PVOID Buffer);
-    
-    //
-    // 同步写入
-    //
-    NTSTATUS (*Write)(
-        _In_ PVNVME_BACKEND Backend,
-        _In_ ULONGLONG Offset,
-        _In_ ULONG Length,
-        _In_reads_bytes_(Length) PVOID Buffer);
-    
-    //
-    // 刷新缓存
-    //
-    NTSTATUS (*Flush)(
-        _In_ PVNVME_BACKEND Backend);
-    
-    //
-    // TRIM/UNMAP
-    //
-    NTSTATUS (*Trim)(
-        _In_ PVNVME_BACKEND Backend,
-        _In_ ULONGLONG Offset,
-        _In_ ULONGLONG Length);
-    
-    //
-    // 动态调整大小
-    //
-    NTSTATUS (*Resize)(
-        _In_ PVNVME_BACKEND Backend,
-        _In_ ULONGLONG NewSize);
-    
-    //
-    // 关闭后端
-    //
-    VOID (*Close)(
-        _In_ PVNVME_BACKEND Backend);
-    
-} VNVME_BACKEND_OPS, *PVNVME_BACKEND_OPS;
-```
-
-### 后端信息结构
-
-```c
-typedef struct _VNVME_BACKEND_INFO {
-    VNVME_BACKEND_TYPE  Type;
-    ULONG               Capabilities;
-    ULONGLONG           TotalSize;
-    ULONGLONG           UsedSize;
-    ULONG               BlockSize;
-    ULONG               OptimalTransferSize;
-    BOOLEAN             ReadOnly;
-    BOOLEAN             Sparse;
-    WCHAR               Description[64];
-} VNVME_BACKEND_INFO, *PVNVME_BACKEND_INFO;
-```
-
-## IOCTL 结构
-
-### IOCTL 定义
-
-```c
-//
-// IOCTL 控制码
-//
-#define IOCTL_VNVME_BASE                    0x800
-
-#define IOCTL_VNVME_CREATE_DISK             CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 0, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-
-#define IOCTL_VNVME_DELETE_DISK             CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 1, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-
-#define IOCTL_VNVME_QUERY_DISK              CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 2, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS)
-
-#define IOCTL_VNVME_RESIZE_DISK             CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 3, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-
-#define IOCTL_VNVME_QUERY_ADAPTER           CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 4, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS)
-
-#define IOCTL_VNVME_SET_BACKEND             CTL_CODE(IOCTL_SCSI_BASE, \
-                                                IOCTL_VNVME_BASE + 5, \
-                                                METHOD_BUFFERED, \
-                                                FILE_READ_ACCESS | FILE_WRITE_ACCESS)
-```
-
-### IOCTL 输入输出结构
-
-```c
-//
-// 创建磁盘
-//
-typedef struct _VNVME_CREATE_DISK_INPUT {
-    VNVME_LUN_CONFIG Config;
-} VNVME_CREATE_DISK_INPUT, *PVNVME_CREATE_DISK_INPUT;
-
-typedef struct _VNVME_CREATE_DISK_OUTPUT {
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    UCHAR Reserved;
-    NTSTATUS Status;
-} VNVME_CREATE_DISK_OUTPUT, *PVNVME_CREATE_DISK_OUTPUT;
-
-//
-// 删除磁盘
-//
-typedef struct _VNVME_DELETE_DISK_INPUT {
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    UCHAR Reserved;
-} VNVME_DELETE_DISK_INPUT, *PVNVME_DELETE_DISK_INPUT;
-
-//
-// 查询磁盘
-//
-typedef struct _VNVME_QUERY_DISK_INPUT {
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    UCHAR Reserved;
-} VNVME_QUERY_DISK_INPUT, *PVNVME_QUERY_DISK_INPUT;
-
-typedef struct _VNVME_QUERY_DISK_OUTPUT {
-    VNVME_LUN_STATE State;
-    ULONGLONG TotalSize;
-    ULONG SectorSize;
-    BOOLEAN ReadOnly;
     VNVME_BACKEND_TYPE BackendType;
-    VNVME_LUN_STATS Stats;
-} VNVME_QUERY_DISK_OUTPUT, *PVNVME_QUERY_DISK_OUTPUT;
-
-//
-// 调整磁盘大小
-//
-typedef struct _VNVME_RESIZE_DISK_INPUT {
-    UCHAR PathId;
-    UCHAR TargetId;
-    UCHAR Lun;
-    UCHAR Reserved;
-    ULONGLONG NewSizeInBytes;
-} VNVME_RESIZE_DISK_INPUT, *PVNVME_RESIZE_DISK_INPUT;
-
-//
-// 查询适配器
-//
-typedef struct _VNVME_QUERY_ADAPTER_OUTPUT {
-    VNVME_ADAPTER_STATE State;
-    ULONG LunCount;
-    ULONG MaxLuns;
-    VNVME_ADAPTER_STATS Stats;
-} VNVME_QUERY_ADAPTER_OUTPUT, *PVNVME_QUERY_ADAPTER_OUTPUT;
+    WCHAR BackendPath[260];
+    BOOLEAN BackendReadOnly;
+    
+    // 特性开关
+    BOOLEAN EnableTrim;
+    BOOLEAN EnableFlush;
+    BOOLEAN EnableVolatileWriteCache;
+    
+    // 调试
+    ULONG DebugLevel;
+    
+} VNVME_CONFIG, *PVNVME_CONFIG;
 ```
 
-## 统计信息结构
+## 工作项
 
 ```c
 //
-// 适配器统计
+// 命令工作项
 //
-typedef struct _VNVME_ADAPTER_STATS {
-    LONG64 TotalIoRequests;
-    LONG64 TotalBytesRead;
-    LONG64 TotalBytesWritten;
-    LONG64 TotalErrors;
-    LONG64 TotalResets;
-} VNVME_ADAPTER_STATS, *PVNVME_ADAPTER_STATS;
-
-//
-// LUN 统计
-//
-typedef struct _VNVME_LUN_STATS {
-    LONG64 ReadCommands;
-    LONG64 WriteCommands;
-    LONG64 FlushCommands;
-    LONG64 UnmapCommands;
-    LONG64 BytesRead;
-    LONG64 BytesWritten;
-    LONG64 ReadErrors;
-    LONG64 WriteErrors;
-} VNVME_LUN_STATS, *PVNVME_LUN_STATS;
+typedef struct _VNVME_COMMAND_WORK_ITEM {
+    // 链表节点
+    LIST_ENTRY ListEntry;
+    
+    // 关联的控制器
+    PVNVME_CONTROLLER Controller;
+    
+    // 关联的 SQ
+    PVNVME_SUBMISSION_QUEUE SQ;
+    
+    // 命令副本
+    NVME_COMMAND Command;
+    
+    // 完成回调
+    PIO_WORKITEM WorkItem;
+    
+    // 状态
+    NTSTATUS Status;
+    
+} VNVME_COMMAND_WORK_ITEM, *PVNVME_COMMAND_WORK_ITEM;
 ```
 
-## SCSI 相关结构
-
-### VPD 页结构
+## 内存管理
 
 ```c
 //
-// 设备标识 VPD 页 (0x83)
+// 物理内存映射条目
 //
-typedef struct _VNVME_VPD_DEVICE_ID {
-    UCHAR DeviceType : 5;
-    UCHAR DeviceTypeQualifier : 3;
-    UCHAR PageCode;
-    UCHAR Reserved;
-    UCHAR PageLength;
-    
-    // 标识符描述符列表
-    struct {
-        UCHAR CodeSet : 4;
-        UCHAR Reserved1 : 4;
-        UCHAR IdentifierType : 4;
-        UCHAR Association : 2;
-        UCHAR Reserved2 : 2;
-        UCHAR Reserved3;
-        UCHAR IdentifierLength;
-        UCHAR Identifier[16];           // NAA 或 EUI-64
-    } Descriptor;
-    
-} VNVME_VPD_DEVICE_ID, *PVNVME_VPD_DEVICE_ID;
+typedef struct _VNVME_MEMORY_MAPPING {
+    LIST_ENTRY ListEntry;
+    PHYSICAL_ADDRESS PhysicalAddress;
+    PVOID VirtualAddress;
+    SIZE_T Size;
+    PMDL Mdl;
+} VNVME_MEMORY_MAPPING, *PVNVME_MEMORY_MAPPING;
 
 //
-// 块限制 VPD 页 (0xB0)
+// 内存池标签
 //
-typedef struct _VNVME_VPD_BLOCK_LIMITS {
-    UCHAR DeviceType : 5;
-    UCHAR DeviceTypeQualifier : 3;
-    UCHAR PageCode;
-    UCHAR PageLength[2];
-    
-    UCHAR Reserved[4];
-    
-    // 最优传输长度
-    UCHAR OptimalTransferLengthGranularity[2];
-    UCHAR MaximumTransferLength[4];
-    UCHAR OptimalTransferLength[4];
-    
-    // UNMAP 限制
-    UCHAR MaximumUnmapLbaCount[4];
-    UCHAR MaximumUnmapBlockDescriptorCount[4];
-    UCHAR OptimalUnmapGranularity[4];
-    UCHAR UnmapGranularityAlignment[4];
-    
-} VNVME_VPD_BLOCK_LIMITS, *PVNVME_VPD_BLOCK_LIMITS;
+#define VNVME_POOL_TAG_GENERAL   'VNVM'  // 通用
+#define VNVME_POOL_TAG_QUEUE     'QVNM'  // 队列
+#define VNVME_POOL_TAG_NAMESPACE 'NVNM'  // 命名空间
+#define VNVME_POOL_TAG_BACKEND   'BVNM'  // 后端
+#define VNVME_POOL_TAG_COMMAND   'CVNM'  // 命令
+#define VNVME_POOL_TAG_READ      'RVNM'  // 读取数据
+#define VNVME_POOL_TAG_WRITE     'WVNM'  // 写入数据
 ```
 
-### 模式页结构
+## 辅助宏
 
 ```c
 //
-// 缓存模式页 (0x08)
+// 结构访问宏
 //
-typedef struct _VNVME_MODE_CACHING_PAGE {
-    UCHAR PageCode : 6;
-    UCHAR Reserved1 : 1;
-    UCHAR PageSavable : 1;
-    UCHAR PageLength;
-    
-    UCHAR ReadDisableCache : 1;
-    UCHAR MultiplicationFactor : 1;
-    UCHAR WriteCacheEnable : 1;
-    UCHAR Reserved2 : 5;
-    
-    UCHAR WriteRetentionPriority : 4;
-    UCHAR ReadRetentionPriority : 4;
-    
-    UCHAR DisablePrefetchTransferLength[2];
-    UCHAR MinimumPrefetch[2];
-    UCHAR MaximumPrefetch[2];
-    UCHAR MaximumPrefetchCeiling[2];
-    
-    UCHAR Flags;
-    UCHAR NumberOfCacheSegments;
-    UCHAR CacheSegmentSize[2];
-    
-} VNVME_MODE_CACHING_PAGE, *PVNVME_MODE_CACHING_PAGE;
+#define VNVME_GET_CONTROLLER(WdfDevice) \
+    ((PVNVME_CONTROLLER)WdfObjectGetTypedContext(WdfDevice, VNVME_CONTROLLER))
+
+#define VNVME_IS_VALID_CONTROLLER(Ctrl) \
+    ((Ctrl) && (Ctrl)->Signature == VNVME_CONTROLLER_SIGNATURE)
+
+//
+// 队列操作宏
+//
+#define VNVME_SQ_IS_EMPTY(sq)  ((sq)->Head == (sq)->Tail)
+#define VNVME_SQ_IS_FULL(sq)   (((sq)->Tail + 1) % (sq)->Size == (sq)->Head)
+#define VNVME_SQ_COUNT(sq)     \
+    (((sq)->Tail >= (sq)->Head) ? \
+        ((sq)->Tail - (sq)->Head) : \
+        ((sq)->Size - (sq)->Head + (sq)->Tail))
+
+#define VNVME_CQ_IS_EMPTY(cq)  ((cq)->Head == (cq)->Tail)
+#define VNVME_CQ_IS_FULL(cq)   (((cq)->Tail + 1) % (cq)->Size == (cq)->Head)
+
+//
+// 字节/块转换
+//
+#define VNVME_BYTES_TO_BLOCKS(bytes, blockSize)  ((bytes) / (blockSize))
+#define VNVME_BLOCKS_TO_BYTES(blocks, blockSize) ((blocks) * (blockSize))
+
+//
+// 对齐宏
+//
+#define VNVME_ALIGN_DOWN(val, align)  ((val) & ~((align) - 1))
+#define VNVME_ALIGN_UP(val, align)    (((val) + (align) - 1) & ~((align) - 1))
+#define VNVME_IS_ALIGNED(val, align)  (((val) & ((align) - 1)) == 0)
 ```
 
-## 调试结构
+## 初始化示例
 
 ```c
-#if DBG
-
 //
-// 故障注入配置
+// 初始化控制器上下文
 //
-typedef struct _VNVME_FAULT_INJECTION {
-    BOOLEAN InjectReadError;            // 读取时注入错误
-    BOOLEAN InjectWriteError;           // 写入时注入错误
-    ULONG FailAfterNIos;                // N 次 I/O 后失败
-    ULONG CurrentIoCount;               // 当前 I/O 计数
-    NTSTATUS ErrorStatus;               // 注入的错误状态
-} VNVME_FAULT_INJECTION, *PVNVME_FAULT_INJECTION;
-
-//
-// 性能计数器
-//
-typedef struct _VNVME_PERF_COUNTERS {
-    LONG64 TotalIoTime;                 // 总 I/O 时间 (100ns 单位)
-    LONG64 TotalIoCount;                // 总 I/O 次数
-    LONG64 MaxIoTime;                   // 最大单次 I/O 时间
-    LONG64 MinIoTime;                   // 最小单次 I/O 时间
-} VNVME_PERF_COUNTERS, *PVNVME_PERF_COUNTERS;
-
-#endif // DBG
+NTSTATUS VnvmeInitializeController(
+    _In_ WDFDEVICE WdfDevice,
+    _In_ PVNVME_CONFIG Config)
+{
+    PVNVME_CONTROLLER controller;
+    NTSTATUS status;
+    
+    controller = VNVME_GET_CONTROLLER(WdfDevice);
+    
+    RtlZeroMemory(controller, sizeof(*controller));
+    
+    // 设置签名
+    controller->Signature = VNVME_CONTROLLER_SIGNATURE;
+    controller->WdfDevice = WdfDevice;
+    
+    // 初始化状态
+    controller->State = VnvmeStateNotInitialized;
+    
+    // 复制配置
+    RtlCopyMemory(&controller->Config, Config, sizeof(*Config));
+    
+    // 初始化队列列表
+    InitializeListHead(&controller->IoSqList);
+    InitializeListHead(&controller->IoCqList);
+    InitializeListHead(&controller->NamespaceList);
+    
+    KeInitializeSpinLock(&controller->QueueLock);
+    KeInitializeSpinLock(&controller->NamespaceLock);
+    
+    // 初始化 CAP 寄存器
+    controller->Registers.CAP.MQES = Config->MaxQueueEntries - 1;
+    controller->Registers.CAP.CQR = 1;     // 需要连续队列
+    controller->Registers.CAP.TO = 40;     // 20 秒超时
+    controller->Registers.CAP.DSTRD = 0;   // 4 字节门铃步长
+    controller->Registers.CAP.CSS = 0x01;  // 支持 NVM 命令集
+    controller->Registers.CAP.MPSMIN = 0;  // 4KB 最小页
+    controller->Registers.CAP.MPSMAX = 0;  // 4KB 最大页
+    
+    // 初始化 VS 寄存器 (NVMe 1.4)
+    controller->Registers.VS.MJR = 1;
+    controller->Registers.VS.MNR = 4;
+    controller->Registers.VS.TER = 0;
+    
+    // 初始化后端
+    status = VnvmeInitializeBackend(controller);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 创建命名空间
+    status = VnvmeCreateNamespace(controller, 1, Config->TotalCapacityBytes);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 启动工作线程
+    status = VnvmeStartQueueWorker(controller);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    controller->State = VnvmeStateDisabled;
+    
+    return STATUS_SUCCESS;
+}
 ```
-
-## 各后端能力对比
-
-| 后端类型 | 持久化 | TRIM | FUA | 异步 | 动态大小 | 快照 |
-|----------|--------|------|-----|------|----------|------|
-| Memory   | ✗      | ✓    | N/A | ✓    | ✗        | ✗    |
-| File     | ✓      | ✓*   | ✓   | ✓    | ✓        | ✗    |
-| VHD      | ✓      | ✓    | ✓   | ✓    | ✓        | ✓    |
-| Remote   | ✓      | 取决于目标 | ✓ | ✓  | ✗        | ✗    |
-
-*注: 文件后端 TRIM 需要底层文件系统支持稀疏文件 (NTFS/ReFS)

@@ -1,44 +1,55 @@
-# 构建与部署指南
+# 构建指南
 
-本文档描述 Virtual NVMe StorPort Miniport 驱动的构建、签名和部署流程。
+本文档说明如何设置开发环境并构建虚拟 NVMe 控制器仿真器。
 
 ## 开发环境要求
 
-### 必需组件
+### 软件要求
 
-| 组件 | 版本 | 下载地址 |
-|------|------|----------|
-| Visual Studio 2022 | 17.0+ | https://visualstudio.microsoft.com/ |
-| Windows SDK | 10.0.22621.0+ | Visual Studio 安装器 |
-| Windows WDK | 10.0.22621.0+ | https://learn.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk |
-| Spectre 缓解库 | 匹配 WDK 版本 | Visual Studio 安装器 |
+| 组件 | 版本 | 说明 |
+|------|------|------|
+| Windows | 10/11 64-bit | 开发和测试环境 |
+| Visual Studio | 2019/2022 | 包含 C++ 桌面开发工作负载 |
+| Windows SDK | 10.0.19041.0+ | 用于用户模式组件 |
+| WDK | 10.0.19041.0+ | Windows Driver Kit |
+| Git | 2.x | 版本控制 |
 
-### Visual Studio 工作负载
+### 硬件要求
 
-安装 Visual Studio 时选择以下工作负载：
+- CPU: x64 处理器
+- RAM: 8GB+（推荐 16GB+）
+- 存储: 20GB+ 可用空间
 
-- **"使用 C++ 的桌面开发"**
-  - MSVC v143 - VS 2022 C++ x64/x86 构建工具
-  - MSVC v143 - VS 2022 C++ x64/x86 Spectre 缓解库
+## 安装步骤
 
-- **Windows 驱动程序开发**（安装 WDK 后自动添加）
+### 1. 安装 Visual Studio
 
-### 环境验证
+1. 下载 Visual Studio 2022 Community 或更高版本
+2. 运行安装程序，选择以下工作负载：
+   - **使用 C++ 的桌面开发**
+   - **Windows 应用程序开发**
+
+### 2. 安装 Windows SDK
+
+SDK 通常随 Visual Studio 一起安装，确保版本 ≥ 10.0.19041.0
+
+### 3. 安装 WDK
+
+1. 访问 [Microsoft WDK 下载页面](https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk)
+2. 下载与 SDK 版本匹配的 WDK
+3. 运行安装程序，使用默认选项
+4. 安装完成后，WDK 会自动集成到 Visual Studio
+
+### 4. 配置驱动签名
+
+对于测试，需要启用测试签名模式：
 
 ```powershell
-# 验证 WDK 安装
-Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots" |
-    Select-Object KitsRoot10
+# 以管理员身份运行
+bcdedit /set testsigning on
 
-# 验证 SDK 版本
-Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\Include" |
-    Where-Object { $_.Name -match "^\d+\." } |
-    Sort-Object Name -Descending |
-    Select-Object -First 1
-
-# 验证驱动开发工具
-where.exe inf2cat
-where.exe signtool
+# 重启系统
+Restart-Computer
 ```
 
 ## 项目结构
@@ -46,459 +57,427 @@ where.exe signtool
 ```
 virtual-nvme-driver/
 ├── src/
-│   └── miniport/
-│       ├── vnvme.vcxproj           # 驱动项目文件
-│       ├── vnvme.vcxproj.filters
-│       ├── vnvme_main.c            # 驱动入口
-│       ├── vnvme_adapter.c         # 适配器管理
-│       ├── vnvme_lun.c             # LUN 管理
-│       ├── vnvme_scsi.c            # SCSI 命令处理
-│       ├── vnvme_backend.c         # 后端接口
-│       ├── vnvme_backend_memory.c  # 内存后端
-│       ├── vnvme_backend_file.c    # 文件后端
-│       ├── vnvme_ioctl.c           # IOCTL 处理
-│       ├── vnvme.h                 # 主头文件
-│       └── sources.props           # 源文件属性
-├── inf/
-│   └── vnvme.inf                   # INF 文件
-├── tools/
-│   └── vnvmectl/
-│       ├── vnvmectl.vcxproj        # 管理工具项目
-│       └── vnvmectl.cpp
-├── test/
-│   └── vnvme_test.vcxproj          # 测试项目
-├── vnvme.sln                       # 解决方案文件
-└── build/                          # 构建输出
+│   ├── vnvme_bus/              # 虚拟 PCIe 总线驱动
+│   │   ├── vnvme_bus.c         # 主驱动入口
+│   │   ├── pnp.c               # PnP 处理
+│   │   ├── pdo.c               # PDO 管理
+│   │   ├── pcie_config.c       # PCIe 配置空间
+│   │   └── vnvme_bus.inf       # INF 文件
+│   │
+│   ├── vnvme_emu/              # NVMe 控制器仿真
+│   │   ├── vnvme_emu.c         # 主驱动入口
+│   │   ├── controller.c        # 控制器状态机
+│   │   ├── registers.c         # 寄存器 MMIO
+│   │   ├── doorbell.c          # 门铃处理
+│   │   ├── queue.c             # 队列管理
+│   │   ├── commands.c          # 命令处理
+│   │   ├── admin_cmds.c        # Admin 命令
+│   │   ├── io_cmds.c           # I/O 命令
+│   │   ├── msix.c              # MSI-X 中断
+│   │   ├── backend.c           # 后端抽象
+│   │   ├── backend_memory.c    # 内存后端
+│   │   ├── backend_file.c      # 文件后端
+│   │   └── vnvme_emu.inf       # INF 文件
+│   │
+│   └── vnvmectl/               # 用户模式管理工具
+│       ├── main.c
+│       ├── commands.c
+│       └── vnvmelib.c
+│
+├── include/
+│   ├── vnvme_common.h          # 共享定义
+│   ├── vnvme_ioctl.h           # IOCTL 接口
+│   └── nvme_spec.h             # NVMe 规范定义
+│
+├── tests/
+│   ├── unit/                   # 单元测试
+│   └── functional/             # 功能测试
+│
+├── docs/                       # 文档
+│
+└── scripts/
+    ├── build.ps1               # 构建脚本
+    ├── install.ps1             # 安装脚本
+    └── test.ps1                # 测试脚本
 ```
 
-## 创建项目
+## 创建解决方案
 
-### 1. 创建解决方案
+### 方法 1: 使用 Visual Studio 创建
+
+1. 打开 Visual Studio
+2. 文件 → 新建 → 项目
+3. 选择 "Kernel Mode Driver, Empty (KMDF)"
+4. 设置项目名称为 `vnvme_bus`
+5. 重复步骤创建 `vnvme_emu` 项目
+6. 添加一个控制台应用程序项目 `vnvmectl`
+
+### 方法 2: 使用项目文件模板
+
+创建解决方案文件 `vnvme.sln`:
 
 ```
-Visual Studio → 新建项目 → 空解决方案 → vnvme
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme_bus", "src\vnvme_bus\vnvme_bus.vcxproj", "{GUID-1}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme_emu", "src\vnvme_emu\vnvme_emu.vcxproj", "{GUID-2}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvmectl", "src\vnvmectl\vnvmectl.vcxproj", "{GUID-3}"
+EndProject
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|x64 = Debug|x64
+        Release|x64 = Release|x64
+    EndGlobalSection
+EndGlobal
 ```
 
-### 2. 添加 Miniport 驱动项目
+## 项目配置
 
-```
-解决方案 → 添加 → 新建项目 → 
-  Empty WDM Driver 或 Kernel Mode Driver (KMDF)
-  
-注意: StorPort Miniport 使用 WDM 模型，不是 KMDF
-```
+### 驱动项目配置 (vnvme_bus.vcxproj)
 
-### 3. 配置项目属性
+关键配置项：
 
-**常规属性：**
 ```xml
-<PropertyGroup Label="Globals">
-  <ProjectGuid>{新 GUID}</ProjectGuid>
-  <TargetName>vnvme</TargetName>
-  <DriverType>WDM</DriverType>
-  <KMDF_VERSION_MAJOR></KMDF_VERSION_MAJOR>  <!-- 留空，不使用 KMDF -->
+<PropertyGroup Label="Configuration">
+  <TargetVersion>Windows10</TargetVersion>
+  <UseDebugLibraries>true</UseDebugLibraries>
+  <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
+  <ConfigurationType>Driver</ConfigurationType>
+  <DriverType>KMDF</DriverType>
+  <KMDF_VERSION_MAJOR>1</KMDF_VERSION_MAJOR>
+  <KMDF_VERSION_MINOR>31</KMDF_VERSION_MINOR>
 </PropertyGroup>
-```
 
-**链接器设置：**
-```xml
 <ItemDefinitionGroup>
+  <ClCompile>
+    <AdditionalIncludeDirectories>$(ProjectDir)..\..\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    <PreprocessorDefinitions>_WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    <WarningLevel>Level4</WarningLevel>
+    <TreatWarningAsError>true</TreatWarningAsError>
+  </ClCompile>
   <Link>
-    <AdditionalDependencies>
-      storport.lib;
-      ntoskrnl.lib;
-      hal.lib;
-      wdmsec.lib;
-      %(AdditionalDependencies)
-    </AdditionalDependencies>
-    <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+    <AdditionalDependencies>$(DDK_LIB_PATH)\wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
   </Link>
 </ItemDefinitionGroup>
 ```
 
-## 项目文件模板
+### INF 文件配置
 
-### vnvme.vcxproj
+确保 INF 文件包含在项目中，并设置正确的属性：
 
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<Project DefaultTargets="Build" ToolsVersion="Current" 
-         xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  
-  <PropertyGroup Label="Globals">
-    <ProjectGuid>{YOUR-GUID-HERE}</ProjectGuid>
-    <RootNamespace>vnvme</RootNamespace>
-    <TargetName>vnvme</TargetName>
-    <DriverType>WDM</DriverType>
-    <Configuration>Debug</Configuration>
-    <Platform>x64</Platform>
-    <WindowsTargetPlatformVersion>10.0.22621.0</WindowsTargetPlatformVersion>
-  </PropertyGroup>
-  
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  
-  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <ConfigurationType>Driver</ConfigurationType>
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <UseDebugLibraries>true</UseDebugLibraries>
-  </PropertyGroup>
-  
-  <PropertyGroup Label="Configuration" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <ConfigurationType>Driver</ConfigurationType>
-    <PlatformToolset>WindowsKernelModeDriver10.0</PlatformToolset>
-    <DriverTargetPlatform>Universal</DriverTargetPlatform>
-    <UseDebugLibraries>false</UseDebugLibraries>
-  </PropertyGroup>
-  
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  
-  <ItemDefinitionGroup>
-    <ClCompile>
-      <PreprocessorDefinitions>
-        POOL_NX_OPTIN=1;
-        %(PreprocessorDefinitions)
-      </PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>
-        $(ProjectDir);
-        $(ProjectDir)..\include;
-        %(AdditionalIncludeDirectories)
-      </AdditionalIncludeDirectories>
-      <TreatWarningAsError>true</TreatWarningAsError>
-      <WarningLevel>Level4</WarningLevel>
-    </ClCompile>
-    <Link>
-      <AdditionalDependencies>
-        storport.lib;
-        ntoskrnl.lib;
-        hal.lib;
-        %(AdditionalDependencies)
-      </AdditionalDependencies>
-      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
-    </Link>
-  </ItemDefinitionGroup>
-  
-  <ItemGroup>
-    <ClCompile Include="vnvme_main.c" />
-    <ClCompile Include="vnvme_adapter.c" />
-    <ClCompile Include="vnvme_lun.c" />
-    <ClCompile Include="vnvme_scsi.c" />
-    <ClCompile Include="vnvme_backend.c" />
-    <ClCompile Include="vnvme_backend_memory.c" />
-    <ClCompile Include="vnvme_backend_file.c" />
-    <ClCompile Include="vnvme_ioctl.c" />
-  </ItemGroup>
-  
-  <ItemGroup>
-    <ClInclude Include="vnvme.h" />
-    <ClInclude Include="vnvme_backend.h" />
-    <ClInclude Include="vnvme_trace.h" />
-  </ItemGroup>
-  
-  <ItemGroup>
-    <Inf Include="..\inf\vnvme.inf" />
-  </ItemGroup>
-  
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  
-</Project>
-```
+- Build Action: `Inf2Cat`
+- Driver Package: 启用
+- 签名: 测试签名或正式签名
 
-## 构建步骤
+## 构建
 
 ### 命令行构建
 
-```batch
-REM 打开开发者命令提示符
-"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+```powershell
+# 设置环境
+$env:WDKContentRoot = "C:\Program Files (x86)\Windows Kits\10"
 
-REM 进入项目目录
-cd /d Q:\src\virtual-nvme-driver
-
-REM Debug 构建
+# 构建 Debug 版本
 msbuild vnvme.sln /p:Configuration=Debug /p:Platform=x64
 
-REM Release 构建
+# 构建 Release 版本
 msbuild vnvme.sln /p:Configuration=Release /p:Platform=x64
-
-REM 清理构建
-msbuild vnvme.sln /t:Clean /p:Configuration=Debug /p:Platform=x64
 ```
 
 ### Visual Studio 构建
 
 1. 打开 `vnvme.sln`
 2. 选择配置 (Debug/Release) 和平台 (x64)
-3. 生成 → 生成解决方案 (Ctrl+Shift+B)
+3. 构建 → 生成解决方案 (Ctrl+Shift+B)
 
-### 构建输出
+### 构建脚本
 
-```
-build/
-├── x64/
-│   ├── Debug/
-│   │   ├── vnvme.sys       # 驱动文件
-│   │   ├── vnvme.pdb       # 调试符号
-│   │   └── vnvme.inf       # INF 文件副本
-│   └── Release/
-│       ├── vnvme.sys
-│       ├── vnvme.pdb
-│       └── vnvme.inf
+`scripts/build.ps1`:
+
+```powershell
+param(
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug",
+    
+    [switch]$Clean,
+    [switch]$Rebuild
+)
+
+$SolutionPath = Join-Path $PSScriptRoot "..\vnvme.sln"
+
+if ($Clean) {
+    Write-Host "Cleaning solution..."
+    msbuild $SolutionPath /t:Clean /p:Configuration=$Configuration /p:Platform=x64
+}
+
+$target = if ($Rebuild) { "Rebuild" } else { "Build" }
+
+Write-Host "Building $Configuration configuration..."
+msbuild $SolutionPath /t:$target /p:Configuration=$Configuration /p:Platform=x64
+
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "Build succeeded!" -ForegroundColor Green
+    
+    # 复制输出文件到 output 目录
+    $outputDir = Join-Path $PSScriptRoot "..\output\$Configuration"
+    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+    
+    Copy-Item "src\vnvme_bus\x64\$Configuration\vnvme_bus\*" $outputDir -Recurse -Force
+    Copy-Item "src\vnvme_emu\x64\$Configuration\vnvme_emu\*" $outputDir -Recurse -Force
+    Copy-Item "src\vnvmectl\x64\$Configuration\vnvmectl.exe" $outputDir -Force
+    
+    Write-Host "Output files copied to: $outputDir"
+} else {
+    Write-Host "Build failed!" -ForegroundColor Red
+    exit 1
+}
 ```
 
 ## 驱动签名
 
-### 开发阶段 - 测试签名
+### 创建测试证书
 
-#### 1. 启用测试签名模式
+```powershell
+# 创建自签名证书
+$cert = New-SelfSignedCertificate `
+    -Type CodeSigningCert `
+    -Subject "CN=VNVME Test Certificate" `
+    -CertStoreLocation Cert:\CurrentUser\My `
+    -NotAfter (Get-Date).AddYears(5)
 
-```batch
-REM 以管理员身份运行
-bcdedit /set testsigning on
+# 导出证书
+Export-Certificate -Cert $cert -FilePath "vnvme_test.cer"
 
-REM 重启系统
-shutdown /r /t 0
+# 安装到受信任的根证书
+Import-Certificate -FilePath "vnvme_test.cer" `
+    -CertStoreLocation Cert:\LocalMachine\Root
+
+# 安装到受信任的发布者
+Import-Certificate -FilePath "vnvme_test.cer" `
+    -CertStoreLocation Cert:\LocalMachine\TrustedPublisher
 ```
 
-#### 2. 创建测试证书
+### 签名驱动
 
-```batch
-REM 创建自签名证书
-makecert -r -pe -ss PrivateCertStore -n "CN=VNvme Test Cert" vnvme_test.cer
+```powershell
+# 获取证书
+$cert = Get-ChildItem Cert:\CurrentUser\My | 
+    Where-Object { $_.Subject -like "*VNVME Test*" }
 
-REM 导入到受信任的根证书
-certutil -addstore Root vnvme_test.cer
-certutil -addstore TrustedPublisher vnvme_test.cer
+# 签名 sys 文件
+SignTool sign /v /s My /n "VNVME Test Certificate" /t http://timestamp.digicert.com `
+    output\Release\vnvme_bus.sys
+
+SignTool sign /v /s My /n "VNVME Test Certificate" /t http://timestamp.digicert.com `
+    output\Release\vnvme_emu.sys
+
+# 签名 cat 文件
+SignTool sign /v /s My /n "VNVME Test Certificate" /t http://timestamp.digicert.com `
+    output\Release\vnvme_bus.cat
+
+SignTool sign /v /s My /n "VNVME Test Certificate" /t http://timestamp.digicert.com `
+    output\Release\vnvme_emu.cat
 ```
 
-#### 3. 签名驱动
-
-```batch
-REM 创建 CAT 文件
-inf2cat /driver:build\x64\Release /os:10_x64 /verbose
-
-REM 签名 CAT 文件
-signtool sign /v /s PrivateCertStore /n "VNvme Test Cert" ^
-  /t http://timestamp.digicert.com ^
-  build\x64\Release\vnvme.cat
-
-REM 签名 SYS 文件 (可选，CAT 签名即可)
-signtool sign /v /s PrivateCertStore /n "VNvme Test Cert" ^
-  /t http://timestamp.digicert.com ^
-  build\x64\Release\vnvme.sys
-```
-
-#### 4. 验证签名
-
-```batch
-signtool verify /pa /v build\x64\Release\vnvme.sys
-signtool verify /pa /v build\x64\Release\vnvme.cat
-```
-
-### 生产阶段 - WHQL 签名
-
-1. **获取 EV 代码签名证书**
-2. **注册 Windows 硬件开发人员中心**
-3. **运行 HLK 测试**
-4. **提交驱动包获取 Microsoft 签名**
-
-## 部署
+## 安装
 
 ### 手动安装
 
-```batch
-REM 复制文件到目标目录
-copy build\x64\Release\vnvme.sys C:\Drivers\vnvme\
-copy build\x64\Release\vnvme.cat C:\Drivers\vnvme\
-copy inf\vnvme.inf C:\Drivers\vnvme\
+```powershell
+# 以管理员身份运行
 
-REM 使用 devcon 安装
-devcon install C:\Drivers\vnvme\vnvme.inf Root\VNvme
-```
+# 安装 Bus 驱动
+pnputil /add-driver vnvme_bus.inf /install
 
-### 使用 pnputil
-
-```batch
-REM 添加驱动到 DriverStore
-pnputil /add-driver vnvme.inf /install
-
-REM 列出已安装的驱动
-pnputil /enum-drivers | findstr vnvme
-
-REM 删除驱动
-pnputil /delete-driver oem123.inf /uninstall /force
+# 安装 Emu 驱动  
+pnputil /add-driver vnvme_emu.inf /install
 ```
 
 ### 安装脚本
 
+`scripts/install.ps1`:
+
 ```powershell
-# install.ps1
 param(
-    [string]$DriverPath = ".\build\x64\Release"
+    [ValidateSet("install", "uninstall")]
+    [string]$Action = "install",
+    
+    [string]$OutputDir = "output\Release"
 )
 
-$ErrorActionPreference = "Stop"
-
 # 检查管理员权限
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    throw "请以管理员身份运行此脚本"
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "This script requires administrator privileges" -ForegroundColor Red
+    exit 1
 }
 
-# 安装驱动
-Write-Host "正在安装 Virtual NVMe 驱动..."
+$busInf = Join-Path $PSScriptRoot "..\$OutputDir\vnvme_bus.inf"
+$emuInf = Join-Path $PSScriptRoot "..\$OutputDir\vnvme_emu.inf"
 
-$infPath = Join-Path $DriverPath "vnvme.inf"
-
-# 使用 pnputil 添加驱动
-$result = pnputil /add-driver $infPath /install 2>&1
-Write-Host $result
-
-# 创建设备实例
-Write-Host "正在创建设备实例..."
-$devconPath = "$env:WDKContentRoot\Tools\x64\devcon.exe"
-
-if (Test-Path $devconPath) {
-    & $devconPath install $infPath "Root\VNvme"
+if ($Action -eq "install") {
+    Write-Host "Installing VNVME drivers..."
+    
+    # 启用测试签名（如果需要）
+    $testsigning = bcdedit /enum | Select-String "testsigning\s+Yes"
+    if (-not $testsigning) {
+        Write-Host "Enabling test signing mode..."
+        bcdedit /set testsigning on
+        Write-Host "Please reboot and run this script again" -ForegroundColor Yellow
+        exit 0
+    }
+    
+    # 安装驱动
+    Write-Host "Installing Bus driver..."
+    pnputil /add-driver $busInf /install
+    
+    Write-Host "Installing Emu driver..."
+    pnputil /add-driver $emuInf /install
+    
+    Write-Host "Installation complete!" -ForegroundColor Green
+    
 } else {
-    Write-Warning "未找到 devcon.exe，请手动创建设备实例"
-    Write-Host "设备 ID: Root\VNvme"
+    Write-Host "Uninstalling VNVME drivers..."
+    
+    # 先删除所有虚拟设备
+    # ... 
+    
+    # 卸载驱动
+    pnputil /delete-driver $busInf /uninstall /force
+    pnputil /delete-driver $emuInf /uninstall /force
+    
+    Write-Host "Uninstallation complete!" -ForegroundColor Green
 }
-
-Write-Host "安装完成！"
 ```
 
 ## 调试
 
-### 设置内核调试
+### 配置内核调试
 
-#### 目标机配置
+#### 本地调试 (需要 Windows 10 1903+)
 
-```batch
-REM 启用调试
+```powershell
+# 启用本地内核调试
+bcdedit /debug on
+bcdedit /dbgsettings local
+```
+
+#### 网络调试
+
+```powershell
+# 在目标机器上
 bcdedit /debug on
 bcdedit /dbgsettings net hostip:192.168.1.100 port:50000
 
-REM 获取密钥
-bcdedit /dbgsettings
+# 记下显示的 key
 ```
 
-#### 主机配置
+### 使用 WinDbg
 
-1. 打开 WinDbg Preview
-2. File → Attach to kernel
-3. 输入目标机 IP 和端口
-4. 输入密钥
-
-### 加载符号
-
-```windbg
-.symfix
-.sympath+ C:\Symbols;srv*C:\LocalSymbols*https://msdl.microsoft.com/download/symbols
-
-.reload /f vnvme.sys
-```
+1. 启动 WinDbg (或 WinDbg Preview)
+2. 文件 → Kernel Debug
+3. 选择连接类型 (Local/Net/Serial)
+4. 连接后加载符号：
+   ```
+   .sympath+ C:\path\to\output\Debug
+   .reload /f vnvme_bus.sys
+   .reload /f vnvme_emu.sys
+   ```
 
 ### 常用调试命令
 
-```windbg
+```
 # 查看驱动信息
-lm m vnvme
+lm m vnvme*
 
 # 设置断点
-bu vnvme!DriverEntry
-bu vnvme!VNvmeHwStartIo
+bp vnvme_bus!DriverEntry
+bp vnvme_emu!DriverEntry
 
-# 查看 StorPort 适配器
-!storport.adapters
+# 查看设备对象
+!devobj \Device\VNVMEControl
 
-# 查看 LUN 信息
-!storport.lun <adapter_address> <path> <target> <lun>
+# 查看驱动对象
+!drvobj vnvme_bus
 
-# 查看 SRB
-dt storport!_SCSI_REQUEST_BLOCK <address>
+# 查看 IRP
+!irp <address>
 ```
 
-### WPP 跟踪
+### ETW 跟踪
 
-```batch
-REM 启动跟踪
-tracelog -start vnvme_trace -guid vnvme.guid -f vnvme.etl -flags 0xFF
+在驱动中添加 WPP 跟踪：
 
-REM 运行测试...
-
-REM 停止跟踪
-tracelog -stop vnvme_trace
-
-REM 格式化输出
-tracefmt vnvme.etl -o vnvme.txt -p . -nosummary
+```c
+// 在驱动头文件中
+#define WPP_CONTROL_GUIDS \
+    WPP_DEFINE_CONTROL_GUID(VNVME, (12345678,1234,5678,ABCD,123456789ABC), \
+        WPP_DEFINE_BIT(TRACE_INIT) \
+        WPP_DEFINE_BIT(TRACE_PNP) \
+        WPP_DEFINE_BIT(TRACE_IO) \
+        WPP_DEFINE_BIT(TRACE_CMD) \
+        WPP_DEFINE_BIT(TRACE_MSIX))
 ```
 
-## 测试
-
-### 功能测试
+收集跟踪：
 
 ```powershell
-# 创建虚拟磁盘
-vnvmectl.exe create -size 1GB -backend memory
+# 开始跟踪
+logman create trace vnvme_trace -p {12345678-1234-5678-ABCD-123456789ABC} -o vnvme.etl
 
-# 格式化
-Get-Disk | Where-Object PartitionStyle -eq 'RAW' |
-    Initialize-Disk -PartitionStyle GPT -PassThru |
-    New-Partition -AssignDriveLetter -UseMaximumSize |
-    Format-Volume -FileSystem NTFS -Confirm:$false
+logman start vnvme_trace
 
-# 写入测试文件
-$testFile = "V:\test.bin"
-[byte[]]$data = 1..1024 | ForEach-Object { Get-Random -Maximum 256 }
-[IO.File]::WriteAllBytes($testFile, $data)
+# ... 执行测试 ...
 
-# 验证读取
-$readData = [IO.File]::ReadAllBytes($testFile)
-Compare-Object $data $readData
+logman stop vnvme_trace
+
+# 查看跟踪
+tracefmt vnvme.etl -o vnvme.txt
 ```
 
-### 性能测试
+## 持续集成
 
-```batch
-REM 使用 diskspd
-diskspd -b4K -d60 -r -w30 -t4 -o32 -Sh V:\testfile.dat
+### GitHub Actions 配置
+
+`.github/workflows/build.yml`:
+
+```yaml
+name: Build VNVME
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v1.1
+      
+    - name: Install WDK
+      run: |
+        # 下载并安装 WDK
+        # ...
+        
+    - name: Build Debug
+      run: msbuild vnvme.sln /p:Configuration=Debug /p:Platform=x64
+      
+    - name: Build Release
+      run: msbuild vnvme.sln /p:Configuration=Release /p:Platform=x64
+      
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: vnvme-drivers
+        path: output/Release/
 ```
-
-### HLK 测试
-
-1. 安装 Windows HLK
-2. 创建测试项目
-3. 添加目标机器
-4. 选择测试: "Storage - Storage Controller Testing"
-5. 运行测试并收集结果
-
-## 常见问题
-
-### 编译错误
-
-**问题**: `error LNK2019: unresolved external symbol StorPortInitialize`
-
-**解决**: 确保链接器设置中包含 `storport.lib`
-
----
-
-**问题**: `warning C4996: 'ExAllocatePoolWithTag' deprecated`
-
-**解决**: 使用 `ExAllocatePool2` 替代，或定义 `POOL_NX_OPTIN=1`
-
----
-
-### 运行时错误
-
-**问题**: 驱动加载失败，错误码 577
-
-**解决**: 启用测试签名模式并签名驱动
-
----
-
-**问题**: 设备管理器显示黄色感叹号
-
-**解决**: 
-1. 检查 Event Log 中的 StorPort 事件
-2. 使用调试器附加检查 `DriverEntry` 返回值
-3. 验证 INF 文件设备 ID 匹配

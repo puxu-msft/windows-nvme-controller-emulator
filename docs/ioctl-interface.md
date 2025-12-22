@@ -1,1192 +1,855 @@
-# IOCTL 管理接口
+# IOCTL 接口
 
-本文档定义 Virtual NVMe StorPort Miniport 驱动的用户态管理接口。
+本文档详细说明用户模式管理工具与驱动的通信接口。
 
 ## 概述
 
-在 StorPort Virtual Miniport 架构中，管理控制有两种实现方式：
+用户模式管理工具 (vnvmectl.exe) 通过 DeviceIoControl 与驱动通信，实现：
 
-1. **SCSI Pass-through**: 利用标准 SCSI 接口发送厂商特定命令
-2. **WMI 接口**: 通过 Windows Management Instrumentation 提供管理功能
-3. **辅助管理驱动**: 独立的 KMDF 驱动提供 IOCTL 接口（可选）
-
-本驱动采用 **SCSI Pass-through** + **WMI** 的组合方案，无需额外的管理驱动。
-
----
-
-## 架构设计
-
-### 管理接口位置
+- 创建/删除虚拟 NVMe 控制器
+- 添加/移除命名空间
+- 配置后端存储
+- 查询状态和统计信息
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    用户态管理程序 (vnvme-cli.exe)                │
-│                                                                  │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
-│  │ CreateFile()    │  │ WMI API         │  │ SetupDi API     │  │
-│  │ DeviceIoControl │  │ IWbemServices   │  │ 设备枚举        │  │
-│  └────────┬────────┘  └────────┬────────┘  └────────┬────────┘  │
-└───────────┼─────────────────────┼─────────────────────┼─────────┘
-            │                     │                     │
-            │ IOCTL_SCSI_PASS_    │ WMI Queries/        │ PnP 枚举
-            │ THROUGH_DIRECT      │ Methods             │
-            ▼                     ▼                     ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                          内核模式                                │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    disk.sys (类驱动)                         ││
-│  │         转发 SCSI_PASS_THROUGH 和其他 IOCTL                  ││
-│  └──────────────────────────┬──────────────────────────────────┘│
-│                             │                                    │
-│  ┌──────────────────────────▼──────────────────────────────────┐│
-│  │                    storport.sys                              ││
-│  │              WMI Provider / SRB 路由                         ││
-│  └──────────────────────────┬──────────────────────────────────┘│
-│                             │ SRB (SCSI_REQUEST_BLOCK)          │
-│  ┌──────────────────────────▼──────────────────────────────────┐│
-│  │                  ★ vnvme.sys (Miniport) ★                   ││
-│  │                                                              ││
-│  │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐ ││
-│  │  │ SCSI 命令处理  │  │ WMI 回调实现   │  │ LUN/Disk 管理  │ ││
-│  │  │                │  │                │  │                │ ││
-│  │  │ ◆ 标准 SCSI    │  │ ◆ MOF 定义     │  │ ◆ 热插拔       │ ││
-│  │  │ ◆ 厂商命令     │  │ ◆ 查询/设置    │  │ ◆ 配置管理     │ ││
-│  │  └────────────────┘  └────────────────┘  └────────────────┘ ││
-│  └──────────────────────────────────────────────────────────────┘│
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                       IOCTL 架构                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│    用户模式                                                           │
+│    ┌────────────────────────────────────────────────────────┐       │
+│    │                   vnvmectl.exe                          │       │
+│    │         (命令行管理工具 / GUI 工具)                       │       │
+│    └────────────────────────────────────────────────────────┘       │
+│                              │                                       │
+│                    CreateFile + DeviceIoControl                     │
+│                              │                                       │
+│                              ▼                                       │
+│    内核模式                                                          │
+│    ┌────────────────────────────────────────────────────────┐       │
+│    │                 vnvme_bus.sys                            │       │
+│    │              (控制设备接口)                               │       │
+│    │          \\.\VNVMEControl                                │       │
+│    └────────────────────────────────────────────────────────┘       │
+│                              │                                       │
+│                    创建/删除子设备                                   │
+│                              │                                       │
+│                              ▼                                       │
+│    ┌────────────────────────────────────────────────────────┐       │
+│    │                 vnvme_emu.sys                            │       │
+│    │          (NVMe 控制器仿真)                               │       │
+│    └────────────────────────────────────────────────────────┘       │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
----
+## 设备接口
 
-## 方法一：SCSI Pass-through
+### 控制设备
 
-### 厂商特定 CDB 设计
-
-使用 SCSI 厂商特定操作码 (0xC0-0xFF) 实现管理命令：
+Bus 驱动创建一个控制设备用于接收管理命令：
 
 ```c
-//
-// 厂商特定操作码定义
-//
-#define VNVME_SCSI_OPCODE_VENDOR_BASE   0xC0
+// 设备符号链接
+#define VNVME_CONTROL_DEVICE_NAME    L"\\Device\\VNVMEControl"
+#define VNVME_CONTROL_SYMLINK_NAME   L"\\DosDevices\\VNVMEControl"
 
-// 管理命令操作码
-#define SCSIOP_VNVME_GET_ADAPTER_INFO   0xC0    // 获取适配器信息
-#define SCSIOP_VNVME_GET_LUN_INFO       0xC1    // 获取 LUN 信息
-#define SCSIOP_VNVME_CREATE_LUN         0xC2    // 创建 LUN
-#define SCSIOP_VNVME_DELETE_LUN         0xC3    // 删除 LUN
-#define SCSIOP_VNVME_MODIFY_LUN         0xC4    // 修改 LUN 属性
-#define SCSIOP_VNVME_GET_STATISTICS     0xC5    // 获取统计信息
-#define SCSIOP_VNVME_RESET_STATISTICS   0xC6    // 重置统计信息
-#define SCSIOP_VNVME_GET_VERSION        0xCF    // 获取驱动版本
+// 设备 GUID
+// {12345678-1234-5678-ABCD-123456789ABC}
+DEFINE_GUID(GUID_DEVINTERFACE_VNVME_CONTROL,
+    0x12345678, 0x1234, 0x5678,
+    0xAB, 0xCD, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC);
 ```
 
-### CDB 格式定义
+### 设备创建
 
 ```c
-//
-// 厂商特定 CDB 格式 (16 字节)
-//
-
-// 通用厂商命令 CDB
-#pragma pack(push, 1)
-typedef struct _VNVME_CDB16 {
-    UCHAR OperationCode;        // [0] 0xC0-0xCF
-    UCHAR ServiceAction;        // [1] 子命令
-    UCHAR LunId;                // [2] 目标 LUN ID
-    UCHAR Reserved1;            // [3]
-    UCHAR Parameter[8];         // [4-11] 命令参数
-    ULONG AllocationLength;     // [12-15] 数据传输长度 (大端)
-} VNVME_CDB16, *PVNVME_CDB16;
-#pragma pack(pop)
-
-// 创建 LUN 命令 CDB
-#pragma pack(push, 1)
-typedef struct _VNVME_CDB_CREATE_LUN {
-    UCHAR OperationCode;        // [0] 0xC2
-    UCHAR BackendType;          // [1] 后端类型
-    UCHAR Reserved1[2];         // [2-3]
-    ULONG BlockSize;            // [4-7] 块大小 (大端)
-    ULONG Reserved2;            // [8-11]
-    ULONG AllocationLength;     // [12-15] 数据长度 (大端)
-} VNVME_CDB_CREATE_LUN, *PVNVME_CDB_CREATE_LUN;
-#pragma pack(pop)
-```
-
-### 数据传输结构
-
-```c
-//
-// 适配器信息 (GET_ADAPTER_INFO 返回)
-//
-#pragma pack(push, 1)
-typedef struct _VNVME_ADAPTER_INFO {
-    ULONG       StructureSize;          // 结构大小
-    ULONG       Version;                // 驱动版本 (MAJOR.MINOR.BUILD)
-    ULONG       MaxLuns;                // 最大 LUN 数量
-    ULONG       CurrentLuns;            // 当前 LUN 数量
-    ULONG       MaxTransferLength;      // 最大传输长度
-    ULONG       QueueDepth;             // 队列深度 (250)
-    UCHAR       AdapterId[8];           // 适配器唯一 ID
-    WCHAR       DriverPath[260];        // 驱动路径
-} VNVME_ADAPTER_INFO, *PVNVME_ADAPTER_INFO;
-#pragma pack(pop)
-
-//
-// LUN 信息 (GET_LUN_INFO 返回)
-//
-#pragma pack(push, 1)
-typedef struct _VNVME_LUN_INFO {
-    ULONG       StructureSize;          // 结构大小
-    UCHAR       LunId;                  // LUN ID (0-254)
-    UCHAR       BackendType;            // 后端类型
-    UCHAR       State;                  // LUN 状态
-    UCHAR       Flags;                  // 标志位
-    ULONGLONG   TotalSizeBytes;         // 总容量
-    ULONG       BlockSize;              // 块大小
-    ULONGLONG   BlockCount;             // 块数量
-    CHAR        SerialNumber[20];       // 序列号
-    CHAR        ModelNumber[40];        // 型号
-    WCHAR       BackendPath[260];       // 后端路径
-} VNVME_LUN_INFO, *PVNVME_LUN_INFO;
-#pragma pack(pop)
-
-//
-// 创建 LUN 参数 (CREATE_LUN 输入)
-//
-#pragma pack(push, 1)
-typedef struct _VNVME_CREATE_LUN_PARAMS {
-    ULONG       StructureSize;          // 结构大小
-    UCHAR       RequestedLunId;         // 请求的 LUN ID (0xFF = 自动)
-    UCHAR       BackendType;            // 后端类型
-    UCHAR       Reserved[2];            // 保留
-    ULONGLONG   SizeBytes;              // 磁盘大小
-    ULONG       BlockSize;              // 块大小 (512 或 4096)
-    ULONG       Flags;                  // 创建标志
-    CHAR        SerialNumber[20];       // 自定义序列号 (可选)
-    WCHAR       BackendPath[260];       // 后端路径 (文件/VHD)
-} VNVME_CREATE_LUN_PARAMS, *PVNVME_CREATE_LUN_PARAMS;
-#pragma pack(pop)
-
-//
-// 创建 LUN 结果 (CREATE_LUN 输出)
-//
-#pragma pack(push, 1)
-typedef struct _VNVME_CREATE_LUN_RESULT {
-    ULONG       StructureSize;          // 结构大小
-    UCHAR       AssignedLunId;          // 分配的 LUN ID
-    UCHAR       Status;                 // 操作状态
-    UCHAR       Reserved[2];            // 保留
-    ULONG       ErrorCode;              // 错误码 (如果失败)
-} VNVME_CREATE_LUN_RESULT, *PVNVME_CREATE_LUN_RESULT;
-#pragma pack(pop)
-
-//
-// 后端类型枚举
-//
-typedef enum _VNVME_BACKEND_TYPE {
-    VNVME_BACKEND_MEMORY = 0,           // 内存后端
-    VNVME_BACKEND_FILE = 1,             // 文件后端
-    VNVME_BACKEND_VHD = 2,              // VHD/VHDX 后端
-    VNVME_BACKEND_REMOTE = 3,           // 远程后端
-    VNVME_BACKEND_MAX
-} VNVME_BACKEND_TYPE;
-
-//
-// LUN 状态枚举
-//
-typedef enum _VNVME_LUN_STATE {
-    VNVME_LUN_STATE_OFFLINE = 0,        // 离线
-    VNVME_LUN_STATE_ONLINE = 1,         // 在线
-    VNVME_LUN_STATE_DEGRADED = 2,       // 降级
-    VNVME_LUN_STATE_FAILED = 3          // 故障
-} VNVME_LUN_STATE;
-
-//
-// 创建标志
-//
-#define VNVME_CREATE_FLAG_READ_ONLY         0x00000001  // 只读
-#define VNVME_CREATE_FLAG_PERSISTENT        0x00000002  // 持久化配置
-#define VNVME_CREATE_FLAG_THIN_PROVISION    0x00000004  // 精简配置
-#define VNVME_CREATE_FLAG_FORCE             0x00000008  // 强制创建
-```
-
-### 用户态使用示例
-
-```c
-#include <windows.h>
-#include <ntddscsi.h>
-#include <stdio.h>
-
-//
-// 发送厂商特定 SCSI 命令
-//
-BOOL VNvmeSendVendorCommand(
-    HANDLE hDevice,
-    UCHAR OperationCode,
-    UCHAR LunId,
-    PVOID DataBuffer,
-    ULONG DataBufferLength,
-    BOOL DataIn)
+NTSTATUS VnvmeCreateControlDevice(
+    _In_ WDFDRIVER Driver)
 {
-    UCHAR buffer[sizeof(SCSI_PASS_THROUGH_DIRECT) + 32];
-    PSCSI_PASS_THROUGH_DIRECT pSptd = (PSCSI_PASS_THROUGH_DIRECT)buffer;
-    DWORD bytesReturned;
+    PWDFDEVICE_INIT deviceInit;
+    WDFDEVICE controlDevice;
+    WDF_OBJECT_ATTRIBUTES attributes;
+    UNICODE_STRING ntDeviceName;
+    UNICODE_STRING symbolicLink;
+    WDF_IO_QUEUE_CONFIG ioQueueConfig;
+    WDFQUEUE queue;
+    NTSTATUS status;
     
-    ZeroMemory(buffer, sizeof(buffer));
-    
-    pSptd->Length = sizeof(SCSI_PASS_THROUGH_DIRECT);
-    pSptd->PathId = 0;
-    pSptd->TargetId = 0;
-    pSptd->Lun = LunId;
-    pSptd->CdbLength = 16;
-    pSptd->SenseInfoLength = 32;
-    pSptd->DataIn = DataIn ? SCSI_IOCTL_DATA_IN : SCSI_IOCTL_DATA_OUT;
-    pSptd->DataTransferLength = DataBufferLength;
-    pSptd->TimeOutValue = 30;
-    pSptd->DataBuffer = DataBuffer;
-    pSptd->SenseInfoOffset = sizeof(SCSI_PASS_THROUGH_DIRECT);
-    
-    // 构建 CDB
-    pSptd->Cdb[0] = OperationCode;
-    pSptd->Cdb[2] = LunId;
-    // 传输长度 (大端)
-    pSptd->Cdb[12] = (DataBufferLength >> 24) & 0xFF;
-    pSptd->Cdb[13] = (DataBufferLength >> 16) & 0xFF;
-    pSptd->Cdb[14] = (DataBufferLength >> 8) & 0xFF;
-    pSptd->Cdb[15] = DataBufferLength & 0xFF;
-    
-    return DeviceIoControl(
-        hDevice,
-        IOCTL_SCSI_PASS_THROUGH_DIRECT,
-        pSptd,
-        sizeof(buffer),
-        pSptd,
-        sizeof(buffer),
-        &bytesReturned,
-        NULL);
-}
-
-//
-// 获取适配器信息
-//
-BOOL VNvmeGetAdapterInfo(HANDLE hDevice, PVNVME_ADAPTER_INFO pInfo)
-{
-    pInfo->StructureSize = sizeof(VNVME_ADAPTER_INFO);
-    
-    return VNvmeSendVendorCommand(
-        hDevice,
-        SCSIOP_VNVME_GET_ADAPTER_INFO,
-        0,      // LUN 0 用于适配器级命令
-        pInfo,
-        sizeof(VNVME_ADAPTER_INFO),
-        TRUE    // 读取数据
-    );
-}
-
-//
-// 获取 LUN 信息
-//
-BOOL VNvmeGetLunInfo(HANDLE hDevice, UCHAR LunId, PVNVME_LUN_INFO pInfo)
-{
-    pInfo->StructureSize = sizeof(VNVME_LUN_INFO);
-    
-    return VNvmeSendVendorCommand(
-        hDevice,
-        SCSIOP_VNVME_GET_LUN_INFO,
-        LunId,
-        pInfo,
-        sizeof(VNVME_LUN_INFO),
-        TRUE
-    );
-}
-
-//
-// 创建新 LUN
-//
-BOOL VNvmeCreateLun(
-    HANDLE hDevice,
-    PVNVME_CREATE_LUN_PARAMS pParams,
-    PVNVME_CREATE_LUN_RESULT pResult)
-{
-    UCHAR buffer[sizeof(SCSI_PASS_THROUGH_DIRECT) + 32 + 
-                 sizeof(VNVME_CREATE_LUN_PARAMS)];
-    PSCSI_PASS_THROUGH_DIRECT pSptd = (PSCSI_PASS_THROUGH_DIRECT)buffer;
-    PVNVME_CREATE_LUN_PARAMS pData;
-    DWORD bytesReturned;
-    
-    ZeroMemory(buffer, sizeof(buffer));
-    
-    pSptd->Length = sizeof(SCSI_PASS_THROUGH_DIRECT);
-    pSptd->CdbLength = 16;
-    pSptd->SenseInfoLength = 32;
-    pSptd->DataIn = SCSI_IOCTL_DATA_OUT;  // 写入参数
-    pSptd->DataTransferLength = sizeof(VNVME_CREATE_LUN_PARAMS);
-    pSptd->TimeOutValue = 60;
-    pSptd->DataBuffer = pParams;
-    pSptd->SenseInfoOffset = sizeof(SCSI_PASS_THROUGH_DIRECT);
-    
-    // 构建 CDB
-    PVNVME_CDB_CREATE_LUN pCdb = (PVNVME_CDB_CREATE_LUN)pSptd->Cdb;
-    pCdb->OperationCode = SCSIOP_VNVME_CREATE_LUN;
-    pCdb->BackendType = pParams->BackendType;
-    // BlockSize 大端存储
-    pCdb->BlockSize = _byteswap_ulong(pParams->BlockSize);
-    pCdb->AllocationLength = _byteswap_ulong(sizeof(VNVME_CREATE_LUN_PARAMS));
-    
-    if (!DeviceIoControl(
-            hDevice,
-            IOCTL_SCSI_PASS_THROUGH_DIRECT,
-            pSptd,
-            sizeof(buffer),
-            pSptd,
-            sizeof(buffer),
-            &bytesReturned,
-            NULL)) {
-        return FALSE;
+    // 分配设备初始化结构
+    deviceInit = WdfControlDeviceInitAllocate(Driver,
+                                              &SDDL_DEVOBJ_SYS_ALL_ADM_ALL);
+    if (!deviceInit) {
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    // 读取结果 (通过另一个命令或解析 sense data)
-    // 这里简化处理
-    pResult->Status = 0;  // 成功
-    pResult->AssignedLunId = pParams->RequestedLunId;
+    // 设置设备名称
+    RtlInitUnicodeString(&ntDeviceName, VNVME_CONTROL_DEVICE_NAME);
+    status = WdfDeviceInitAssignName(deviceInit, &ntDeviceName);
+    if (!NT_SUCCESS(status)) {
+        WdfDeviceInitFree(deviceInit);
+        return status;
+    }
     
-    return TRUE;
+    // 设置设备类型
+    WdfDeviceInitSetDeviceType(deviceInit, FILE_DEVICE_UNKNOWN);
+    WdfDeviceInitSetExclusive(deviceInit, FALSE);
+    
+    // 创建设备
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VNVME_CONTROL_CONTEXT);
+    
+    status = WdfDeviceCreate(&deviceInit, &attributes, &controlDevice);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 创建符号链接
+    RtlInitUnicodeString(&symbolicLink, VNVME_CONTROL_SYMLINK_NAME);
+    status = WdfDeviceCreateSymbolicLink(controlDevice, &symbolicLink);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 创建 I/O 队列
+    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&ioQueueConfig,
+                                           WdfIoQueueDispatchSequential);
+    ioQueueConfig.EvtIoDeviceControl = VnvmeControlDeviceIoControl;
+    
+    status = WdfIoQueueCreate(controlDevice, &ioQueueConfig,
+                             WDF_NO_OBJECT_ATTRIBUTES, &queue);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 完成设备初始化
+    WdfControlFinishInitializing(controlDevice);
+    
+    return STATUS_SUCCESS;
 }
+```
+
+## IOCTL 定义
+
+### IOCTL 代码
+
+```c
+#define FILE_DEVICE_VNVME   0x8000
+
+// 控制器管理
+#define IOCTL_VNVME_CREATE_CONTROLLER \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x801, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define IOCTL_VNVME_DELETE_CONTROLLER \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x802, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define IOCTL_VNVME_QUERY_CONTROLLER \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x803, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#define IOCTL_VNVME_LIST_CONTROLLERS \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x804, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+// 命名空间管理
+#define IOCTL_VNVME_CREATE_NAMESPACE \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x810, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define IOCTL_VNVME_DELETE_NAMESPACE \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x811, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define IOCTL_VNVME_QUERY_NAMESPACE \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x812, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+// 后端管理
+#define IOCTL_VNVME_ATTACH_BACKEND \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x820, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+#define IOCTL_VNVME_DETACH_BACKEND \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x821, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// 统计与诊断
+#define IOCTL_VNVME_GET_STATISTICS \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x830, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#define IOCTL_VNVME_RESET_STATISTICS \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x831, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+
+// 调试
+#define IOCTL_VNVME_GET_DEBUG_LOG \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x840, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+#define IOCTL_VNVME_SET_DEBUG_LEVEL \
+    CTL_CODE(FILE_DEVICE_VNVME, 0x841, METHOD_BUFFERED, FILE_WRITE_ACCESS)
+```
+
+## 数据结构
+
+### 通用结构
+
+```c
+//
+// 结果头
+//
+typedef struct _VNVME_IOCTL_RESULT {
+    NTSTATUS Status;
+    ULONG ErrorCode;
+    WCHAR ErrorMessage[128];
+} VNVME_IOCTL_RESULT, *PVNVME_IOCTL_RESULT;
+```
+
+### 创建控制器
+
+```c
+//
+// IOCTL_VNVME_CREATE_CONTROLLER 输入
+//
+typedef struct _VNVME_CREATE_CONTROLLER_IN {
+    // 标识
+    ULONG ControllerIndex;          // 0 = 自动分配
+    WCHAR FriendlyName[64];         // 可选的友好名称
+    
+    // PCI ID (可选，使用默认值)
+    USHORT VendorId;                // 0 = 使用默认
+    USHORT DeviceId;
+    USHORT SubsystemVendorId;
+    USHORT SubsystemDeviceId;
+    
+    // 容量配置
+    ULONG64 TotalCapacityBytes;     // 总容量
+    ULONG BlockSize;                // 512 或 4096
+    
+    // 队列配置
+    USHORT MaxQueueEntries;         // 最大队列条目数
+    USHORT MaxIoQueues;             // 最大 I/O 队列数
+    
+    // 后端配置
+    VNVME_BACKEND_TYPE BackendType;
+    WCHAR BackendPath[260];         // 文件路径 (仅文件/VHD 后端)
+    BOOLEAN BackendReadOnly;        // 只读模式
+    BOOLEAN BackendCreateIfNotExist;// 如果不存在则创建
+    BOOLEAN UseSparseFile;          // 使用稀疏文件
+    
+    // 特性开关
+    BOOLEAN EnableTrim;
+    BOOLEAN EnableFlush;
+    BOOLEAN EnableWriteCache;
+    
+    // 自动启动命名空间
+    BOOLEAN CreateDefaultNamespace;
+    
+} VNVME_CREATE_CONTROLLER_IN, *PVNVME_CREATE_CONTROLLER_IN;
 
 //
-// 示例：创建 1GB 内存磁盘
+// IOCTL_VNVME_CREATE_CONTROLLER 输出
 //
-void ExampleCreateMemoryDisk(void)
+typedef struct _VNVME_CREATE_CONTROLLER_OUT {
+    VNVME_IOCTL_RESULT Result;
+    
+    ULONG ControllerIndex;          // 分配的控制器索引
+    WCHAR InstanceId[64];           // PnP 实例 ID
+    WCHAR DevicePath[260];          // 设备路径
+    
+} VNVME_CREATE_CONTROLLER_OUT, *PVNVME_CREATE_CONTROLLER_OUT;
+```
+
+### 删除控制器
+
+```c
+//
+// IOCTL_VNVME_DELETE_CONTROLLER 输入
+//
+typedef struct _VNVME_DELETE_CONTROLLER_IN {
+    ULONG ControllerIndex;
+    BOOLEAN Force;                  // 强制删除，即使有打开的句柄
+} VNVME_DELETE_CONTROLLER_IN, *PVNVME_DELETE_CONTROLLER_IN;
+
+//
+// IOCTL_VNVME_DELETE_CONTROLLER 输出
+//
+typedef struct _VNVME_DELETE_CONTROLLER_OUT {
+    VNVME_IOCTL_RESULT Result;
+} VNVME_DELETE_CONTROLLER_OUT, *PVNVME_DELETE_CONTROLLER_OUT;
+```
+
+### 查询控制器
+
+```c
+//
+// IOCTL_VNVME_QUERY_CONTROLLER 输入
+//
+typedef struct _VNVME_QUERY_CONTROLLER_IN {
+    ULONG ControllerIndex;
+} VNVME_QUERY_CONTROLLER_IN, *PVNVME_QUERY_CONTROLLER_IN;
+
+//
+// IOCTL_VNVME_QUERY_CONTROLLER 输出
+//
+typedef struct _VNVME_QUERY_CONTROLLER_OUT {
+    VNVME_IOCTL_RESULT Result;
+    
+    // 基本信息
+    ULONG ControllerIndex;
+    WCHAR FriendlyName[64];
+    WCHAR InstanceId[64];
+    
+    // 状态
+    VNVME_CONTROLLER_STATE State;
+    BOOLEAN IsEnabled;
+    BOOLEAN IsReady;
+    
+    // PCI ID
+    USHORT VendorId;
+    USHORT DeviceId;
+    CHAR SerialNumber[20];
+    CHAR ModelNumber[40];
+    CHAR FirmwareRevision[8];
+    
+    // 容量
+    ULONG64 TotalCapacity;
+    ULONG BlockSize;
+    
+    // 队列信息
+    USHORT MaxQueueEntries;
+    USHORT MaxIoQueues;
+    USHORT ActiveIoSqCount;
+    USHORT ActiveIoCqCount;
+    
+    // 命名空间
+    ULONG NamespaceCount;
+    
+    // 后端
+    VNVME_BACKEND_TYPE BackendType;
+    WCHAR BackendPath[260];
+    BOOLEAN BackendReadOnly;
+    
+    // NVMe 版本
+    ULONG NvmeVersion;
+    
+} VNVME_QUERY_CONTROLLER_OUT, *PVNVME_QUERY_CONTROLLER_OUT;
+```
+
+### 列出控制器
+
+```c
+//
+// IOCTL_VNVME_LIST_CONTROLLERS 输出
+//
+typedef struct _VNVME_CONTROLLER_ENTRY {
+    ULONG Index;
+    WCHAR FriendlyName[64];
+    VNVME_CONTROLLER_STATE State;
+    ULONG64 TotalCapacity;
+    ULONG NamespaceCount;
+} VNVME_CONTROLLER_ENTRY, *PVNVME_CONTROLLER_ENTRY;
+
+typedef struct _VNVME_LIST_CONTROLLERS_OUT {
+    VNVME_IOCTL_RESULT Result;
+    ULONG ControllerCount;
+    VNVME_CONTROLLER_ENTRY Controllers[32];
+} VNVME_LIST_CONTROLLERS_OUT, *PVNVME_LIST_CONTROLLERS_OUT;
+```
+
+### 创建命名空间
+
+```c
+//
+// IOCTL_VNVME_CREATE_NAMESPACE 输入
+//
+typedef struct _VNVME_CREATE_NAMESPACE_IN {
+    ULONG ControllerIndex;
+    ULONG NamespaceId;              // 0 = 自动分配
+    ULONG64 SizeInBytes;
+    ULONG BlockSize;                // 512 或 4096
+    BOOLEAN ReadOnly;
+    GUID UniqueId;                  // 可选
+} VNVME_CREATE_NAMESPACE_IN, *PVNVME_CREATE_NAMESPACE_IN;
+
+//
+// IOCTL_VNVME_CREATE_NAMESPACE 输出
+//
+typedef struct _VNVME_CREATE_NAMESPACE_OUT {
+    VNVME_IOCTL_RESULT Result;
+    ULONG NamespaceId;
+} VNVME_CREATE_NAMESPACE_OUT, *PVNVME_CREATE_NAMESPACE_OUT;
+```
+
+### 统计信息
+
+```c
+//
+// IOCTL_VNVME_GET_STATISTICS 输入
+//
+typedef struct _VNVME_GET_STATISTICS_IN {
+    ULONG ControllerIndex;
+    BOOLEAN IncludeNamespaceStats;
+} VNVME_GET_STATISTICS_IN, *PVNVME_GET_STATISTICS_IN;
+
+//
+// IOCTL_VNVME_GET_STATISTICS 输出
+//
+typedef struct _VNVME_STATISTICS {
+    // 命令计数
+    ULONG64 AdminCommandsReceived;
+    ULONG64 AdminCommandsCompleted;
+    ULONG64 IoCommandsReceived;
+    ULONG64 IoCommandsCompleted;
+    
+    // 数据传输
+    ULONG64 TotalReadBytes;
+    ULONG64 TotalWriteBytes;
+    ULONG64 TotalReadCommands;
+    ULONG64 TotalWriteCommands;
+    ULONG64 TotalFlushCommands;
+    ULONG64 TotalTrimCommands;
+    
+    // 错误
+    ULONG64 CommandErrors;
+    ULONG64 MediaErrors;
+    ULONG64 InternalErrors;
+    
+    // 中断
+    ULONG64 InterruptsGenerated;
+    ULONG64 InterruptsCoalesced;
+    
+    // 运行时间
+    ULONG64 UptimeSeconds;
+    
+} VNVME_STATISTICS, *PVNVME_STATISTICS;
+
+typedef struct _VNVME_GET_STATISTICS_OUT {
+    VNVME_IOCTL_RESULT Result;
+    VNVME_STATISTICS Stats;
+} VNVME_GET_STATISTICS_OUT, *PVNVME_GET_STATISTICS_OUT;
+```
+
+## IOCTL 处理
+
+### 分发函数
+
+```c
+VOID VnvmeControlDeviceIoControl(
+    _In_ WDFQUEUE Queue,
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _In_ size_t InputBufferLength,
+    _In_ ULONG IoControlCode)
 {
-    HANDLE hDevice = CreateFile(
-        L"\\\\.\\PhysicalDrive1",  // 假设是第一个 VNvme 设备
+    NTSTATUS status;
+    PVOID inputBuffer = NULL;
+    PVOID outputBuffer = NULL;
+    size_t bytesReturned = 0;
+    
+    UNREFERENCED_PARAMETER(Queue);
+    
+    // 获取缓冲区
+    if (InputBufferLength > 0) {
+        status = WdfRequestRetrieveInputBuffer(Request, InputBufferLength,
+                                               &inputBuffer, NULL);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+    }
+    
+    if (OutputBufferLength > 0) {
+        status = WdfRequestRetrieveOutputBuffer(Request, OutputBufferLength,
+                                                &outputBuffer, NULL);
+        if (!NT_SUCCESS(status)) {
+            WdfRequestComplete(Request, status);
+            return;
+        }
+    }
+    
+    // 分发到具体处理函数
+    switch (IoControlCode) {
+    case IOCTL_VNVME_CREATE_CONTROLLER:
+        status = VnvmeIoctlCreateController(inputBuffer, InputBufferLength,
+                                           outputBuffer, OutputBufferLength,
+                                           &bytesReturned);
+        break;
+        
+    case IOCTL_VNVME_DELETE_CONTROLLER:
+        status = VnvmeIoctlDeleteController(inputBuffer, InputBufferLength,
+                                           outputBuffer, OutputBufferLength,
+                                           &bytesReturned);
+        break;
+        
+    case IOCTL_VNVME_QUERY_CONTROLLER:
+        status = VnvmeIoctlQueryController(inputBuffer, InputBufferLength,
+                                          outputBuffer, OutputBufferLength,
+                                          &bytesReturned);
+        break;
+        
+    case IOCTL_VNVME_LIST_CONTROLLERS:
+        status = VnvmeIoctlListControllers(outputBuffer, OutputBufferLength,
+                                          &bytesReturned);
+        break;
+        
+    case IOCTL_VNVME_CREATE_NAMESPACE:
+        status = VnvmeIoctlCreateNamespace(inputBuffer, InputBufferLength,
+                                          outputBuffer, OutputBufferLength,
+                                          &bytesReturned);
+        break;
+        
+    case IOCTL_VNVME_GET_STATISTICS:
+        status = VnvmeIoctlGetStatistics(inputBuffer, InputBufferLength,
+                                        outputBuffer, OutputBufferLength,
+                                        &bytesReturned);
+        break;
+        
+    default:
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+    
+    WdfRequestCompleteWithInformation(Request, status, bytesReturned);
+}
+```
+
+### 创建控制器处理
+
+```c
+NTSTATUS VnvmeIoctlCreateController(
+    _In_ PVOID InputBuffer,
+    _In_ SIZE_T InputBufferLength,
+    _Out_ PVOID OutputBuffer,
+    _In_ SIZE_T OutputBufferLength,
+    _Out_ PSIZE_T BytesReturned)
+{
+    PVNVME_CREATE_CONTROLLER_IN input = InputBuffer;
+    PVNVME_CREATE_CONTROLLER_OUT output = OutputBuffer;
+    NTSTATUS status;
+    PVNVME_CONTROLLER controller;
+    
+    *BytesReturned = 0;
+    
+    // 验证缓冲区大小
+    if (InputBufferLength < sizeof(*input) ||
+        OutputBufferLength < sizeof(*output)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    RtlZeroMemory(output, sizeof(*output));
+    
+    // 验证参数
+    if (input->TotalCapacityBytes == 0) {
+        output->Result.Status = STATUS_INVALID_PARAMETER;
+        output->Result.ErrorCode = VNVME_ERROR_INVALID_CAPACITY;
+        wcscpy_s(output->Result.ErrorMessage, 128, L"Capacity must be greater than 0");
+        *BytesReturned = sizeof(*output);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    if (input->BlockSize != 512 && input->BlockSize != 4096) {
+        input->BlockSize = 512;  // 使用默认值
+    }
+    
+    // 分配控制器索引
+    ULONG controllerIndex = input->ControllerIndex;
+    if (controllerIndex == 0) {
+        controllerIndex = VnvmeAllocateControllerIndex();
+    }
+    
+    // 创建 PDO
+    status = VnvmeBusPlugInDevice(controllerIndex, input, &controller);
+    
+    if (NT_SUCCESS(status)) {
+        output->Result.Status = STATUS_SUCCESS;
+        output->ControllerIndex = controllerIndex;
+        
+        // 填充设备路径
+        swprintf_s(output->InstanceId, 64, L"VNVME\\CTRL%04d", controllerIndex);
+        swprintf_s(output->DevicePath, 260, 
+            L"\\\\?\\PCI#VEN_1B36&DEV_0010#VNVME%04d", controllerIndex);
+    } else {
+        output->Result.Status = status;
+        output->Result.ErrorCode = VNVME_ERROR_CREATE_FAILED;
+        wcscpy_s(output->Result.ErrorMessage, 128, L"Failed to create controller");
+    }
+    
+    *BytesReturned = sizeof(*output);
+    return status;
+}
+```
+
+## 用户模式库
+
+### 头文件
+
+```c
+// vnvmelib.h
+
+#ifndef _VNVME_LIB_H_
+#define _VNVME_LIB_H_
+
+#include <windows.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// 初始化/关闭
+BOOL VnvmeLibInit(void);
+void VnvmeLibShutdown(void);
+
+// 控制器管理
+DWORD VnvmeCreateController(
+    _In_ const VNVME_CREATE_CONTROLLER_IN* params,
+    _Out_ VNVME_CREATE_CONTROLLER_OUT* result);
+
+DWORD VnvmeDeleteController(
+    _In_ ULONG controllerIndex,
+    _In_ BOOL force);
+
+DWORD VnvmeQueryController(
+    _In_ ULONG controllerIndex,
+    _Out_ VNVME_QUERY_CONTROLLER_OUT* info);
+
+DWORD VnvmeListControllers(
+    _Out_ VNVME_LIST_CONTROLLERS_OUT* list);
+
+// 命名空间管理
+DWORD VnvmeCreateNamespace(
+    _In_ ULONG controllerIndex,
+    _In_ ULONG64 sizeBytes,
+    _In_ ULONG blockSize,
+    _Out_ PULONG namespaceId);
+
+DWORD VnvmeDeleteNamespace(
+    _In_ ULONG controllerIndex,
+    _In_ ULONG namespaceId);
+
+// 统计
+DWORD VnvmeGetStatistics(
+    _In_ ULONG controllerIndex,
+    _Out_ VNVME_STATISTICS* stats);
+
+DWORD VnvmeResetStatistics(
+    _In_ ULONG controllerIndex);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // _VNVME_LIB_H_
+```
+
+### 实现
+
+```c
+// vnvmelib.c
+
+#include "vnvmelib.h"
+#include <stdio.h>
+
+static HANDLE g_hDevice = INVALID_HANDLE_VALUE;
+
+BOOL VnvmeLibInit(void)
+{
+    g_hDevice = CreateFileW(
+        L"\\\\.\\VNVMEControl",
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         NULL,
         OPEN_EXISTING,
-        0,
+        FILE_ATTRIBUTE_NORMAL,
         NULL);
     
-    if (hDevice == INVALID_HANDLE_VALUE) {
-        printf("Failed to open device\n");
-        return;
-    }
-    
-    VNVME_CREATE_LUN_PARAMS params = {0};
-    VNVME_CREATE_LUN_RESULT result = {0};
-    
-    params.StructureSize = sizeof(params);
-    params.RequestedLunId = 0xFF;  // 自动分配
-    params.BackendType = VNVME_BACKEND_MEMORY;
-    params.SizeBytes = 1ULL * 1024 * 1024 * 1024;  // 1 GB
-    params.BlockSize = 512;
-    params.Flags = 0;
-    
-    if (VNvmeCreateLun(hDevice, &params, &result)) {
-        printf("LUN created: ID=%d\n", result.AssignedLunId);
-    } else {
-        printf("Failed to create LUN: %d\n", GetLastError());
-    }
-    
-    CloseHandle(hDevice);
+    return g_hDevice != INVALID_HANDLE_VALUE;
 }
+
+void VnvmeLibShutdown(void)
+{
+    if (g_hDevice != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_hDevice);
+        g_hDevice = INVALID_HANDLE_VALUE;
+    }
+}
+
+DWORD VnvmeCreateController(
+    _In_ const VNVME_CREATE_CONTROLLER_IN* params,
+    _Out_ VNVME_CREATE_CONTROLLER_OUT* result)
+{
+    DWORD bytesReturned;
+    
+    if (g_hDevice == INVALID_HANDLE_VALUE) {
+        return ERROR_NOT_READY;
+    }
+    
+    if (!DeviceIoControl(
+        g_hDevice,
+        IOCTL_VNVME_CREATE_CONTROLLER,
+        (LPVOID)params, sizeof(*params),
+        result, sizeof(*result),
+        &bytesReturned,
+        NULL)) {
+        return GetLastError();
+    }
+    
+    return NT_SUCCESS(result->Result.Status) ? ERROR_SUCCESS : 
+           RtlNtStatusToDosError(result->Result.Status);
+}
+
+DWORD VnvmeQueryController(
+    _In_ ULONG controllerIndex,
+    _Out_ VNVME_QUERY_CONTROLLER_OUT* info)
+{
+    VNVME_QUERY_CONTROLLER_IN input = { controllerIndex };
+    DWORD bytesReturned;
+    
+    if (g_hDevice == INVALID_HANDLE_VALUE) {
+        return ERROR_NOT_READY;
+    }
+    
+    if (!DeviceIoControl(
+        g_hDevice,
+        IOCTL_VNVME_QUERY_CONTROLLER,
+        &input, sizeof(input),
+        info, sizeof(*info),
+        &bytesReturned,
+        NULL)) {
+        return GetLastError();
+    }
+    
+    return NT_SUCCESS(info->Result.Status) ? ERROR_SUCCESS :
+           RtlNtStatusToDosError(info->Result.Status);
+}
+
+// ... 其他函数实现
 ```
 
----
+## 命令行工具
 
-## 方法二：WMI 接口
+### vnvmectl 使用示例
 
-### MOF 文件定义
+```
+vnvmectl.exe - Virtual NVMe Controller Management Tool
 
-```mof
-// vnvme.mof - WMI 类定义
+Usage:
+  vnvmectl create [options]     Create a new virtual NVMe controller
+  vnvmectl delete <index>       Delete a virtual NVMe controller
+  vnvmectl list                 List all virtual NVMe controllers
+  vnvmectl info <index>         Show controller information
+  vnvmectl stats <index>        Show statistics
 
-#pragma namespace("\\\\.\\Root\\WMI")
+Create options:
+  --size <size>       Total capacity (e.g., 1G, 500M, 100G)
+  --block-size <512|4096>    Logical block size
+  --backend <type>    Backend type (memory, file, vhd)
+  --path <path>       Backend file path (for file/vhd backend)
+  --name <name>       Friendly name
 
-//
-// 适配器信息类
-//
-[WMI,
- Dynamic,
- Provider("WMIProv"),
- guid("{12345678-1234-1234-1234-123456789ABC}"),
- DisplayName("VNvme Adapter Information"),
- Description("Virtual NVMe Adapter Information")]
-class VNvmeAdapterInfo
-{
-    [key, read]
-    string InstanceName;
-    
-    [read]
-    boolean Active;
-    
-    [WmiDataId(1), read,
-     DisplayName("Driver Version"),
-     Description("Driver version string")]
-    string DriverVersion;
-    
-    [WmiDataId(2), read,
-     DisplayName("Maximum LUNs"),
-     Description("Maximum number of LUNs supported")]
-    uint32 MaxLuns;
-    
-    [WmiDataId(3), read,
-     DisplayName("Current LUN Count"),
-     Description("Number of LUNs currently configured")]
-    uint32 CurrentLunCount;
-    
-    [WmiDataId(4), read,
-     DisplayName("Queue Depth"),
-     Description("Maximum queue depth")]
-    uint32 QueueDepth;
-};
-
-//
-// LUN 信息类
-//
-[WMI,
- Dynamic,
- Provider("WMIProv"),
- guid("{12345678-1234-1234-1234-123456789ABD}"),
- DisplayName("VNvme LUN Information"),
- Description("Virtual NVMe LUN Information")]
-class VNvmeLunInfo
-{
-    [key, read]
-    string InstanceName;
-    
-    [read]
-    boolean Active;
-    
-    [WmiDataId(1), read,
-     DisplayName("LUN ID")]
-    uint8 LunId;
-    
-    [WmiDataId(2), read,
-     DisplayName("Backend Type")]
-    uint8 BackendType;
-    
-    [WmiDataId(3), read,
-     DisplayName("State")]
-    uint8 State;
-    
-    [WmiDataId(4), read,
-     DisplayName("Total Size (Bytes)")]
-    uint64 TotalSizeBytes;
-    
-    [WmiDataId(5), read,
-     DisplayName("Block Size")]
-    uint32 BlockSize;
-    
-    [WmiDataId(6), read,
-     DisplayName("Serial Number")]
-    string SerialNumber;
-};
-
-//
-// 统计信息类
-//
-[WMI,
- Dynamic,
- Provider("WMIProv"),
- guid("{12345678-1234-1234-1234-123456789ABE}"),
- DisplayName("VNvme Statistics"),
- Description("Virtual NVMe Statistics")]
-class VNvmeStatistics
-{
-    [key, read]
-    string InstanceName;
-    
-    [read]
-    boolean Active;
-    
-    [WmiDataId(1), read,
-     DisplayName("Read Operations")]
-    uint64 ReadOperations;
-    
-    [WmiDataId(2), read,
-     DisplayName("Write Operations")]
-    uint64 WriteOperations;
-    
-    [WmiDataId(3), read,
-     DisplayName("Bytes Read")]
-    uint64 BytesRead;
-    
-    [WmiDataId(4), read,
-     DisplayName("Bytes Written")]
-    uint64 BytesWritten;
-    
-    [WmiDataId(5), read,
-     DisplayName("Average Read Latency (us)")]
-    uint64 AvgReadLatencyUs;
-    
-    [WmiDataId(6), read,
-     DisplayName("Average Write Latency (us)")]
-    uint64 AvgWriteLatencyUs;
-};
-
-//
-// 管理方法类
-//
-[WMI,
- Dynamic,
- Provider("WMIProv"),
- guid("{12345678-1234-1234-1234-123456789ABF}"),
- DisplayName("VNvme Management Methods")]
-class VNvmeManagement
-{
-    [key, read]
-    string InstanceName;
-    
-    [read]
-    boolean Active;
-    
-    // 创建 LUN 方法
-    [WmiMethodId(1),
-     Implemented,
-     DisplayName("Create LUN"),
-     Description("Create a new virtual LUN")]
-    void CreateLun(
-        [in, DisplayName("Backend Type")] uint8 BackendType,
-        [in, DisplayName("Size (Bytes)")] uint64 SizeBytes,
-        [in, DisplayName("Block Size")] uint32 BlockSize,
-        [in, DisplayName("Backend Path")] string BackendPath,
-        [out, DisplayName("Assigned LUN ID")] uint8 LunId,
-        [out, DisplayName("Status")] uint32 Status
-    );
-    
-    // 删除 LUN 方法
-    [WmiMethodId(2),
-     Implemented,
-     DisplayName("Delete LUN"),
-     Description("Delete an existing virtual LUN")]
-    void DeleteLun(
-        [in, DisplayName("LUN ID")] uint8 LunId,
-        [out, DisplayName("Status")] uint32 Status
-    );
-    
-    // 重置统计方法
-    [WmiMethodId(3),
-     Implemented,
-     DisplayName("Reset Statistics"),
-     Description("Reset all statistics counters")]
-    void ResetStatistics(
-        [out, DisplayName("Status")] uint32 Status
-    );
-};
+Examples:
+  vnvmectl create --size 1G --backend memory
+  vnvmectl create --size 100G --backend file --path C:\VMs\disk.img
+  vnvmectl delete 1
+  vnvmectl list
 ```
 
-### 驱动端 WMI 实现
+### 实现示例
 
 ```c
-//
-// WMI GUID 定义
-//
-GUID VNvmeAdapterInfoGuid = {0x12345678, 0x1234, 0x1234,
-    {0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC}};
+// vnvmectl main.c
 
-GUID VNvmeLunInfoGuid = {0x12345678, 0x1234, 0x1234,
-    {0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBD}};
-
-GUID VNvmeStatisticsGuid = {0x12345678, 0x1234, 0x1234,
-    {0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBE}};
-
-GUID VNvmeManagementGuid = {0x12345678, 0x1234, 0x1234,
-    {0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBF}};
-
-//
-// WMI 数据块列表
-//
-SCSIWMIGUIDREGINFO VNvmeWmiGuidList[] = {
-    { &VNvmeAdapterInfoGuid, 1, 0 },
-    { &VNvmeLunInfoGuid, VNVME_MAX_LUNS, 0 },
-    { &VNvmeStatisticsGuid, 1, 0 },
-    { &VNvmeManagementGuid, 1, WMIREG_FLAG_EXPENSIVE }
-};
-
-#define VNVME_WMI_GUID_COUNT (sizeof(VNvmeWmiGuidList) / sizeof(SCSIWMIGUIDREGINFO))
-
-//
-// HwAdapterControl - WMI 相关处理
-//
-SCSI_ADAPTER_CONTROL_STATUS
-VNvmeHwAdapterControl(
-    _In_ PVOID DeviceExtension,
-    _In_ SCSI_ADAPTER_CONTROL_TYPE ControlType,
-    _In_ PVOID Parameters)
-{
-    PVNVME_ADAPTER_EXTENSION pAdapter = DeviceExtension;
-    PSCSI_WMI_REQUEST_BLOCK pSrb;
-    
-    switch (ControlType) {
-        case ScsiQuerySupportedControlTypes: {
-            PSCSI_SUPPORTED_CONTROL_TYPE_LIST pList = Parameters;
-            ULONG i;
-            
-            for (i = 0; i < pList->MaxControlType; i++) {
-                pList->SupportedTypeList[i] = FALSE;
-            }
-            
-            pList->SupportedTypeList[ScsiQuerySupportedControlTypes] = TRUE;
-            pList->SupportedTypeList[ScsiStopAdapter] = TRUE;
-            pList->SupportedTypeList[ScsiRestartAdapter] = TRUE;
-            pList->SupportedTypeList[ScsiSetBootConfig] = TRUE;
-            pList->SupportedTypeList[ScsiSetRunningConfig] = TRUE;
-            
-            return ScsiAdapterControlSuccess;
-        }
-        
-        case ScsiStopAdapter:
-            // 停止适配器
-            return ScsiAdapterControlSuccess;
-            
-        case ScsiRestartAdapter:
-            // 重启适配器
-            return ScsiAdapterControlSuccess;
-            
-        default:
-            return ScsiAdapterControlUnsuccessful;
-    }
-}
-
-//
-// WMI SRB 处理
-//
-BOOLEAN
-VNvmeHandleWmiSrb(
-    _In_ PVNVME_ADAPTER_EXTENSION pAdapter,
-    _In_ PSCSI_WMI_REQUEST_BLOCK pSrb)
-{
-    UCHAR minorFunction = pSrb->WMISubFunction;
-    UCHAR status = SRB_STATUS_SUCCESS;
-    SCSIWMI_REQUEST_CONTEXT context;
-    
-    // 初始化 WMI 上下文
-    context.UserContext = pAdapter;
-    
-    switch (minorFunction) {
-        case IRP_MN_REGINFO:
-        case IRP_MN_REGINFO_EX:
-            // 注册 WMI 数据块
-            status = ScsiPortWmiDispatchFunction(
-                &VNvmeWmiContext,
-                minorFunction,
-                pAdapter,
-                &context,
-                pSrb->DataPath,
-                pSrb->DataTransferLength,
-                pSrb->DataBuffer);
-            break;
-            
-        case IRP_MN_QUERY_ALL_DATA:
-        case IRP_MN_QUERY_SINGLE_INSTANCE:
-            // 查询数据
-            status = VNvmeWmiQueryData(pAdapter, pSrb);
-            break;
-            
-        case IRP_MN_EXECUTE_METHOD:
-            // 执行方法
-            status = VNvmeWmiExecuteMethod(pAdapter, pSrb);
-            break;
-            
-        default:
-            status = SRB_STATUS_INVALID_REQUEST;
-            break;
-    }
-    
-    pSrb->SrbStatus = status;
-    return TRUE;
-}
-```
-
-### 用户态 WMI 访问示例
-
-```cpp
-// C++ WMI 访问示例
-#include <windows.h>
-#include <wbemidl.h>
-#include <comdef.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "vnvmelib.h"
 
-#pragma comment(lib, "wbemuuid.lib")
-
-class VNvmeWmiClient
+int cmd_create(int argc, wchar_t* argv[])
 {
-private:
-    IWbemLocator* pLocator;
-    IWbemServices* pServices;
+    VNVME_CREATE_CONTROLLER_IN params = { 0 };
+    VNVME_CREATE_CONTROLLER_OUT result = { 0 };
+    DWORD error;
     
-public:
-    VNvmeWmiClient() : pLocator(nullptr), pServices(nullptr) {}
+    // 解析参数
+    params.BackendType = VnvmeBackendMemory;
+    params.TotalCapacityBytes = 1ULL * 1024 * 1024 * 1024;  // 默认 1GB
+    params.BlockSize = 512;
+    params.MaxQueueEntries = 1024;
+    params.MaxIoQueues = 16;
+    params.CreateDefaultNamespace = TRUE;
     
-    ~VNvmeWmiClient() {
-        Disconnect();
-    }
-    
-    HRESULT Connect()
-    {
-        HRESULT hr;
-        
-        hr = CoInitializeEx(0, COINIT_MULTITHREADED);
-        if (FAILED(hr)) return hr;
-        
-        hr = CoInitializeSecurity(
-            NULL, -1, NULL, NULL,
-            RPC_C_AUTHN_LEVEL_DEFAULT,
-            RPC_C_IMP_LEVEL_IMPERSONATE,
-            NULL, EOAC_NONE, NULL);
-        
-        hr = CoCreateInstance(
-            CLSID_WbemLocator, 0,
-            CLSCTX_INPROC_SERVER,
-            IID_IWbemLocator,
-            (LPVOID*)&pLocator);
-        
-        if (FAILED(hr)) return hr;
-        
-        hr = pLocator->ConnectServer(
-            _bstr_t(L"ROOT\\WMI"),
-            NULL, NULL, 0, NULL, 0, 0,
-            &pServices);
-        
-        return hr;
-    }
-    
-    void Disconnect()
-    {
-        if (pServices) { pServices->Release(); pServices = nullptr; }
-        if (pLocator) { pLocator->Release(); pLocator = nullptr; }
-        CoUninitialize();
-    }
-    
-    //
-    // 获取适配器信息
-    //
-    HRESULT GetAdapterInfo()
-    {
-        IEnumWbemClassObject* pEnumerator = NULL;
-        HRESULT hr;
-        
-        hr = pServices->ExecQuery(
-            bstr_t("WQL"),
-            bstr_t("SELECT * FROM VNvmeAdapterInfo"),
-            WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-            NULL, &pEnumerator);
-        
-        if (FAILED(hr)) return hr;
-        
-        IWbemClassObject* pObj = NULL;
-        ULONG returned = 0;
-        
-        while (pEnumerator->Next(WBEM_INFINITE, 1, &pObj, &returned) == S_OK) {
-            VARIANT var;
-            
-            if (SUCCEEDED(pObj->Get(L"DriverVersion", 0, &var, 0, 0))) {
-                wprintf(L"Driver Version: %s\n", var.bstrVal);
-                VariantClear(&var);
+    for (int i = 0; i < argc; i++) {
+        if (wcscmp(argv[i], L"--size") == 0 && i + 1 < argc) {
+            params.TotalCapacityBytes = ParseSize(argv[++i]);
+        } else if (wcscmp(argv[i], L"--backend") == 0 && i + 1 < argc) {
+            i++;
+            if (wcscmp(argv[i], L"memory") == 0) {
+                params.BackendType = VnvmeBackendMemory;
+            } else if (wcscmp(argv[i], L"file") == 0) {
+                params.BackendType = VnvmeBackendFile;
             }
-            
-            if (SUCCEEDED(pObj->Get(L"MaxLuns", 0, &var, 0, 0))) {
-                wprintf(L"Max LUNs: %u\n", var.ulVal);
-                VariantClear(&var);
-            }
-            
-            if (SUCCEEDED(pObj->Get(L"CurrentLunCount", 0, &var, 0, 0))) {
-                wprintf(L"Current LUNs: %u\n", var.ulVal);
-                VariantClear(&var);
-            }
-            
-            pObj->Release();
+        } else if (wcscmp(argv[i], L"--path") == 0 && i + 1 < argc) {
+            wcscpy_s(params.BackendPath, 260, argv[++i]);
         }
-        
-        pEnumerator->Release();
-        return S_OK;
     }
     
-    //
-    // 创建 LUN (调用 WMI 方法)
-    //
-    HRESULT CreateLun(
-        BYTE backendType,
-        ULONGLONG sizeBytes,
-        ULONG blockSize,
-        LPCWSTR backendPath,
-        BYTE* pLunId)
-    {
-        IWbemClassObject* pClass = NULL;
-        IWbemClassObject* pInParams = NULL;
-        IWbemClassObject* pOutParams = NULL;
-        HRESULT hr;
-        
-        // 获取类定义
-        hr = pServices->GetObject(
-            bstr_t("VNvmeManagement"),
-            0, NULL, &pClass, NULL);
-        
-        if (FAILED(hr)) return hr;
-        
-        // 获取方法输入参数
-        hr = pClass->GetMethod(L"CreateLun", 0, &pInParams, NULL);
-        if (FAILED(hr)) {
-            pClass->Release();
-            return hr;
-        }
-        
-        // 设置参数
-        VARIANT var;
-        
-        var.vt = VT_UI1;
-        var.bVal = backendType;
-        pInParams->Put(L"BackendType", 0, &var, 0);
-        
-        var.vt = VT_UI8;
-        var.ullVal = sizeBytes;
-        pInParams->Put(L"SizeBytes", 0, &var, 0);
-        
-        var.vt = VT_UI4;
-        var.ulVal = blockSize;
-        pInParams->Put(L"BlockSize", 0, &var, 0);
-        
-        var.vt = VT_BSTR;
-        var.bstrVal = SysAllocString(backendPath);
-        pInParams->Put(L"BackendPath", 0, &var, 0);
-        SysFreeString(var.bstrVal);
-        
-        // 执行方法
-        hr = pServices->ExecMethod(
-            bstr_t("VNvmeManagement.InstanceName='vnvme'"),
-            bstr_t("CreateLun"),
-            0, NULL, pInParams, &pOutParams, NULL);
-        
-        if (SUCCEEDED(hr) && pOutParams) {
-            // 获取输出参数
-            if (SUCCEEDED(pOutParams->Get(L"LunId", 0, &var, 0, 0))) {
-                *pLunId = var.bVal;
-            }
-            pOutParams->Release();
-        }
-        
-        pInParams->Release();
-        pClass->Release();
-        
-        return hr;
+    // 创建控制器
+    error = VnvmeCreateController(&params, &result);
+    
+    if (error == ERROR_SUCCESS) {
+        wprintf(L"Controller created successfully\n");
+        wprintf(L"  Index: %d\n", result.ControllerIndex);
+        wprintf(L"  Instance: %s\n", result.InstanceId);
+        return 0;
+    } else {
+        wprintf(L"Failed to create controller: %s\n", result.Result.ErrorMessage);
+        return 1;
     }
-};
+}
 
-//
-// 使用示例
-//
-int main()
+int cmd_list(void)
 {
-    VNvmeWmiClient client;
+    VNVME_LIST_CONTROLLERS_OUT list;
+    DWORD error;
     
-    HRESULT hr = client.Connect();
-    if (FAILED(hr)) {
-        printf("Failed to connect to WMI: 0x%08X\n", hr);
+    error = VnvmeListControllers(&list);
+    
+    if (error != ERROR_SUCCESS) {
+        wprintf(L"Failed to list controllers\n");
         return 1;
     }
     
-    printf("=== Adapter Info ===\n");
-    client.GetAdapterInfo();
+    wprintf(L"Index  Name                           State     Capacity\n");
+    wprintf(L"-----  -----------------------------  --------  ----------\n");
     
-    printf("\n=== Create LUN ===\n");
-    BYTE lunId;
-    hr = client.CreateLun(
-        0,                              // Memory backend
-        1ULL * 1024 * 1024 * 1024,      // 1 GB
-        512,                            // 512 byte blocks
-        L"",                            // No path for memory
-        &lunId);
-    
-    if (SUCCEEDED(hr)) {
-        printf("Created LUN %d\n", lunId);
-    } else {
-        printf("Failed to create LUN: 0x%08X\n", hr);
+    for (ULONG i = 0; i < list.ControllerCount; i++) {
+        wprintf(L"%-5d  %-30s  %-8s  %llu GB\n",
+            list.Controllers[i].Index,
+            list.Controllers[i].FriendlyName,
+            GetStateName(list.Controllers[i].State),
+            list.Controllers[i].TotalCapacity / (1024 * 1024 * 1024));
     }
     
     return 0;
 }
-```
 
----
-
-## 方法三：PowerShell 管理脚本
-
-利用 WMI 接口，可以直接使用 PowerShell 管理驱动：
-
-```powershell
-# VNvme-Management.ps1 - PowerShell 管理脚本
-
-#
-# 获取适配器信息
-#
-function Get-VNvmeAdapter {
-    Get-WmiObject -Namespace "ROOT\WMI" -Class "VNvmeAdapterInfo" |
-        Select-Object InstanceName, DriverVersion, MaxLuns, CurrentLunCount, QueueDepth
-}
-
-#
-# 获取所有 LUN 信息
-#
-function Get-VNvmeLun {
-    param(
-        [Parameter(Mandatory=$false)]
-        [byte]$LunId
-    )
-    
-    $query = "SELECT * FROM VNvmeLunInfo"
-    if ($PSBoundParameters.ContainsKey('LunId')) {
-        $query += " WHERE LunId = $LunId"
-    }
-    
-    Get-WmiObject -Namespace "ROOT\WMI" -Query $query |
-        Select-Object LunId, BackendType, State, TotalSizeBytes, BlockSize, SerialNumber
-}
-
-#
-# 获取统计信息
-#
-function Get-VNvmeStatistics {
-    Get-WmiObject -Namespace "ROOT\WMI" -Class "VNvmeStatistics" |
-        Select-Object ReadOperations, WriteOperations, BytesRead, BytesWritten,
-                      AvgReadLatencyUs, AvgWriteLatencyUs
-}
-
-#
-# 创建新 LUN
-#
-function New-VNvmeLun {
-    param(
-        [Parameter(Mandatory=$true)]
-        [ValidateSet('Memory', 'File', 'VHD', 'Remote')]
-        [string]$BackendType,
-        
-        [Parameter(Mandatory=$true)]
-        [uint64]$SizeBytes,
-        
-        [Parameter(Mandatory=$false)]
-        [ValidateSet(512, 4096)]
-        [uint32]$BlockSize = 512,
-        
-        [Parameter(Mandatory=$false)]
-        [string]$BackendPath = ""
-    )
-    
-    $backendTypeMap = @{
-        'Memory' = 0
-        'File' = 1
-        'VHD' = 2
-        'Remote' = 3
-    }
-    
-    $wmi = Get-WmiObject -Namespace "ROOT\WMI" -Class "VNvmeManagement" | 
-           Select-Object -First 1
-    
-    if ($null -eq $wmi) {
-        throw "VNvme adapter not found"
-    }
-    
-    $result = $wmi.CreateLun(
-        $backendTypeMap[$BackendType],
-        $SizeBytes,
-        $BlockSize,
-        $BackendPath)
-    
-    if ($result.Status -eq 0) {
-        Write-Host "Created LUN $($result.LunId) successfully"
-        return $result.LunId
-    } else {
-        throw "Failed to create LUN: Status = $($result.Status)"
-    }
-}
-
-#
-# 删除 LUN
-#
-function Remove-VNvmeLun {
-    param(
-        [Parameter(Mandatory=$true)]
-        [byte]$LunId
-    )
-    
-    $wmi = Get-WmiObject -Namespace "ROOT\WMI" -Class "VNvmeManagement" |
-           Select-Object -First 1
-    
-    if ($null -eq $wmi) {
-        throw "VNvme adapter not found"
-    }
-    
-    $result = $wmi.DeleteLun($LunId)
-    
-    if ($result.Status -eq 0) {
-        Write-Host "Deleted LUN $LunId successfully"
-    } else {
-        throw "Failed to delete LUN: Status = $($result.Status)"
-    }
-}
-
-#
-# 重置统计
-#
-function Reset-VNvmeStatistics {
-    $wmi = Get-WmiObject -Namespace "ROOT\WMI" -Class "VNvmeManagement" |
-           Select-Object -First 1
-    
-    if ($null -eq $wmi) {
-        throw "VNvme adapter not found"
-    }
-    
-    $result = $wmi.ResetStatistics()
-    
-    if ($result.Status -eq 0) {
-        Write-Host "Statistics reset successfully"
-    } else {
-        throw "Failed to reset statistics: Status = $($result.Status)"
-    }
-}
-
-#
-# 示例使用
-#
-<#
-# 查看适配器信息
-Get-VNvmeAdapter
-
-# 查看所有 LUN
-Get-VNvmeLun
-
-# 查看特定 LUN
-Get-VNvmeLun -LunId 0
-
-# 创建 1GB 内存磁盘
-New-VNvmeLun -BackendType Memory -SizeBytes 1GB
-
-# 创建 10GB 文件磁盘
-New-VNvmeLun -BackendType File -SizeBytes 10GB -BackendPath "C:\VDisks\disk1.vhd"
-
-# 查看统计
-Get-VNvmeStatistics
-
-# 删除 LUN
-Remove-VNvmeLun -LunId 1
-
-# 重置统计
-Reset-VNvmeStatistics
-#>
-```
-
----
-
-## 错误码定义
-
-### SCSI 状态码
-
-| 状态 | 值 | 说明 |
-|------|-----|------|
-| GOOD | 0x00 | 命令成功 |
-| CHECK_CONDITION | 0x02 | 检查条件 (查看 Sense Data) |
-| BUSY | 0x08 | 设备忙 |
-| RESERVATION_CONFLICT | 0x18 | 预留冲突 |
-
-### VNvme 特定错误码
-
-| 错误码 | 值 | 说明 |
-|--------|-----|------|
-| VNVME_STATUS_SUCCESS | 0 | 成功 |
-| VNVME_STATUS_INVALID_PARAM | 1 | 无效参数 |
-| VNVME_STATUS_LUN_NOT_FOUND | 2 | LUN 不存在 |
-| VNVME_STATUS_LUN_EXISTS | 3 | LUN 已存在 |
-| VNVME_STATUS_NO_RESOURCE | 4 | 资源不足 |
-| VNVME_STATUS_BACKEND_ERROR | 5 | 后端错误 |
-| VNVME_STATUS_NOT_SUPPORTED | 6 | 不支持的操作 |
-| VNVME_STATUS_ACCESS_DENIED | 7 | 访问被拒绝 |
-
-### Sense Data 格式
-
-```c
-// 固定格式 Sense Data (18 字节)
-typedef struct _VNVME_SENSE_DATA {
-    UCHAR ErrorCode;            // 0x70 (当前错误) 或 0x71 (延迟错误)
-    UCHAR SegmentNumber;        // 保留
-    UCHAR SenseKey;             // 感知键 (0-15)
-    UCHAR Information[4];       // 信息字段
-    UCHAR AdditionalLength;     // 附加长度 (10)
-    UCHAR CmdSpecificInfo[4];   // 命令特定信息
-    UCHAR ASC;                  // 附加感知码
-    UCHAR ASCQ;                 // 附加感知码限定符
-    UCHAR FRU;                  // 字段可更换单元代码
-    UCHAR SenseKeySpecific[3];  // 感知键特定
-} VNVME_SENSE_DATA, *PVNVME_SENSE_DATA;
-
-// 常用 Sense Key
-#define SENSE_NO_SENSE          0x00
-#define SENSE_RECOVERED_ERROR   0x01
-#define SENSE_NOT_READY         0x02
-#define SENSE_MEDIUM_ERROR      0x03
-#define SENSE_HARDWARE_ERROR    0x04
-#define SENSE_ILLEGAL_REQUEST   0x05
-#define SENSE_UNIT_ATTENTION    0x06
-#define SENSE_DATA_PROTECT      0x07
-#define SENSE_ABORTED_COMMAND   0x0B
-```
-
----
-
-## 安全考虑
-
-### 访问控制
-
-1. **管理操作权限**：创建/删除 LUN 需要管理员权限
-2. **WMI 安全**：通过 WMI 安全描述符限制访问
-3. **SCSI 命令过滤**：阻止未授权的厂商命令
-
-### 输入验证
-
-```c
-UCHAR
-VNvmeValidateCreateLunParams(
-    _In_ PVNVME_CREATE_LUN_PARAMS pParams)
+int wmain(int argc, wchar_t* argv[])
 {
-    // 检查结构大小
-    if (pParams->StructureSize < sizeof(VNVME_CREATE_LUN_PARAMS)) {
-        return VNVME_STATUS_INVALID_PARAM;
+    int result = 0;
+    
+    if (!VnvmeLibInit()) {
+        wprintf(L"Failed to connect to VNVME driver\n");
+        wprintf(L"Make sure the driver is installed and running\n");
+        return 1;
     }
     
-    // 检查后端类型
-    if (pParams->BackendType >= VNVME_BACKEND_MAX) {
-        return VNVME_STATUS_INVALID_PARAM;
+    if (argc < 2) {
+        PrintUsage();
+        result = 1;
+    } else if (wcscmp(argv[1], L"create") == 0) {
+        result = cmd_create(argc - 2, argv + 2);
+    } else if (wcscmp(argv[1], L"list") == 0) {
+        result = cmd_list();
+    } else if (wcscmp(argv[1], L"delete") == 0 && argc > 2) {
+        result = cmd_delete(_wtoi(argv[2]));
+    } else if (wcscmp(argv[1], L"info") == 0 && argc > 2) {
+        result = cmd_info(_wtoi(argv[2]));
+    } else {
+        PrintUsage();
+        result = 1;
     }
     
-    // 检查磁盘大小 (最小 1MB，最大 64TB)
-    if (pParams->SizeBytes < (1024 * 1024) ||
-        pParams->SizeBytes > (64ULL * 1024 * 1024 * 1024 * 1024)) {
-        return VNVME_STATUS_INVALID_PARAM;
-    }
-    
-    // 检查块大小
-    if (pParams->BlockSize != 512 && pParams->BlockSize != 4096) {
-        return VNVME_STATUS_INVALID_PARAM;
-    }
-    
-    // 文件后端必须提供路径
-    if (pParams->BackendType == VNVME_BACKEND_FILE ||
-        pParams->BackendType == VNVME_BACKEND_VHD) {
-        if (pParams->BackendPath[0] == L'\0') {
-            return VNVME_STATUS_INVALID_PARAM;
-        }
-    }
-    
-    return VNVME_STATUS_SUCCESS;
+    VnvmeLibShutdown();
+    return result;
 }
 ```
-
----
-
-## 参考资料
-
-- [SCSI Pass-Through Interface](https://docs.microsoft.com/en-us/windows-hardware/drivers/storage/handling-scsi-pass-through-requests)
-- [StorPort WMI Support](https://docs.microsoft.com/en-us/windows-hardware/drivers/storage/handling-wmi-srbs-in-storage-miniport-drivers)
-- [WMI Data Provider](https://docs.microsoft.com/en-us/windows/win32/wmisdk/wmi-providers)
-- [MOF Syntax](https://docs.microsoft.com/en-us/windows/win32/wmisdk/mof-data-types)

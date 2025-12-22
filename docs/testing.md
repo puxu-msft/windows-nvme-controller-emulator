@@ -1,758 +1,654 @@
 # 测试策略
 
-本文档描述 Virtual NVMe StorPort Miniport 驱动的测试方法和策略。
+本文档说明虚拟 NVMe 控制器仿真器的测试方法和策略。
 
 ## 测试层次
 
 ```
-┌─────────────────────────────────┐
-│      WHQL/HLK 认证测试          │  ← Windows 硬件认证
-├─────────────────────────────────┤
-│      系统集成测试               │  ← 完整系统验证
-├─────────────────────────────────┤
-│      功能测试                   │  ← SCSI 命令验证
-├─────────────────────────────────┤
-│      单元测试                   │  ← 模块验证
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                        测试金字塔                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│                           ┌─────────┐                               │
+│                           │  E2E    │  端到端测试                    │
+│                           │  Tests  │  (完整系统)                    │
+│                          ─┴─────────┴─                              │
+│                        ┌───────────────┐                            │
+│                        │  Integration  │  集成测试                   │
+│                        │    Tests      │  (驱动交互)                 │
+│                       ─┴───────────────┴─                           │
+│                     ┌─────────────────────┐                         │
+│                     │   Functional Tests  │  功能测试                │
+│                     │   (IOCTL, Commands) │  (单驱动)                │
+│                    ─┴─────────────────────┴─                        │
+│                  ┌───────────────────────────┐                      │
+│                  │      Unit Tests           │  单元测试              │
+│                  │  (Functions, Modules)     │  (代码级别)            │
+│                 ─┴───────────────────────────┴─                     │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
-
----
-
-## 测试环境配置
-
-### 推荐使用虚拟机测试
-
-⚠️ **重要**: 内核驱动开发容易导致蓝屏，强烈建议在虚拟机中进行测试。
-
-#### Hyper-V 虚拟机配置
-
-```powershell
-# 创建测试虚拟机
-New-VM -Name "VNvmeTest" -MemoryStartupBytes 4GB -Generation 2
-
-# 创建系统虚拟硬盘
-New-VHD -Path "C:\VMs\VNvmeTest.vhdx" -SizeBytes 60GB -Dynamic
-
-# 添加虚拟硬盘
-Add-VMHardDiskDrive -VMName "VNvmeTest" -Path "C:\VMs\VNvmeTest.vhdx"
-
-# 配置处理器
-Set-VMProcessor -VMName "VNvmeTest" -Count 4
-
-# 配置网络适配器 (用于文件传输)
-Add-VMNetworkAdapter -VMName "VNvmeTest" -SwitchName "Default Switch"
-
-# 启用增强会话模式
-Set-VM -VMName "VNvmeTest" -EnhancedSessionTransportType HvSocket
-```
-
-#### VMware Workstation 配置
-
-```
-1. 创建 Windows 10/11 x64 虚拟机
-2. 配置:
-   - 内存: 4GB+
-   - 处理器: 4 核心
-   - 硬盘: 60GB+
-3. 添加串口 (用于内核调试):
-   - 使用命名管道: \\.\pipe\vnvme_debug
-   - "This end is the server"
-   - "The other end is an application"
-4. 在虚拟机设置中启用 "Virtualize Intel VT-x/EPT"
-```
-
-### 内核调试配置
-
-#### 虚拟机内配置
-
-```cmd
-rem 启用内核调试 (COM1)
-bcdedit /debug on
-bcdedit /dbgsettings serial debugport:1 baudrate:115200
-
-rem 或使用网络调试 (需要 Windows 8+)
-bcdedit /debug on
-bcdedit /dbgsettings net hostip:192.168.1.100 port:50000 key:1.2.3.4
-
-rem 启用测试签名
-bcdedit /set testsigning on
-
-rem 禁用驱动签名强制
-bcdedit /set nointegritychecks on
-
-rem 重启生效
-shutdown /r /t 0
-```
-
-#### 主机 WinDbg 连接
-
-```powershell
-# 串口调试
-windbg -k com:port=\\.\pipe\vnvme_debug,baud=115200,pipe
-
-# 网络调试
-windbg -k net:port=50000,key=1.2.3.4
-```
-
----
 
 ## 单元测试
 
-### 测试框架选择
+### 测试框架
 
-- **推荐**: 使用 WDK 内置的 TAEF (Test Authoring and Execution Framework)
-- **替代**: 简单的内核测试驱动
-
-### 模块测试用例
-
-#### 后端抽象层测试
+使用 WDK 测试框架或用户模式模拟：
 
 ```c
-//
-// 测试文件: test_backend.c
-//
+// tests/unit/test_queue.c
 
-// 测试内存后端初始化
-void Test_MemoryBackend_Init()
+#include "test_framework.h"
+#include "queue.h"
+
+// 测试 SQ 初始化
+TEST_CASE(TestSqInitialization)
 {
-    VNVME_BACKEND_CONFIG config = {0};
-    config.Type = VNVME_BACKEND_MEMORY;
-    config.SizeBytes = 1024 * 1024 * 1024;  // 1 GB
-    config.BlockSize = 512;
+    VNVME_SUBMISSION_QUEUE sq;
+    NTSTATUS status;
     
-    PVOID pContext = NULL;
-    NTSTATUS status = VNvmeMemoryBackendInit(&config, &pContext);
+    status = VnvmeSqInitialize(&sq, 1, 64);
     
-    ASSERT(NT_SUCCESS(status));
-    ASSERT(pContext != NULL);
+    ASSERT_SUCCESS(status);
+    ASSERT_EQUAL(sq.QueueId, 1);
+    ASSERT_EQUAL(sq.Size, 64);
+    ASSERT_EQUAL(sq.Head, 0);
+    ASSERT_EQUAL(sq.Tail, 0);
     
-    VNvmeMemoryBackendCleanup(pContext);
+    VnvmeSqCleanup(&sq);
 }
 
-// 测试读写操作
-void Test_MemoryBackend_ReadWrite()
+// 测试 SQ 环形缓冲区回绕
+TEST_CASE(TestSqWrapAround)
 {
-    // 初始化后端
-    VNVME_BACKEND_CONFIG config = {0};
-    config.Type = VNVME_BACKEND_MEMORY;
-    config.SizeBytes = 1024 * 1024;  // 1 MB
-    config.BlockSize = 512;
+    VNVME_SUBMISSION_QUEUE sq;
+    NVME_COMMAND cmd;
     
-    PVOID pContext = NULL;
-    VNvmeMemoryBackendInit(&config, &pContext);
+    VnvmeSqInitialize(&sq, 1, 4);  // 小队列便于测试
     
-    // 准备测试数据
+    // 模拟添加和消费
+    for (int i = 0; i < 10; i++) {
+        sq.Tail = (sq.Tail + 1) % sq.Size;
+        
+        BOOLEAN hasCmd = VnvmeFetchCommand(&sq, &cmd);
+        ASSERT_TRUE(hasCmd);
+    }
+    
+    VnvmeSqCleanup(&sq);
+}
+
+// 测试 CQ Phase Tag 翻转
+TEST_CASE(TestCqPhaseToggle)
+{
+    VNVME_COMPLETION_QUEUE cq;
+    
+    VnvmeCqInitialize(&cq, 1, 4);
+    
+    ASSERT_EQUAL(cq.Phase, TRUE);  // 初始 Phase = 1
+    
+    // 填满队列，触发回绕
+    for (int i = 0; i < 4; i++) {
+        VnvmeCqAdvanceTail(&cq);
+    }
+    
+    // 回绕后 Phase 应该翻转
+    ASSERT_EQUAL(cq.Phase, FALSE);
+    
+    VnvmeCqCleanup(&cq);
+}
+```
+
+### 后端单元测试
+
+```c
+// tests/unit/test_backend.c
+
+TEST_CASE(TestMemoryBackendReadWrite)
+{
+    VNVME_BACKEND backend;
+    VNVME_BACKEND_INIT_PARAMS params = {
+        .Type = VnvmeBackendMemory,
+        .Capacity = 1024 * 1024,  // 1MB
+        .SectorSize = 512
+    };
     UCHAR writeBuffer[512];
     UCHAR readBuffer[512];
+    NTSTATUS status;
     
+    // 初始化
+    status = VnvmeCreateBackend(&params, &backend);
+    ASSERT_SUCCESS(status);
+    
+    // 填充测试数据
     for (int i = 0; i < 512; i++) {
-        writeBuffer[i] = (UCHAR)(i & 0xFF);
+        writeBuffer[i] = (UCHAR)i;
     }
     
     // 写入
-    NTSTATUS status = VNvmeMemoryBackendWrite(
-        pContext, 0, writeBuffer, 512);
-    ASSERT(NT_SUCCESS(status));
+    status = backend.Operations->Write(&backend, 0, 512, writeBuffer);
+    ASSERT_SUCCESS(status);
     
-    // 读取
-    status = VNvmeMemoryBackendRead(
-        pContext, 0, readBuffer, 512);
-    ASSERT(NT_SUCCESS(status));
+    // 读回
+    status = backend.Operations->Read(&backend, 0, 512, readBuffer);
+    ASSERT_SUCCESS(status);
     
     // 验证
-    ASSERT(RtlCompareMemory(writeBuffer, readBuffer, 512) == 512);
+    ASSERT_MEMORY_EQUAL(readBuffer, writeBuffer, 512);
     
-    VNvmeMemoryBackendCleanup(pContext);
+    VnvmeDestroyBackend(&backend);
 }
 
-// 测试边界条件
-void Test_MemoryBackend_Boundary()
+TEST_CASE(TestBackendBoundaryCheck)
 {
-    VNVME_BACKEND_CONFIG config = {0};
-    config.Type = VNVME_BACKEND_MEMORY;
-    config.SizeBytes = 4096;  // 8 个 512 字节块
-    config.BlockSize = 512;
-    
-    PVOID pContext = NULL;
-    VNvmeMemoryBackendInit(&config, &pContext);
-    
+    VNVME_BACKEND backend;
+    VNVME_BACKEND_INIT_PARAMS params = {
+        .Type = VnvmeBackendMemory,
+        .Capacity = 4096,
+        .SectorSize = 512
+    };
     UCHAR buffer[512];
+    NTSTATUS status;
     
-    // 测试最后一个有效块
-    NTSTATUS status = VNvmeMemoryBackendRead(
-        pContext, 7, buffer, 512);
-    ASSERT(NT_SUCCESS(status));
+    VnvmeCreateBackend(&params, &backend);
     
-    // 测试超出范围
-    status = VNvmeMemoryBackendRead(
-        pContext, 8, buffer, 512);
-    ASSERT(status == STATUS_INVALID_PARAMETER);
+    // 尝试越界读取
+    status = backend.Operations->Read(&backend, 4096, 512, buffer);
+    ASSERT_STATUS(status, STATUS_INVALID_PARAMETER);
     
-    VNvmeMemoryBackendCleanup(pContext);
+    // 尝试跨边界读取
+    status = backend.Operations->Read(&backend, 4000, 512, buffer);
+    ASSERT_STATUS(status, STATUS_INVALID_PARAMETER);
+    
+    VnvmeDestroyBackend(&backend);
 }
 ```
-
-#### SCSI 命令处理测试
-
-```c
-//
-// 测试文件: test_scsi.c
-//
-
-// 测试 INQUIRY 命令
-void Test_Scsi_Inquiry()
-{
-    SCSI_REQUEST_BLOCK srb = {0};
-    UCHAR cdb[16] = {0};
-    UCHAR dataBuffer[96];
-    UCHAR senseBuffer[32];
-    
-    srb.CdbLength = 6;
-    srb.Cdb = cdb;
-    srb.DataBuffer = dataBuffer;
-    srb.DataTransferLength = 96;
-    srb.SenseInfoBuffer = senseBuffer;
-    srb.SenseInfoBufferLength = 32;
-    
-    // 构建 INQUIRY CDB
-    cdb[0] = SCSIOP_INQUIRY;
-    cdb[4] = 96;  // Allocation length
-    
-    // 创建模拟 LUN
-    VNVME_LU_EXTENSION lu = {0};
-    lu.Flags.Present = TRUE;
-    lu.Flags.Online = TRUE;
-    RtlCopyMemory(lu.Identity.VendorId, "VNVME   ", 8);
-    RtlCopyMemory(lu.Identity.ProductId, "Virtual NVMe    ", 16);
-    
-    // 执行命令
-    UCHAR srbStatus = VNvmeHandleInquiry(NULL, &lu, &srb);
-    
-    // 验证
-    ASSERT(srbStatus == SRB_STATUS_SUCCESS);
-    ASSERT(srb.DataTransferLength == 96);
-    
-    PINQUIRYDATA pInquiry = (PINQUIRYDATA)dataBuffer;
-    ASSERT(pInquiry->DeviceType == DIRECT_ACCESS_DEVICE);
-    ASSERT(RtlCompareMemory(pInquiry->VendorId, "VNVME   ", 8) == 8);
-}
-
-// 测试 READ CAPACITY 命令
-void Test_Scsi_ReadCapacity()
-{
-    SCSI_REQUEST_BLOCK srb = {0};
-    UCHAR cdb[16] = {0};
-    READ_CAPACITY_DATA capacityData;
-    
-    srb.CdbLength = 10;
-    srb.Cdb = cdb;
-    srb.DataBuffer = &capacityData;
-    srb.DataTransferLength = sizeof(capacityData);
-    
-    // 构建 READ CAPACITY(10) CDB
-    cdb[0] = SCSIOP_READ_CAPACITY;
-    
-    // 创建模拟 LUN (1 GB, 512 字节块)
-    VNVME_LU_EXTENSION lu = {0};
-    lu.Flags.Present = TRUE;
-    lu.Flags.Online = TRUE;
-    lu.BlockSize = 512;
-    lu.BlockCount = 2097152;  // 1 GB / 512
-    
-    // 执行命令
-    UCHAR srbStatus = VNvmeHandleReadCapacity10(NULL, &lu, &srb);
-    
-    // 验证
-    ASSERT(srbStatus == SRB_STATUS_SUCCESS);
-    
-    // 解析返回数据 (大端)
-    ULONG lastLba = (capacityData.LogicalBlockAddress[0] << 24) |
-                    (capacityData.LogicalBlockAddress[1] << 16) |
-                    (capacityData.LogicalBlockAddress[2] << 8) |
-                    capacityData.LogicalBlockAddress[3];
-    ULONG blockLen = (capacityData.BytesPerBlock[0] << 24) |
-                     (capacityData.BytesPerBlock[1] << 16) |
-                     (capacityData.BytesPerBlock[2] << 8) |
-                     capacityData.BytesPerBlock[3];
-    
-    ASSERT(lastLba == 2097151);  // BlockCount - 1
-    ASSERT(blockLen == 512);
-}
-
-// 测试 READ/WRITE 命令
-void Test_Scsi_ReadWrite()
-{
-    // 创建带内存后端的 LUN
-    VNVME_LU_EXTENSION lu = {0};
-    lu.Flags.Present = TRUE;
-    lu.Flags.Online = TRUE;
-    lu.BlockSize = 512;
-    lu.BlockCount = 2048;
-    
-    // 初始化内存后端
-    VNVME_BACKEND_CONFIG config = {0};
-    config.Type = VNVME_BACKEND_MEMORY;
-    config.SizeBytes = 2048 * 512;
-    config.BlockSize = 512;
-    VNvmeMemoryBackendInit(&config, &lu.pBackendContext);
-    lu.pBackend = &VNvmeMemoryBackendOps;
-    
-    // 准备写入数据
-    UCHAR writeData[512];
-    for (int i = 0; i < 512; i++) {
-        writeData[i] = (UCHAR)i;
-    }
-    
-    // WRITE 命令
-    SCSI_REQUEST_BLOCK writeSrb = {0};
-    UCHAR writeCdb[10] = {0};
-    writeCdb[0] = SCSIOP_WRITE;
-    writeCdb[5] = 100;  // LBA = 100
-    writeCdb[8] = 1;    // 传输 1 块
-    
-    writeSrb.CdbLength = 10;
-    writeSrb.Cdb = writeCdb;
-    writeSrb.DataBuffer = writeData;
-    writeSrb.DataTransferLength = 512;
-    
-    UCHAR status = VNvmeHandleWrite(NULL, &lu, &writeSrb);
-    ASSERT(status == SRB_STATUS_SUCCESS);
-    
-    // READ 命令
-    SCSI_REQUEST_BLOCK readSrb = {0};
-    UCHAR readCdb[10] = {0};
-    UCHAR readData[512];
-    
-    readCdb[0] = SCSIOP_READ;
-    readCdb[5] = 100;  // LBA = 100
-    readCdb[8] = 1;    // 传输 1 块
-    
-    readSrb.CdbLength = 10;
-    readSrb.Cdb = readCdb;
-    readSrb.DataBuffer = readData;
-    readSrb.DataTransferLength = 512;
-    
-    status = VNvmeHandleRead(NULL, &lu, &readSrb);
-    ASSERT(status == SRB_STATUS_SUCCESS);
-    
-    // 验证数据一致性
-    ASSERT(RtlCompareMemory(writeData, readData, 512) == 512);
-    
-    VNvmeMemoryBackendCleanup(lu.pBackendContext);
-}
-```
-
----
 
 ## 功能测试
 
-### SCSI 命令完整测试
+### IOCTL 测试
 
-| 命令 | 测试点 | 预期结果 |
-|------|--------|----------|
-| TEST UNIT READY | LUN 在线 | SRB_STATUS_SUCCESS |
-| TEST UNIT READY | LUN 离线 | CHECK CONDITION, NOT READY |
-| INQUIRY | 标准 INQUIRY | 正确的设备类型和标识 |
-| INQUIRY VPD 0x00 | 支持的页列表 | 返回支持的 VPD 页 |
-| INQUIRY VPD 0x80 | 序列号 | 返回正确序列号 |
-| INQUIRY VPD 0x83 | 设备标识 | 返回 NAA 标识符 |
-| READ CAPACITY(10) | 小于 2TB | 正确的 LastLBA 和块大小 |
-| READ CAPACITY(16) | 任意大小 | 正确的 64 位 LastLBA |
-| READ(10) | 有效 LBA | 正确的数据 |
-| READ(10) | 无效 LBA | CHECK CONDITION, LBA OUT OF RANGE |
-| WRITE(10) | 有效 LBA | 数据正确写入 |
-| WRITE(10) | 只读 LUN | CHECK CONDITION, WRITE PROTECTED |
-| MODE SENSE(6) | 所有页 | 返回模式数据 |
-| SYNCHRONIZE CACHE | - | 缓存刷新 |
-| UNMAP | 有效范围 | 块释放成功 |
-| REPORT LUNS | - | 返回 LUN 列表 |
+```c
+// tests/functional/test_ioctl.c
 
-### PowerShell 功能测试脚本
+#include <windows.h>
+#include "vnvme_ioctl.h"
 
-```powershell
-#
-# VNvme 功能测试脚本
-#
+HANDLE g_hDevice = INVALID_HANDLE_VALUE;
 
-# 获取 VNvme 磁盘
-function Get-VNvmeDisk {
-    Get-Disk | Where-Object { $_.FriendlyName -like "*VNvme*" -or 
-                              $_.FriendlyName -like "*Virtual NVMe*" }
+BOOL SetupTest(void)
+{
+    g_hDevice = CreateFileW(L"\\\\.\\VNVMEControl",
+                           GENERIC_READ | GENERIC_WRITE,
+                           0, NULL, OPEN_EXISTING, 0, NULL);
+    return g_hDevice != INVALID_HANDLE_VALUE;
 }
 
-# 测试磁盘基本功能
-function Test-VNvmeDisk {
-    param(
-        [Parameter(Mandatory=$true)]
-        [int]$DiskNumber
-    )
-    
-    $results = @{
-        DiskNumber = $DiskNumber
-        Tests = @()
+void TeardownTest(void)
+{
+    if (g_hDevice != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_hDevice);
     }
-    
-    # 测试 1: 获取磁盘信息
-    $disk = Get-Disk -Number $DiskNumber
-    $results.Tests += @{
-        Name = "Get-Disk"
-        Result = if ($disk) { "PASS" } else { "FAIL" }
-        Details = $disk.Size
-    }
-    
-    # 测试 2: 初始化磁盘
-    try {
-        if ($disk.PartitionStyle -eq "RAW") {
-            Initialize-Disk -Number $DiskNumber -PartitionStyle GPT -ErrorAction Stop
-        }
-        $results.Tests += @{
-            Name = "Initialize-Disk"
-            Result = "PASS"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "Initialize-Disk"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    # 测试 3: 创建分区
-    try {
-        $partition = New-Partition -DiskNumber $DiskNumber -UseMaximumSize -ErrorAction Stop
-        $results.Tests += @{
-            Name = "New-Partition"
-            Result = "PASS"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "New-Partition"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    # 测试 4: 格式化
-    try {
-        $volume = Format-Volume -Partition $partition -FileSystem NTFS -NewFileSystemLabel "VNvmeTest" -ErrorAction Stop
-        $results.Tests += @{
-            Name = "Format-Volume"
-            Result = "PASS"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "Format-Volume"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    # 测试 5: 分配驱动器号
-    try {
-        Add-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber 2 -AssignDriveLetter
-        $driveLetter = (Get-Partition -DiskNumber $DiskNumber -PartitionNumber 2).DriveLetter
-        $results.Tests += @{
-            Name = "Assign-DriveLetter"
-            Result = "PASS"
-            Details = "$($driveLetter):"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "Assign-DriveLetter"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    return $results
 }
 
-# I/O 测试
-function Test-VNvmeIO {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$DriveLetter,
-        
-        [int]$FileSizeMB = 100,
-        [int]$BlockSizeKB = 4
-    )
+TEST_CASE(TestCreateController)
+{
+    VNVME_CREATE_CONTROLLER_IN input = {
+        .TotalCapacityBytes = 100 * 1024 * 1024,  // 100MB
+        .BlockSize = 512,
+        .BackendType = VnvmeBackendMemory,
+        .MaxQueueEntries = 256,
+        .MaxIoQueues = 4,
+        .CreateDefaultNamespace = TRUE
+    };
+    VNVME_CREATE_CONTROLLER_OUT output;
+    DWORD bytesReturned;
+    BOOL result;
     
-    $testFile = "${DriveLetter}:\vnvme_test.bin"
-    $results = @{
-        DriveLetter = $DriveLetter
-        Tests = @()
-    }
+    result = DeviceIoControl(g_hDevice,
+                            IOCTL_VNVME_CREATE_CONTROLLER,
+                            &input, sizeof(input),
+                            &output, sizeof(output),
+                            &bytesReturned, NULL);
     
-    # 顺序写入测试
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $buffer = New-Object byte[] ($BlockSizeKB * 1024)
-    (New-Object Random).NextBytes($buffer)
+    ASSERT_TRUE(result);
+    ASSERT_SUCCESS(output.Result.Status);
+    ASSERT_TRUE(output.ControllerIndex > 0);
     
-    try {
-        $stream = [System.IO.File]::OpenWrite($testFile)
-        $totalBlocks = ($FileSizeMB * 1024) / $BlockSizeKB
-        
-        for ($i = 0; $i -lt $totalBlocks; $i++) {
-            $stream.Write($buffer, 0, $buffer.Length)
-        }
-        $stream.Flush()
-        $stream.Close()
-        
-        $stopwatch.Stop()
-        $writeMBps = $FileSizeMB / ($stopwatch.ElapsedMilliseconds / 1000)
-        
-        $results.Tests += @{
-            Name = "Sequential-Write"
-            Result = "PASS"
-            Details = "$([math]::Round($writeMBps, 2)) MB/s"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "Sequential-Write"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    # 顺序读取测试
-    $stopwatch.Restart()
-    try {
-        $stream = [System.IO.File]::OpenRead($testFile)
-        $readBuffer = New-Object byte[] ($BlockSizeKB * 1024)
-        
-        while ($stream.Read($readBuffer, 0, $readBuffer.Length) -gt 0) { }
-        $stream.Close()
-        
-        $stopwatch.Stop()
-        $readMBps = $FileSizeMB / ($stopwatch.ElapsedMilliseconds / 1000)
-        
-        $results.Tests += @{
-            Name = "Sequential-Read"
-            Result = "PASS"
-            Details = "$([math]::Round($readMBps, 2)) MB/s"
-        }
-    } catch {
-        $results.Tests += @{
-            Name = "Sequential-Read"
-            Result = "FAIL"
-            Details = $_.Exception.Message
-        }
-    }
-    
-    # 清理测试文件
-    Remove-Item $testFile -Force -ErrorAction SilentlyContinue
-    
-    return $results
+    // 清理：删除创建的控制器
+    VNVME_DELETE_CONTROLLER_IN deleteInput = {
+        .ControllerIndex = output.ControllerIndex,
+        .Force = TRUE
+    };
+    DeviceIoControl(g_hDevice, IOCTL_VNVME_DELETE_CONTROLLER,
+                   &deleteInput, sizeof(deleteInput),
+                   NULL, 0, &bytesReturned, NULL);
 }
 
-# 运行所有测试
-function Invoke-VNvmeFullTest {
-    $allResults = @()
+TEST_CASE(TestListControllers)
+{
+    VNVME_LIST_CONTROLLERS_OUT output;
+    DWORD bytesReturned;
+    BOOL result;
     
-    # 获取所有 VNvme 磁盘
-    $disks = Get-VNvmeDisk
+    result = DeviceIoControl(g_hDevice,
+                            IOCTL_VNVME_LIST_CONTROLLERS,
+                            NULL, 0,
+                            &output, sizeof(output),
+                            &bytesReturned, NULL);
     
-    if ($disks.Count -eq 0) {
-        Write-Warning "No VNvme disks found"
-        return
-    }
-    
-    foreach ($disk in $disks) {
-        Write-Host "Testing Disk $($disk.Number): $($disk.FriendlyName)" -ForegroundColor Cyan
-        
-        # 基本测试
-        $diskResults = Test-VNvmeDisk -DiskNumber $disk.Number
-        $allResults += $diskResults
-        
-        # I/O 测试 (如果有驱动器号)
-        $partition = Get-Partition -DiskNumber $disk.Number | 
-                     Where-Object { $_.DriveLetter } | 
-                     Select-Object -First 1
-        
-        if ($partition) {
-            $ioResults = Test-VNvmeIO -DriveLetter $partition.DriveLetter
-            $allResults += $ioResults
-        }
-    }
-    
-    # 输出结果
-    Write-Host "`n=== Test Results ===" -ForegroundColor Green
-    foreach ($result in $allResults) {
-        foreach ($test in $result.Tests) {
-            $color = if ($test.Result -eq "PASS") { "Green" } else { "Red" }
-            Write-Host "[$($test.Result)] $($test.Name): $($test.Details)" -ForegroundColor $color
-        }
-    }
+    ASSERT_TRUE(result);
+    ASSERT_SUCCESS(output.Result.Status);
+    // ControllerCount 可以是 0 或更多
 }
 ```
 
----
+### NVMe 命令测试
+
+```c
+// tests/functional/test_nvme_commands.c
+
+// 模拟 NVMe 命令提交和完成
+TEST_CASE(TestIdentifyController)
+{
+    NVME_COMMAND cmd = { 0 };
+    NVME_COMPLETION cpl;
+    UCHAR identifyData[4096];
+    
+    // 构造 Identify Controller 命令
+    cmd.CDW0.OPC = NVME_ADMIN_CMD_IDENTIFY;
+    cmd.CDW0.CID = 1;
+    cmd.NSID = 0;
+    cmd.CDW10 = 0x01;  // CNS = 1 (Controller)
+    
+    // 提交命令
+    // ... (需要通过 IOCTL 或直接内存访问)
+    
+    // 验证返回数据
+    PNVME_IDENTIFY_CONTROLLER idCtrl = (PNVME_IDENTIFY_CONTROLLER)identifyData;
+    
+    ASSERT_EQUAL(idCtrl->VID, 0x1B36);
+    ASSERT_TRUE(idCtrl->NN >= 1);
+    // ...
+}
+
+TEST_CASE(TestReadWriteBasic)
+{
+    UCHAR writeData[4096];
+    UCHAR readData[4096];
+    
+    // 填充测试数据
+    for (int i = 0; i < 4096; i++) {
+        writeData[i] = (UCHAR)(i & 0xFF);
+    }
+    
+    // 写入 LBA 0
+    NVME_COMMAND writeCmd = {
+        .CDW0.OPC = NVME_IO_CMD_WRITE,
+        .CDW0.CID = 1,
+        .NSID = 1,
+        .CDW10 = 0,      // Starting LBA (low)
+        .CDW11 = 0,      // Starting LBA (high)
+        .CDW12 = 7       // NLB = 8 (0-based), 8 * 512 = 4096 bytes
+    };
+    
+    // 提交写入并等待完成
+    // ...
+    
+    // 读取 LBA 0
+    NVME_COMMAND readCmd = {
+        .CDW0.OPC = NVME_IO_CMD_READ,
+        .CDW0.CID = 2,
+        .NSID = 1,
+        .CDW10 = 0,
+        .CDW11 = 0,
+        .CDW12 = 7
+    };
+    
+    // 提交读取并等待完成
+    // ...
+    
+    // 验证数据一致性
+    ASSERT_MEMORY_EQUAL(readData, writeData, 4096);
+}
+```
+
+## 集成测试
+
+### stornvme.sys 集成测试
+
+当我们的虚拟 NVMe 设备创建后，Windows 的 stornvme.sys 会自动加载。我们可以测试：
+
+```c
+// tests/integration/test_stornvme_integration.c
+
+TEST_CASE(TestDeviceEnumeration)
+{
+    // 创建虚拟控制器后，检查设备管理器
+    
+    // 使用 SetupAPI 枚举 NVMe 设备
+    HDEVINFO devInfo = SetupDiGetClassDevs(
+        &GUID_DEVINTERFACE_DISK,
+        NULL, NULL,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    
+    // 查找我们的虚拟设备
+    // ...
+}
+
+TEST_CASE(TestDiskAppearance)
+{
+    // 创建带命名空间的控制器
+    // 等待磁盘出现
+    
+    Sleep(5000);  // 等待 PnP 枚举
+    
+    // 检查磁盘是否出现
+    WCHAR diskPath[64];
+    swprintf_s(diskPath, 64, L"\\\\.\\PhysicalDrive%d", expectedDriveNumber);
+    
+    HANDLE hDisk = CreateFileW(diskPath,
+                              GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, 0, NULL);
+    
+    ASSERT_TRUE(hDisk != INVALID_HANDLE_VALUE);
+    
+    // 获取磁盘信息
+    STORAGE_PROPERTY_QUERY query = {
+        .PropertyId = StorageDeviceProperty,
+        .QueryType = PropertyStandardQuery
+    };
+    STORAGE_DEVICE_DESCRIPTOR desc;
+    DWORD bytesReturned;
+    
+    BOOL result = DeviceIoControl(hDisk,
+                                 IOCTL_STORAGE_QUERY_PROPERTY,
+                                 &query, sizeof(query),
+                                 &desc, sizeof(desc),
+                                 &bytesReturned, NULL);
+    
+    ASSERT_TRUE(result);
+    ASSERT_EQUAL(desc.BusType, BusTypeNvme);
+    
+    CloseHandle(hDisk);
+}
+```
+
+### 文件系统测试
+
+```c
+TEST_CASE(TestFileSystemOperations)
+{
+    // 假设虚拟磁盘已格式化为 NTFS 并分配盘符 V:
+    
+    WCHAR testFile[] = L"V:\\test_file.bin";
+    HANDLE hFile;
+    DWORD bytesWritten, bytesRead;
+    UCHAR writeBuffer[1024 * 1024];  // 1MB
+    UCHAR readBuffer[1024 * 1024];
+    
+    // 生成测试数据
+    for (int i = 0; i < sizeof(writeBuffer); i++) {
+        writeBuffer[i] = (UCHAR)rand();
+    }
+    
+    // 创建并写入文件
+    hFile = CreateFileW(testFile, GENERIC_WRITE, 0, NULL,
+                       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    ASSERT_TRUE(hFile != INVALID_HANDLE_VALUE);
+    
+    BOOL result = WriteFile(hFile, writeBuffer, sizeof(writeBuffer),
+                           &bytesWritten, NULL);
+    ASSERT_TRUE(result);
+    ASSERT_EQUAL(bytesWritten, sizeof(writeBuffer));
+    
+    CloseHandle(hFile);
+    
+    // 读回验证
+    hFile = CreateFileW(testFile, GENERIC_READ, 0, NULL,
+                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    ASSERT_TRUE(hFile != INVALID_HANDLE_VALUE);
+    
+    result = ReadFile(hFile, readBuffer, sizeof(readBuffer),
+                     &bytesRead, NULL);
+    ASSERT_TRUE(result);
+    ASSERT_EQUAL(bytesRead, sizeof(readBuffer));
+    ASSERT_MEMORY_EQUAL(readBuffer, writeBuffer, sizeof(writeBuffer));
+    
+    CloseHandle(hFile);
+    DeleteFileW(testFile);
+}
+```
+
+## 性能测试
+
+### I/O 吞吐量测试
+
+```c
+// tests/performance/test_throughput.c
+
+TEST_CASE(TestSequentialReadThroughput)
+{
+    HANDLE hDisk = OpenVirtualDisk();
+    LARGE_INTEGER fileSize = { .QuadPart = 1024 * 1024 * 1024 };  // 1GB
+    UCHAR* buffer;
+    DWORD bytesRead;
+    LARGE_INTEGER startTime, endTime, frequency;
+    
+    buffer = VirtualAlloc(NULL, 1024 * 1024, MEM_COMMIT, PAGE_READWRITE);
+    
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&startTime);
+    
+    LARGE_INTEGER offset = { 0 };
+    ULONG64 totalRead = 0;
+    
+    while (totalRead < fileSize.QuadPart) {
+        SetFilePointerEx(hDisk, offset, NULL, FILE_BEGIN);
+        ReadFile(hDisk, buffer, 1024 * 1024, &bytesRead, NULL);
+        totalRead += bytesRead;
+        offset.QuadPart += bytesRead;
+    }
+    
+    QueryPerformanceCounter(&endTime);
+    
+    double seconds = (double)(endTime.QuadPart - startTime.QuadPart) / frequency.QuadPart;
+    double mbps = (totalRead / (1024.0 * 1024.0)) / seconds;
+    
+    printf("Sequential Read: %.2f MB/s\n", mbps);
+    
+    VirtualFree(buffer, 0, MEM_RELEASE);
+    CloseHandle(hDisk);
+}
+
+TEST_CASE(TestRandomIops)
+{
+    HANDLE hDisk = OpenVirtualDisk();
+    UCHAR buffer[4096];
+    DWORD bytesRead;
+    LARGE_INTEGER frequency, startTime, endTime;
+    ULONG operations = 10000;
+    ULONG64 diskSize = 100 * 1024 * 1024;  // 100MB
+    
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&startTime);
+    
+    for (ULONG i = 0; i < operations; i++) {
+        LARGE_INTEGER offset;
+        offset.QuadPart = (rand() % (diskSize / 4096)) * 4096;
+        
+        SetFilePointerEx(hDisk, offset, NULL, FILE_BEGIN);
+        ReadFile(hDisk, buffer, 4096, &bytesRead, NULL);
+    }
+    
+    QueryPerformanceCounter(&endTime);
+    
+    double seconds = (double)(endTime.QuadPart - startTime.QuadPart) / frequency.QuadPart;
+    double iops = operations / seconds;
+    
+    printf("Random 4K Read: %.0f IOPS\n", iops);
+    
+    CloseHandle(hDisk);
+}
+```
+
+### 延迟测试
+
+```c
+TEST_CASE(TestIoLatency)
+{
+    HANDLE hDisk = OpenVirtualDisk();
+    UCHAR buffer[4096];
+    LARGE_INTEGER frequency, startTime, endTime;
+    ULONG samples = 1000;
+    double* latencies = malloc(samples * sizeof(double));
+    
+    QueryPerformanceFrequency(&frequency);
+    
+    for (ULONG i = 0; i < samples; i++) {
+        QueryPerformanceCounter(&startTime);
+        
+        DWORD bytesRead;
+        ReadFile(hDisk, buffer, 4096, &bytesRead, NULL);
+        
+        QueryPerformanceCounter(&endTime);
+        
+        latencies[i] = (double)(endTime.QuadPart - startTime.QuadPart) * 1000000.0 / frequency.QuadPart;  // us
+    }
+    
+    // 计算统计数据
+    double sum = 0, min = latencies[0], max = latencies[0];
+    for (ULONG i = 0; i < samples; i++) {
+        sum += latencies[i];
+        if (latencies[i] < min) min = latencies[i];
+        if (latencies[i] > max) max = latencies[i];
+    }
+    double avg = sum / samples;
+    
+    // 排序计算 p99
+    qsort(latencies, samples, sizeof(double), CompareDouble);
+    double p99 = latencies[(int)(samples * 0.99)];
+    
+    printf("Latency: avg=%.2fus, min=%.2fus, max=%.2fus, p99=%.2fus\n",
+           avg, min, max, p99);
+    
+    free(latencies);
+    CloseHandle(hDisk);
+}
+```
 
 ## 压力测试
 
-### diskspd 压力测试
+### 长时间运行测试
 
 ```powershell
-# 安装 diskspd
-# 下载: https://github.com/microsoft/diskspd/releases
+# scripts/stress_test.ps1
 
-# 顺序读取测试 (8 线程, 64K 块, 30 秒)
-diskspd -c100M -d30 -r -w0 -t8 -o32 -b64K -Sh V:\testfile.dat
+param(
+    [int]$DurationMinutes = 60,
+    [int]$ThreadCount = 4
+)
 
-# 顺序写入测试
-diskspd -c100M -d30 -r -w100 -t8 -o32 -b64K -Sh V:\testfile.dat
+$diskPath = "\\.\PhysicalDrive2"  # 虚拟磁盘
 
-# 随机读取测试 (4K 块)
-diskspd -c100M -d30 -r -w0 -t8 -o32 -b4K -Sh V:\testfile.dat
-
-# 随机写入测试
-diskspd -c100M -d30 -r -w100 -t8 -o32 -b4K -Sh V:\testfile.dat
-
-# 混合负载 (70% 读, 30% 写)
-diskspd -c100M -d30 -r -w30 -t8 -o32 -b4K -Sh V:\testfile.dat
+# 使用 diskspd 进行压力测试
+diskspd -c1G -d$($DurationMinutes * 60) -t$ThreadCount -o32 -b4K -r -w50 -L $diskPath
 ```
 
-### fio 压力测试
+### 并发访问测试
 
-```ini
-# vnvme_stress.fio
-
-[global]
-ioengine=windowsaio
-direct=1
-size=1G
-runtime=60
-time_based
-
-[seq-read]
-rw=read
-bs=128k
-numjobs=4
-iodepth=32
-
-[seq-write]
-rw=write
-bs=128k
-numjobs=4
-iodepth=32
-
-[rand-read]
-rw=randread
-bs=4k
-numjobs=8
-iodepth=64
-
-[rand-write]
-rw=randwrite
-bs=4k
-numjobs=8
-iodepth=64
+```c
+DWORD WINAPI StressWorkerThread(LPVOID param)
+{
+    DWORD threadId = GetCurrentThreadId();
+    HANDLE hDisk = OpenVirtualDisk();
+    UCHAR buffer[4096];
+    ULONG operations = 0;
+    
+    while (!g_StopTest) {
+        LARGE_INTEGER offset;
+        offset.QuadPart = (rand() % (g_DiskSize / 4096)) * 4096;
+        
+        SetFilePointerEx(hDisk, offset, NULL, FILE_BEGIN);
+        
+        if (rand() % 2) {
+            WriteFile(hDisk, buffer, 4096, NULL, NULL);
+        } else {
+            ReadFile(hDisk, buffer, 4096, NULL, NULL);
+        }
+        
+        operations++;
+    }
+    
+    InterlockedAdd64(&g_TotalOperations, operations);
+    CloseHandle(hDisk);
+    return 0;
+}
 ```
+
+## 测试自动化
+
+### 测试运行脚本
+
+`scripts/run_tests.ps1`:
 
 ```powershell
-# 运行 fio 测试
-fio vnvme_stress.fio --filename=V:\testfile
+param(
+    [ValidateSet("unit", "functional", "integration", "performance", "all")]
+    [string]$TestType = "all"
+)
+
+$testExe = "tests\x64\Release\vnvme_tests.exe"
+
+function Run-Tests($filter) {
+    Write-Host "Running tests: $filter" -ForegroundColor Cyan
+    & $testExe --filter=$filter --output=results\$filter.xml
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "FAILED: $filter" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "PASSED: $filter" -ForegroundColor Green
+    return $true
+}
+
+$results = @()
+
+if ($TestType -eq "unit" -or $TestType -eq "all") {
+    $results += Run-Tests "Unit.*"
+}
+
+if ($TestType -eq "functional" -or $TestType -eq "all") {
+    $results += Run-Tests "Functional.*"
+}
+
+if ($TestType -eq "integration" -or $TestType -eq "all") {
+    # 需要驱动已安装
+    $results += Run-Tests "Integration.*"
+}
+
+if ($TestType -eq "performance" -or $TestType -eq "all") {
+    $results += Run-Tests "Performance.*"
+}
+
+$failed = ($results | Where-Object { $_ -eq $false }).Count
+if ($failed -gt 0) {
+    Write-Host "`n$failed test suite(s) failed!" -ForegroundColor Red
+    exit 1
+} else {
+    Write-Host "`nAll tests passed!" -ForegroundColor Green
+    exit 0
+}
 ```
 
----
+## 代码覆盖率
 
-## HLK/WHQL 测试
-
-### Windows Hardware Lab Kit (HLK)
-
-HLK 用于 Windows 硬件认证，包含存储设备的完整测试套件。
-
-#### 设置 HLK 环境
-
-1. 下载 Windows HLK:
-   - https://docs.microsoft.com/en-us/windows-hardware/test/hlk/
-
-2. 安装 HLK Controller (测试服务器)
-
-3. 安装 HLK Client (测试虚拟机)
-
-4. 创建 Machine Pool
-
-#### 存储相关测试
-
-| 测试类别 | 说明 |
-|----------|------|
-| Disk Stress (LOGO) | 磁盘压力测试 |
-| Storage HBA Compliance Test | HBA 合规性测试 |
-| SCSI Compliance Test | SCSI 命令合规性 |
-| Flush Test | 缓存刷新测试 |
-| Thin Provisioning Tests | 精简配置测试 |
-| TRIM Support Test | TRIM/UNMAP 测试 |
-
-#### 常见测试命令
+使用 Visual Studio 或其他工具收集代码覆盖率：
 
 ```powershell
-# 列出可用测试
-Get-HLKTest -Pool "VNvme Pool" | Where-Object { $_.Name -like "*Storage*" }
-
-# 运行特定测试
-Start-HLKTest -TestID "12345678-1234-1234-1234-123456789ABC"
-
-# 检查测试结果
-Get-HLKTestResult -TestID "12345678-1234-1234-1234-123456789ABC"
+# 使用 OpenCppCoverage
+OpenCppCoverage.exe `
+    --sources src\ `
+    --export_type=html:coverage_report `
+    -- tests\x64\Release\vnvme_tests.exe
 ```
-
----
-
-## 调试与故障排查
-
-### 启用驱动跟踪
-
-```powershell
-# 启用 ETW 跟踪
-logman create trace vnvme_trace -p "{12345678-1234-1234-1234-123456789ABC}" -o vnvme.etl -ets
-
-# 运行测试...
-
-# 停止跟踪
-logman stop vnvme_trace -ets
-
-# 查看跟踪
-tracefmt vnvme.etl -o vnvme.txt
-```
-
-### WinDbg 常用命令
-
-```windbg
-# 加载驱动符号
-.reload /f vnvme.sys
-
-# 设置断点
-bp vnvme!VNvmeHwStartIo
-
-# 查看适配器扩展
-dt vnvme!VNVME_ADAPTER_EXTENSION poi(vnvme!g_pAdapterExtension)
-
-# 查看 SRB
-dt storport!_SCSI_REQUEST_BLOCK @rcx
-
-# 跟踪 SCSI 命令
-!stordump
-
-# 查看 StorPort 日志
-!storlog
-```
-
-### 常见问题排查
-
-| 问题 | 可能原因 | 排查方法 |
-|------|----------|----------|
-| 驱动加载失败 | 签名问题 | 检查 testsigning，验证签名 |
-| 设备带黄色感叹号 | HwFindAdapter 失败 | 检查返回状态，查看事件日志 |
-| I/O 超时 | HwStartIo 未完成 | 检查 StorPortNotification 调用 |
-| 数据损坏 | 后端 I/O 错误 | 启用后端日志，验证数据一致性 |
-| 蓝屏 | 内存访问错误 | 分析 dump 文件 |
-
----
-
-## 参考资料
-
-- [Windows Hardware Lab Kit](https://docs.microsoft.com/en-us/windows-hardware/test/hlk/)
-- [diskspd](https://github.com/microsoft/diskspd)
-- [TAEF](https://docs.microsoft.com/en-us/windows-hardware/drivers/taef/)
-- [StorPort Driver Debugging](https://docs.microsoft.com/en-us/windows-hardware/drivers/storage/storage-debugging)

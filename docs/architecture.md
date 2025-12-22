@@ -365,3 +365,53 @@ vnvme/
 - [PORT_CONFIGURATION_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/storport/ns-storport-_port_configuration_information)
 - [Virtual Storport Miniport](https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/virtual-miniport-drivers)
 - [SCSI Request Block](https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/scsi-request-block-srb)
+
+---
+
+## 附录：架构决策记录
+
+### 决策: 选择 StorPort Virtual Miniport 而非虚拟总线驱动
+
+**决策日期**: 项目初期
+
+**背景**: 
+实现 Windows 虚拟存储设备有多种架构选择：
+
+| 方案 | 官方支持 | 适用场景 | 复杂度 |
+|------|----------|----------|--------|
+| StorPort Virtual Miniport | ✅ 官方推荐 | 虚拟 HBA、iSCSI、软件 RAID | 中等 |
+| 虚拟总线 + Class Driver | ✅ 常用 | 简单虚拟磁盘 | 中等 |
+| Storage Filter Driver | ✅ 官方支持 | 增强现有设备功能 | 低 |
+
+**考虑的替代方案**:
+
+**方案 A: 虚拟总线 + 功能驱动**
+```
+disk.sys ──SRB──▶ vnvme.sys ──▶ 后端存储
+     ▲
+     └─── vnvmebus.sys (设备枚举)
+```
+- 优点: 架构简单，完全控制设备生命周期
+- 缺点: 需自己实现队列管理、MPIO、错误恢复等功能
+
+**方案 B: StorPort Virtual Miniport** (已选择)
+```
+storport.sys ──SRB──▶ vnvme.sys ──▶ 后端存储
+(VirtualDevice = TRUE)
+```
+- 优点: 微软官方推荐，内置企业级功能，队列深度 250
+- 缺点: 需遵循 StorPort 回调模型
+
+**最终决策**: 
+选择 **StorPort Virtual Miniport** 方案，原因：
+1. 微软官方推荐的虚拟存储设备驱动架构
+2. 内置 MPIO、队列管理、负载均衡、错误恢复等企业级功能
+3. 通过 `VirtualDevice = TRUE` 简化开发，无需处理硬件细节
+4. 队列深度自动提升到 250，满足高性能需求
+5. 与 Windows 存储栈深度集成，兼容性更好
+
+**影响**:
+- 驱动框架必须使用 WDM（StorPort Miniport 不支持 KMDF）
+- 必须实现 StorPort 定义的回调函数集
+- 单驱动文件 (vnvme.sys) 即可完成全部功能
+

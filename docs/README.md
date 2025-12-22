@@ -95,6 +95,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [backend-implementation.md](backend-implementation.md) | 存储后端实现指南，内存/文件/VHD 后端详细代码 |
 | [ioctl-interface.md](ioctl-interface.md) | 管理接口设计，IOCTL 定义，用户态交互 |
 | [nvme-spec.md](nvme-spec.md) | NVMe 规范参考，设备标识信息定义 |
 | [inf-template.md](inf-template.md) | INF 安装文件模板，设备 ID 定义，安装脚本 |

@@ -48,12 +48,23 @@
 
 ### 为什么不使用 StorPort Miniport？
 
-StorPort Miniport 驱动模型主要设计用于真实硬件控制器，存在以下限制：
-- 需要实际的硬件资源（中断、DMA、内存映射 I/O）
-- 与 PnP 管理器的交互假定存在真实硬件
-- 不适合纯软件模拟场景
+StorPort Miniport 驱动模型传统上主要用于真实硬件控制器，但 **Microsoft 官方支持虚拟 Miniport 驱动**。
 
-### 采用的方案：虚拟总线 + 功能驱动
+通过设置 `PORT_CONFIGURATION_INFORMATION.VirtualDevice = TRUE`，StorPort 会以虚拟模式运行：
+- 不需要真实 DMA 对象
+- 不需要硬件中断
+- 不需要内存映射 I/O 端口
+- 初始队列深度自动设为 250 (物理设备为 20)
+
+**虽然 StorPort Virtual Miniport 是可行的替代方案**，本项目选择虚拟总线方案有以下原因：
+- 更直接控制设备枚举和生命周期
+- 便于学习 Windows 驱动开发基础概念
+- 不依赖 StorPort 框架的复杂性
+- 适合教学和原型开发
+
+> **备选方案说明**: 如果您需要企业级功能（MPIO 支持、高级队列管理、官方推荐架构），请参考 [architecture-analysis.md](architecture-analysis.md) 中的 StorPort Virtual Miniport 方案。
+
+### 方案 A（本项目）：虚拟总线 + 功能驱动
 
 | 组件 | 文件 | 职责 |
 |------|------|------|

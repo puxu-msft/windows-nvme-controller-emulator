@@ -103,27 +103,135 @@ typedef struct _VNVME_NAMESPACE {
 
 ## 存储后端结构
 
+### 后端能力标志
+
+```c
+// 后端支持的功能集
+typedef enum _VNVME_BACKEND_CAPS {
+    VNVME_BACKEND_CAP_READ       = 0x00000001,  // 支持读取
+    VNVME_BACKEND_CAP_WRITE      = 0x00000002,  // 支持写入
+    VNVME_BACKEND_CAP_FLUSH      = 0x00000004,  // 支持刷新
+    VNVME_BACKEND_CAP_TRIM       = 0x00000008,  // 支持 TRIM/UNMAP
+    VNVME_BACKEND_CAP_FUA        = 0x00000010,  // 支持 Force Unit Access
+    VNVME_BACKEND_CAP_RESIZE     = 0x00000020,  // 支持动态调整大小
+    VNVME_BACKEND_CAP_SNAPSHOT   = 0x00000040,  // 支持快照
+    VNVME_BACKEND_CAP_PERSISTENT = 0x00000080,  // 数据持久化
+    VNVME_BACKEND_CAP_ASYNC      = 0x00000100,  // 支持异步 I/O
+    VNVME_BACKEND_CAP_HOTPLUG    = 0x00000200,  // 支持运行时切换
+} VNVME_BACKEND_CAPS;
+```
+
+### 后端信息结构
+
+```c
+// 后端当前状态信息
+typedef struct _VNVME_BACKEND_INFO {
+    VNVME_BACKEND_TYPE  Type;               // 后端类型
+    ULONG               Capabilities;       // VNVME_BACKEND_CAPS 组合
+    ULONGLONG           TotalSize;          // 总容量 (字节)
+    ULONGLONG           UsedSize;           // 已使用空间 (稀疏后端)
+    ULONG               BlockSize;          // 块大小 (512/4096)
+    ULONG               OptimalTransferSize;// 最优传输大小
+    BOOLEAN             ReadOnly;           // 只读标志
+    BOOLEAN             Sparse;             // 稀疏分配
+    WCHAR               Description[64];    // 后端描述
+} VNVME_BACKEND_INFO, *PVNVME_BACKEND_INFO;
+```
+
+### 后端配置结构
+
+```c
+// 创建后端时的配置参数
+typedef struct _VNVME_BACKEND_CONFIG {
+    VNVME_BACKEND_TYPE  Type;               // 后端类型
+    ULONGLONG           Size;               // 请求的大小 (字节)
+    ULONG               BlockSize;          // 块大小 (512 或 4096)
+    BOOLEAN             ReadOnly;           // 只读模式
+    BOOLEAN             CreateNew;          // TRUE: 创建新后端, FALSE: 打开现有
+    
+    union {
+        // 内存后端配置
+        struct {
+            BOOLEAN     PreAllocate;        // 预分配全部内存
+            POOL_TYPE   PoolType;           // NonPagedPoolNx 等
+        } Memory;
+        
+        // 文件后端配置
+        struct {
+            UNICODE_STRING  FilePath;       // 文件绝对路径
+            BOOLEAN         SparseFile;     // 使用稀疏文件
+            BOOLEAN         NoBuffering;    // FILE_NO_INTERMEDIATE_BUFFERING
+            BOOLEAN         WriteThrough;   // FILE_WRITE_THROUGH
+        } File;
+        
+        // VHD 后端配置
+        struct {
+            UNICODE_STRING  VhdPath;        // VHD/VHDX 文件路径
+            ULONG           VhdType;        // 0=Fixed, 1=Dynamic, 2=Differencing
+            UNICODE_STRING  ParentPath;     // 差异盘父盘路径 (可选)
+        } Vhd;
+    };
+} VNVME_BACKEND_CONFIG, *PVNVME_BACKEND_CONFIG;
+```
+
+### 异步 I/O 上下文
+
+```c
+// 异步后端 I/O 请求
+typedef struct _VNVME_BACKEND_IO {
+    ULONGLONG           Offset;             // 起始偏移 (字节)
+    ULONG               Length;             // 数据长度 (字节)
+    PVOID               Buffer;             // 数据缓冲区
+    PMDL                Mdl;                // 内存描述符 (可选)
+    BOOLEAN             Fua;                // Force Unit Access
+    PVOID               Context;            // 调用者上下文
+    
+    // 异步完成回调
+    VOID (*CompletionCallback)(
+        struct _VNVME_BACKEND_IO* Io,
+        NTSTATUS Status,
+        ULONG BytesTransferred);
+} VNVME_BACKEND_IO, *PVNVME_BACKEND_IO;
+```
+
+### 后端实例结构
+
 ```c
 typedef struct _VNVME_BACKEND {
-    VNVME_BACKEND_TYPE Type;    // MEMORY / FILE
-    UINT64 TotalSize;
+    VNVME_BACKEND_TYPE Type;                // 后端类型
+    ULONG              Capabilities;        // VNVME_BACKEND_CAPS 能力集
+    ULONGLONG          TotalSize;           // 总容量
+    ULONG              BlockSize;           // 块大小
+    BOOLEAN            ReadOnly;            // 只读标志
     
     union {
         // 内存后端
         struct {
-            PVOID Buffer;
-            SIZE_T BufferSize;
+            PVOID Buffer;                   // 数据缓冲区
+            SIZE_T BufferSize;              // 缓冲区大小
+            PMDL Mdl;                       // 锁定 MDL (可选)
         } Memory;
         
         // 文件后端
         struct {
-            HANDLE FileHandle;
-            UNICODE_STRING FilePath;
+            HANDLE FileHandle;              // 文件句柄
+            UNICODE_STRING FilePath;        // 文件路径
+            PFILE_OBJECT FileObject;        // 文件对象
         } File;
+        
+        // VHD 后端
+        struct {
+            HANDLE VhdHandle;               // VHD 句柄
+            UNICODE_STRING VhdPath;         // VHD 路径
+            ULONG VhdType;                  // VHD 类型
+        } Vhd;
     };
     
     // 后端操作函数表
     PVNVME_BACKEND_OPS Operations;
+    
+    // 同步锁 (保护并发访问)
+    KSPIN_LOCK Lock;
     
 } VNVME_BACKEND, *PVNVME_BACKEND;
 ```
@@ -131,43 +239,98 @@ typedef struct _VNVME_BACKEND {
 ## 后端操作函数表
 
 ```c
+// 模块化后端接口 (虚函数表模式)
 typedef struct _VNVME_BACKEND_OPS {
     // 初始化后端
     NTSTATUS (*Initialize)(
-        PVNVME_BACKEND Backend,
-        PVNVME_BACKEND_CONFIG Config);
+        _Out_ PVNVME_BACKEND* Backend,
+        _In_ PVNVME_BACKEND_CONFIG Config);
     
-    // 读取数据
+    // 获取后端信息
+    NTSTATUS (*GetInfo)(
+        _In_ PVNVME_BACKEND Backend,
+        _Out_ PVNVME_BACKEND_INFO Info);
+    
+    // 同步读取
     NTSTATUS (*Read)(
-        PVNVME_BACKEND Backend,
-        UINT64 Offset,
-        UINT32 Length,
-        PVOID Buffer);
+        _In_ PVNVME_BACKEND Backend,
+        _In_ ULONGLONG Offset,
+        _In_ ULONG Length,
+        _Out_writes_bytes_(Length) PVOID Buffer);
     
-    // 写入数据
+    // 同步写入
     NTSTATUS (*Write)(
-        PVNVME_BACKEND Backend,
-        UINT64 Offset,
-        UINT32 Length,
-        PVOID Buffer);
+        _In_ PVNVME_BACKEND Backend,
+        _In_ ULONGLONG Offset,
+        _In_ ULONG Length,
+        _In_reads_bytes_(Length) PVOID Buffer);
     
-    // 刷新到持久存储
+    // 异步读取 (可选 - 检查 VNVME_BACKEND_CAP_ASYNC)
+    NTSTATUS (*ReadAsync)(
+        _In_ PVNVME_BACKEND Backend,
+        _Inout_ PVNVME_BACKEND_IO Io);
+    
+    // 异步写入 (可选)
+    NTSTATUS (*WriteAsync)(
+        _In_ PVNVME_BACKEND Backend,
+        _Inout_ PVNVME_BACKEND_IO Io);
+    
+    // 刷新缓存到持久存储
     NTSTATUS (*Flush)(
-        PVNVME_BACKEND Backend);
+        _In_ PVNVME_BACKEND Backend);
+    
+    // TRIM/UNMAP (可选 - 检查 VNVME_BACKEND_CAP_TRIM)
+    NTSTATUS (*Trim)(
+        _In_ PVNVME_BACKEND Backend,
+        _In_ ULONGLONG Offset,
+        _In_ ULONGLONG Length);
+    
+    // 动态调整大小 (可选 - 检查 VNVME_BACKEND_CAP_RESIZE)
+    NTSTATUS (*Resize)(
+        _In_ PVNVME_BACKEND Backend,
+        _In_ ULONGLONG NewSize);
     
     // 关闭后端
-    VOID (*Shutdown)(
-        PVNVME_BACKEND Backend);
+    VOID (*Close)(
+        _In_ PVNVME_BACKEND Backend);
     
 } VNVME_BACKEND_OPS, *PVNVME_BACKEND_OPS;
+```
 
-// 后端类型枚举
+### 后端类型枚举
+
+```c
 typedef enum _VNVME_BACKEND_TYPE {
     VNVME_BACKEND_MEMORY = 0,   // 内存后端 (非持久)
     VNVME_BACKEND_FILE   = 1,   // 文件后端 (持久)
-    VNVME_BACKEND_VHD    = 2,   // VHD 后端 (持久)
+    VNVME_BACKEND_VHD    = 2,   // VHD/VHDX 后端 (持久)
+    VNVME_BACKEND_REMOTE = 3,   // 远程后端 - 预留 (iSCSI/NVMe-oF)
+    VNVME_BACKEND_MAX
 } VNVME_BACKEND_TYPE;
 ```
+
+### 后端注册结构 (工厂模式)
+
+```c
+// 用于注册和管理可用后端类型
+typedef struct _VNVME_BACKEND_REGISTRATION {
+    VNVME_BACKEND_TYPE      Type;           // 后端类型 ID
+    const WCHAR*            Name;           // 显示名称 "Memory", "File", "VHD"
+    ULONG                   DefaultCaps;    // 默认能力集
+    PVNVME_BACKEND_OPS      Operations;     // 操作函数表
+} VNVME_BACKEND_REGISTRATION, *PVNVME_BACKEND_REGISTRATION;
+```
+
+## 各后端类型能力对比
+
+| 后端类型 | 持久化 | TRIM | FUA | 异步 | 动态大小 | 快照 |
+|----------|--------|------|-----|------|----------|------|
+| Memory   | ✗      | ✓    | N/A | ✓    | ✗        | ✗    |
+| File     | ✓      | ✓*   | ✓   | ✓    | ✓        | ✗    |
+| VHD      | ✓      | ✓    | ✓   | ✓    | ✓        | ✓    |
+| Remote   | ✓      | 取决于目标 | ✓ | ✓  | ✗        | ✗    |
+
+*注: 文件后端 TRIM 需要底层文件系统支持稀疏文件
 
 ## NVMe 控制器寄存器结构
 

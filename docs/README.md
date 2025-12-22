@@ -17,10 +17,12 @@ Virtual NVMe Driver 是一个纯软件实现的虚拟 NVMe SSD 设备驱动程�
 | 文档 | 说明 |
 |------|------|
 | [architecture.md](architecture.md) | 系统架构设计 |
+| [architecture-analysis.md](architecture-analysis.md) | **NEW** 架构分析与最佳实践评估 |
 | [nvme-spec.md](nvme-spec.md) | NVMe 规范概述 |
 | [driver-design.md](driver-design.md) | 驱动详细设计 |
 | [data-structures.md](data-structures.md) | 核心数据结构 |
 | [command-handling.md](command-handling.md) | 命令处理流程 |
+| [backend-implementation.md](backend-implementation.md) | **NEW** 存储后端实现指南 |
 | [power-management.md](power-management.md) | 电源管理 |
 | [ioctl-interface.md](ioctl-interface.md) | IOCTL 用户态接口 |
 | [build-guide.md](build-guide.md) | 构建与部署指南 |

@@ -85,17 +85,11 @@ VnvmeParsePrpList(
         entryIndex++;
     } else {
         // 多页，PRP2 是 PRP 列表地址
-        // TODO: Phase 4 - 读取 PRP 列表
-        TRACE_WARN("VnvmeParsePrpList: PRP list parsing not implemented for %u pages", numPages);
-        
-        // 临时处理：只使用前两页
-        entries[entryIndex].PhysicalAddress = Prp2 & ~((ULONGLONG)pageSize - 1);
-        entries[entryIndex].Offset = 0;
-        entries[entryIndex].Length = DataLength - firstPageBytes;
-        if (entries[entryIndex].Length > pageSize) {
-            entries[entryIndex].Length = pageSize;
-        }
-        entryIndex++;
+        // TODO: Phase 4 - 实现完整的 PRP 列表解析
+        // 当前不支持超过 2 页的传输，返回错误防止数据损坏
+        TRACE_ERROR("VnvmeParsePrpList: PRP list parsing not implemented for %u pages (max 2 supported)", numPages);
+        VNVME_FREE_POOL(entries);
+        return STATUS_NOT_IMPLEMENTED;
     }
     
     *PrpEntries = entries;

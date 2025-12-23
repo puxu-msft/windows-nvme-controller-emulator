@@ -197,6 +197,15 @@ VnvmeCreateControllerPdo(
 
 /**
  * @brief 删除 PDO 设备对象 (低层实现)
+ * 
+ * 注意：当前实现使用手动链表管理 PDO，因此使用 WdfObjectDelete。
+ * 如果改用 WdfChildList 动态子设备列表，则应使用 WdfPdoMarkMissing。
+ * 
+ * WdfObjectDelete 会触发以下回调序列：
+ * 1. EvtDeviceD0Exit (如果设备在 D0)
+ * 2. EvtDeviceReleaseHardware
+ * 3. EvtCleanupCallback
+ * 4. EvtDestroyCallback
  */
 NTSTATUS
 VnvmeDeleteControllerPdo(
@@ -206,7 +215,8 @@ VnvmeDeleteControllerPdo(
     TRACE_INFO("VnvmeDeleteControllerPdo: Deleting PDO, ControllerId=%lu", PdoContext->ControllerId);
     
     // 删除 PDO 设备对象
-    // 注意：WdfObjectDelete 会触发 EvtDeviceReleaseHardware 回调
+    // 使用手动链表管理时，WdfObjectDelete 是正确的删除方式
+    // WdfObjectDelete 会同步等待设备完成移除序列
     WdfObjectDelete(PdoContext->Device);
     
     return STATUS_SUCCESS;
@@ -233,24 +243,50 @@ VnvmeCreateVirtualController(
     WDFDEVICE childDevice = NULL;
     PVNVME_PDO_CONTEXT pdoContext;
     KIRQL oldIrql;
+    PLIST_ENTRY entry;
+    BOOLEAN exists = FALSE;
     
     TRACE_INFO("VnvmeCreateVirtualController: Creating controller ID=%lu", ControllerId);
     
+    // 先获取锁，在锁保护下检查重复和计数
+    KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
+    
     // 1. 验证：检查是否已存在相同 ID 的控制器
-    if (VnvmeFindController(FdoContext, ControllerId) != NULL) {
+    for (entry = FdoContext->ChildDeviceList.Flink;
+         entry != &FdoContext->ChildDeviceList;
+         entry = entry->Flink) {
+        PVNVME_PDO_CONTEXT ctx = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+        if (ctx->ControllerId == ControllerId) {
+            exists = TRUE;
+            break;
+        }
+    }
+    
+    if (exists) {
+        KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
         TRACE_WARN("Controller ID=%lu already exists", ControllerId);
         return STATUS_OBJECT_NAME_COLLISION;
     }
     
     // 2. 验证：检查是否达到最大控制器数
     if (FdoContext->ChildDeviceCount >= FdoContext->MaxControllers) {
+        KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
         TRACE_WARN("Maximum controller count reached (%lu)", FdoContext->MaxControllers);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    // 3. 调用低层函数创建 PDO
+    // 预增加计数，防止竞争
+    FdoContext->ChildDeviceCount++;
+    KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+    
+    // 3. 调用低层函数创建 PDO (在锁外，因为可能阻塞)
     status = VnvmeCreateControllerPdo(FdoContext->Device, ControllerId, &childDevice);
     if (!NT_SUCCESS(status)) {
+        // 创建失败，恢复计数
+        KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
+        FdoContext->ChildDeviceCount--;
+        KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+        
         TRACE_ERROR("VnvmeCreateControllerPdo failed: 0x%08X", status);
         return status;
     }
@@ -260,7 +296,7 @@ VnvmeCreateVirtualController(
     
     KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
     InsertTailList(&FdoContext->ChildDeviceList, &pdoContext->ListEntry);
-    FdoContext->ChildDeviceCount++;
+    // 计数已经增加，无需再增加
     KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
     
     TRACE_INFO("VnvmeCreateVirtualController: Controller ID=%lu created successfully", ControllerId);
@@ -274,6 +310,8 @@ VnvmeCreateVirtualController(
 
 /**
  * @brief 删除虚拟 NVMe 控制器 (高层 API)
+ * 
+ * 注意：此函数在锁保护下查找并移除控制器，确保线程安全。
  */
 NTSTATUS
 VnvmeDeleteVirtualController(
@@ -281,25 +319,35 @@ VnvmeDeleteVirtualController(
     _In_ ULONG ControllerId
     )
 {
-    PVNVME_PDO_CONTEXT pdoContext;
+    PVNVME_PDO_CONTEXT pdoContext = NULL;
     KIRQL oldIrql;
+    PLIST_ENTRY entry;
     
     TRACE_INFO("VnvmeDeleteVirtualController: Deleting controller ID=%lu", ControllerId);
     
-    // 1. 查找控制器
-    pdoContext = VnvmeFindController(FdoContext, ControllerId);
+    // 在锁保护下查找并移除
+    KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
+    
+    for (entry = FdoContext->ChildDeviceList.Flink;
+         entry != &FdoContext->ChildDeviceList;
+         entry = entry->Flink) {
+        PVNVME_PDO_CONTEXT ctx = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+        if (ctx->ControllerId == ControllerId) {
+            pdoContext = ctx;
+            RemoveEntryList(&pdoContext->ListEntry);
+            FdoContext->ChildDeviceCount--;
+            break;
+        }
+    }
+    
+    KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+    
     if (pdoContext == NULL) {
         TRACE_WARN("Controller ID=%lu not found", ControllerId);
         return STATUS_NOT_FOUND;
     }
     
-    // 2. 从链表中移除
-    KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
-    RemoveEntryList(&pdoContext->ListEntry);
-    FdoContext->ChildDeviceCount--;
-    KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
-    
-    // 3. 调用低层函数删除 PDO
+    // 在锁外删除 PDO (可能涉及 WDF 调用)
     VnvmeDeleteControllerPdo(pdoContext);
     
     TRACE_INFO("VnvmeDeleteVirtualController: Controller ID=%lu deleted", ControllerId);

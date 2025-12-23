@@ -15,6 +15,7 @@
 #include "vnvme_common.h"
 #include "vnvme_ioctl.h"
 #include "nvme_spec.h"
+#include "debug.h"
 #include "trace.h"
 
 //===========================================================================
@@ -38,6 +39,27 @@
     (0x1000 + ((2 * (qid)) * (4 << (dstrd))))
 
 //===========================================================================
+// 命令处理模式配置
+//===========================================================================
+
+/**
+ * 命令处理模式:
+ * - VNVME_CMD_MODE_KERNEL: 在内核中处理命令 (低延迟，但功能受限)
+ * - VNVME_CMD_MODE_USER:   转发到用户态处理 (灵活，推荐)
+ * 
+ * 默认使用用户态模式，可通过注册表或编译时宏切换
+ */
+typedef enum _VNVME_COMMAND_MODE {
+    VNVME_CMD_MODE_USER   = 0,          // 用户态处理 (默认)
+    VNVME_CMD_MODE_KERNEL = 1           // 内核处理 (备选)
+} VNVME_COMMAND_MODE;
+
+// 编译时默认模式 (0=用户态, 1=内核)
+#ifndef VNVME_DEFAULT_CMD_MODE
+#define VNVME_DEFAULT_CMD_MODE      VNVME_CMD_MODE_USER
+#endif
+
+//===========================================================================
 // FDO 上下文 (虚拟总线)
 //===========================================================================
 
@@ -50,6 +72,9 @@ typedef struct _VNVME_FDO_CONTEXT {
     WDFDEVICE Device;
     WDFDEVICE ControlDevice;
     // WDFQUEUE ControlQueue;           // TODO: 优雅关闭时需要保存队列句柄
+    
+    // 命令处理模式
+    VNVME_COMMAND_MODE CommandMode;     // 用户态或内核处理
     
     // 共享内存
     PVOID ShmKernelVirtAddr;            // 内核虚拟地址
@@ -68,9 +93,9 @@ typedef struct _VNVME_FDO_CONTEXT {
     // 用户态通信
     KEVENT CommandReadyEvent;           // 通知用户态有新命令就绪
     KEVENT UserReadyEvent;              // 用户态服务就绪事件
-    // KEVENT ShutdownEvent;            // TODO: 通知用户态关闭
+    KEVENT ShutdownEvent;               // 通知用户态关闭
     volatile BOOLEAN UserReady;         // 用户态服务是否就绪
-    // volatile BOOLEAN ShutdownRequested; // TODO: 关闭请求标志
+    volatile BOOLEAN ShutdownRequested; // 关闭请求标志
     ULONG UserPid;
     LARGE_INTEGER LastHeartbeat;
     // HANDLE UserEventHandle;          // TODO: 用户可等待事件句柄 (性能优化)
@@ -82,6 +107,19 @@ typedef struct _VNVME_FDO_CONTEXT {
 } VNVME_FDO_CONTEXT, *PVNVME_FDO_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
+
+//===========================================================================
+// 存储后端类型前向声明
+//===========================================================================
+
+typedef enum _VNVME_STORAGE_TYPE {
+    VNVME_STORAGE_TYPE_NONE = 0,
+    VNVME_STORAGE_TYPE_MEMORY,          // 内存后端 (非分页池)
+    VNVME_STORAGE_TYPE_FILE,            // 文件后端
+    VNVME_STORAGE_TYPE_SPARSE           // 稀疏内存后端 (TODO Phase 5)
+} VNVME_STORAGE_TYPE;
+
+typedef struct _VNVME_STORAGE_CONTEXT VNVME_STORAGE_CONTEXT, *PVNVME_STORAGE_CONTEXT;
 
 //===========================================================================
 // PDO 上下文 (虚拟 NVMe 控制器)
@@ -113,8 +151,8 @@ typedef struct _VNVME_NAMESPACE {
     ULONGLONG TotalBlocks;              // 总逻辑块数
     ULONGLONG TotalBytes;               // 总字节数
     
-    // TODO Phase 2: 后端偏移
-    // ULONGLONG BackendOffset;         // 在后端存储中的偏移
+    // 存储后端
+    PVNVME_STORAGE_CONTEXT Storage;     // 存储后端上下文 (可为 NULL)
     
     // TODO Phase 2: LBA 格式
     // UCHAR FormattedLbaSize;          // FLBAS: Formatted LBA Size index
@@ -422,6 +460,146 @@ VnvmeWriteToHostMemory(
     _In_ ULONGLONG PhysicalAddress,
     _In_reads_bytes_(Length) PVOID Buffer,
     _In_ ULONG Length
+    );
+
+//===========================================================================
+// 函数声明 - admin_cmd.c
+//===========================================================================
+
+/**
+ * @brief 处理单个 Admin 命令 (内核模式)
+ */
+NTSTATUS
+VnvmeProcessAdminCommand(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ PNVME_COMMAND Command
+    );
+
+/**
+ * @brief 处理 Admin 队列中所有待处理命令 (内核模式)
+ */
+VOID
+VnvmeProcessAdminCommands(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ ULONG NewTail
+    );
+
+//===========================================================================
+// 函数声明 - io_cmd.c
+//===========================================================================
+
+/**
+ * @brief 处理单个 I/O 命令 (内核模式)
+ */
+NTSTATUS
+VnvmeProcessIoCommand(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _In_ PNVME_COMMAND Command
+    );
+
+/**
+ * @brief 处理 I/O 队列中所有待处理命令 (内核模式)
+ */
+VOID
+VnvmeProcessIoCommands(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _In_ ULONG NewTail
+    );
+
+//===========================================================================
+// 函数声明 - user_forward.c (用户态转发)
+//===========================================================================
+
+/**
+ * @brief 转发 Admin 命令到共享内存供用户态处理
+ */
+VOID
+VnvmeForwardAdminCommandsToUser(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ ULONG NewTail
+    );
+
+/**
+ * @brief 转发 I/O 命令到共享内存供用户态处理
+ */
+VOID
+VnvmeForwardIoCommandsToUser(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _In_ ULONG NewTail
+    );
+
+/**
+ * @brief 处理用户态提交的完成结果
+ */
+NTSTATUS
+VnvmeProcessUserCompletions(
+    _In_ PVNVME_PDO_CONTEXT PdoContext
+    );
+
+//===========================================================================
+// 函数声明 - storage.c
+//===========================================================================
+
+NTSTATUS
+VnvmeStorageCreate(
+    _Out_ PVNVME_STORAGE_CONTEXT* StorageContext,
+    _In_ VNVME_STORAGE_TYPE Type,
+    _In_ ULONGLONG TotalBytes,
+    _In_ ULONG BlockSize,
+    _In_opt_ PUNICODE_STRING FilePath
+    );
+
+VOID
+VnvmeStorageDestroy(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext
+    );
+
+NTSTATUS
+VnvmeStorageRead(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _In_ ULONGLONG Offset,
+    _Out_writes_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length
+    );
+
+NTSTATUS
+VnvmeStorageWrite(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _In_ ULONGLONG Offset,
+    _In_reads_bytes_(Length) PVOID Buffer,
+    _In_ ULONG Length
+    );
+
+NTSTATUS
+VnvmeStorageWriteZeroes(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _In_ ULONGLONG Offset,
+    _In_ ULONG Length
+    );
+
+NTSTATUS
+VnvmeStorageFlush(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext
+    );
+
+NTSTATUS
+VnvmeStorageGetDirect(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _In_ ULONGLONG Offset,
+    _In_ ULONG Length,
+    _Out_ PVOID* DirectPtr
+    );
+
+VOID
+VnvmeStorageGetStats(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _Out_ PULONG64 ReadCount,
+    _Out_ PULONG64 WriteCount,
+    _Out_ PULONG64 BytesRead,
+    _Out_ PULONG64 BytesWritten
     );
 
 //===========================================================================

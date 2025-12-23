@@ -2,6 +2,78 @@
 
 本文档详细描述 vnvme-server.exe 的实现细节，包括架构设计、模块划分、核心算法和配置。
 
+## 实现状态
+
+> **✅ 已实现**: 用户态服务核心功能 (v1 - 紧凑版)
+> 
+> 当前实现 (3 文件, ~2000 行):
+> - `main.c` - 程序入口、IOCTL 通信、主循环、心跳、配置
+> - `command_processor.c` - NVMe 命令处理器 (Admin + I/O)
+> - `backend.c` - 存储后端 (内存 + 文件)
+>
+> **🔄 模块化重构中** (v2): 基础设施模块已完成，待集成启用。
+
+## 项目结构
+
+### 当前实现 (v1 - 紧凑版, 正在使用)
+
+```
+vnvme-server/
+├── main.c                  # 入口、配置、驱动通信、主循环 (621行)
+├── command_processor.c     # NVMe 命令处理 Admin + I/O (943行)
+├── backend.c               # 存储后端 内存 + 文件 (403行)
+└── vnvme.conf.example      # 示例配置文件
+```
+
+### 模块化版本 (v2 - 已创建, 待启用)
+
+```
+vnvme-server/
+├── types.h                 # ✅ 基础类型定义 (避免循环依赖)
+├── vnvme_server.h          # ✅ 公共头文件、共享类型
+├── logger.h                # ✅ 日志接口
+├── logger.c                # ✅ 日志系统实现 (~300行)
+├── config.h                # ✅ 配置结构定义
+├── config.c                # ✅ 配置解析 (~430行)
+├── driver_comm.h           # ✅ 驱动通信接口
+├── driver_comm.c           # ✅ 驱动通信实现 (~370行)
+├── backend.h               # ✅ 后端接口定义
+├── backend_common.c        # ✅ 后端分发器 (~200行)
+├── backend_memory.c        # ✅ 内存后端 (~210行)
+├── backend_file.c          # ✅ 文件后端 (~320行)
+├── main_v2.c               # ✅ 模块化入口 (待测试)
+│
+├── main.c                  # v1 入口 (当前使用)
+├── command_processor.c     # v1 命令处理 (两版本共用)
+└── backend.c               # v1 后端 (当前使用)
+```
+
+### 待完成模块
+
+```
+vnvme-server/
+├── admin_commands.c        # TODO: 从 command_processor.c 分离
+├── io_commands.c           # TODO: 从 command_processor.c 分离
+└── command_processor.h     # TODO: 命令处理接口
+```
+
+### 模块职责
+
+| 模块 | 职责 | 依赖 |
+|------|------|------|
+| main.c | 程序入口、生命周期管理 | 所有模块 |
+| config.c | 配置文件解析、命令行解析 | logger |
+| driver_comm.c | 驱动连接、共享内存、心跳 | logger |
+| command_processor.c | 命令分发、NotifyRing 处理 | admin/io_commands, logger |
+| admin_commands.c | Admin 命令实现 | backend, logger |
+| io_commands.c | I/O 命令实现 | backend, logger |
+| backend.c | 后端抽象、后端选择 | backend_memory/file, logger |
+| backend_memory.c | 内存后端实现 | logger |
+| backend_file.c | 文件后端实现 | logger |
+| logger.c | 日志输出、级别控制 | 无 |
+
+---
+
 ## 概述
 
 ```
@@ -10,13 +82,13 @@
 │                                                                         │
 │  ┌───────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │  Main     │  │ Command      │  │   Admin      │  │    I/O       │  │
-│  │  Module   │─▶│ Engine       │─▶│  Commands    │  │   Commands   │  │
+│  │  Module   │─▶│ Processor    │─▶│  Commands    │  │   Commands   │  │
 │  └───────────┘  └──────────────┘  └──────────────┘  └──────────────┘  │
 │        │               │                  │                 │          │
 │        ▼               ▼                  ▼                 ▼          │
 │  ┌───────────┐  ┌──────────────┐  ┌─────────────────────────────────┐ │
 │  │  Config   │  │ Shared Memory│  │          Backend Layer          │ │
-│  │  Loader   │  │    Access    │  │  ┌────────┐  ┌────────────────┐ │ │
+│  │  Parser   │  │   + Notify   │  │  ┌────────┐  ┌────────────────┐ │ │
 │  └───────────┘  └──────────────┘  │  │ Memory │  │     File       │ │ │
 │                                    │  └────────┘  └────────────────┘ │ │
 │                                    └─────────────────────────────────┘ │
@@ -29,21 +101,29 @@
 
 ```
 vnvme-server/
-├── main.c                  # 入口、初始化、主循环
-├── config.c/.h             # 配置文件解析
-├── kernel_comm.c/.h        # 内核通信 (IOCTL、共享内存)
-├── command_engine.c/.h     # 命令分发引擎
-├── admin_commands.c/.h     # Admin 命令处理
-├── io_commands.c/.h        # I/O 命令处理
-├── prp_parser.c/.h         # PRP 解析
-├── backend.c/.h            # 后端抽象接口
-├── backend_memory.c/.h     # 内存后端
-├── backend_file.c/.h       # 文件后端
-├── namespace.c/.h          # 命名空间管理
-├── logger.c/.h             # 日志系统
-├── heartbeat.c/.h          # 心跳和健康监控
-└── utils.c/.h              # 通用工具函数
+├── main.c                  # ✅ 入口、初始化、主循环、心跳、配置加载 (621行)
+├── command_processor.c     # ✅ NVMe 命令处理 Admin + I/O (943行)
+├── backend.c               # ✅ 后端抽象接口 内存 + 文件 (403行)
+├── vnvme.conf.example      # ✅ 示例配置文件
+└── build/                  # 构建输出目录
 ```
+
+### 已实现功能概览
+
+| 模块 | 功能 | 状态 |
+|------|------|------|
+| main.c | 命令行参数解析 | ✅ |
+| main.c | 配置文件加载 (--config) | ✅ |
+| main.c | 大小后缀解析 (K/M/G) | ✅ |
+| main.c | 驱动连接 | ✅ |
+| main.c | 共享内存映射 | ✅ |
+| main.c | 心跳发送 | ✅ |
+| main.c | 优雅关闭检测 | ✅ |
+| command_processor.c | Admin 命令处理 | ✅ |
+| command_processor.c | I/O 命令处理 | ✅ |
+| command_processor.c | NotifyRing 轮询 | ✅ |
+| backend.c | 内存后端 | ✅ |
+| backend.c | 文件后端 | ✅ |
 
 ---
 

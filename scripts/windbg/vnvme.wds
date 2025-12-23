@@ -1,0 +1,78 @@
+$$ VNVME WinDbg 调试脚本
+$$ 使用方法: .load vnvme.wds 或 $<vnvme.wds
+
+$$ ============================================================
+$$ 符号设置
+$$ ============================================================
+
+.echo [VNVME] Loading symbols...
+.symfix
+.reload /f vnvme.sys
+
+$$ ============================================================
+$$ 调试输出设置
+$$ ============================================================
+
+$$ 启用所有 IHV 驱动调试输出
+ed nt!Kd_IHVDRIVER_Mask 0xFFFFFFFF
+.echo [VNVME] Enabled IHV driver debug output
+
+$$ ============================================================
+$$ 常用断点
+$$ ============================================================
+
+$$ 取消注释需要的断点
+
+$$ 驱动入口
+$$ bp vnvme!DriverEntry ".echo [VNVME] DriverEntry hit; g"
+
+$$ 设备添加
+$$ bp vnvme!VnvmeEvtDeviceAdd ".echo [VNVME] DeviceAdd hit; g"
+
+$$ IOCTL 处理
+$$ bp vnvme!VnvmeEvtIoDeviceControl
+
+$$ PDO 创建
+$$ bp vnvme!VnvmeCreateControllerPdo
+
+$$ Admin 命令处理
+$$ bp vnvme!VnvmeProcessAdminSQCommand
+
+$$ I/O 命令处理
+$$ bp vnvme!VnvmeProcessIoSQCommand
+
+$$ ============================================================
+$$ 有用的别名
+$$ ============================================================
+
+$$ 显示 FDO 上下文
+as /x fdoctx dx @$cursession.Modules["vnvme"].Variables["g_FdoContext"]
+
+$$ 显示调试级别
+as /x dbglvl dx @$cursession.Modules["vnvme"].Variables["g_VnvmeDebugLevel"]
+
+$$ 显示调试统计
+as /x stats dx @$cursession.Modules["vnvme"].Variables["g_VnvmeDebugStats"]
+
+.echo [VNVME] Aliases defined: fdoctx, dbglvl, stats
+
+$$ ============================================================
+$$ 自定义命令
+$$ ============================================================
+
+$$ 定义命令: !vnvme_stats - 打印性能统计
+ad /q vnvme_stats
+as /c vnvme_stats .echo ===== VNVME Statistics =====; dx @$cursession.Modules["vnvme"].Variables["g_VnvmeDebugStats"]
+
+$$ 定义命令: !vnvme_level - 显示调试级别
+ad /q vnvme_level  
+as /c vnvme_level dx @$cursession.Modules["vnvme"].Variables["g_VnvmeDebugLevel"]
+
+.echo [VNVME] Custom commands: vnvme_stats, vnvme_level
+
+$$ ============================================================
+$$ 完成
+$$ ============================================================
+
+.echo [VNVME] Debug script loaded successfully
+.echo [VNVME] Use 'lm m vnvme' to verify driver is loaded

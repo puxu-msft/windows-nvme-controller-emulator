@@ -39,7 +39,11 @@ DriverEntry(
     WDF_DRIVER_CONFIG config;
     WDF_OBJECT_ATTRIBUTES attributes;
     
-    TRACE_INFO("DriverEntry: VNVME driver loading, version 0x%08X", VNVME_VERSION);
+    // 初始化调试子系统 (最先执行)
+    VnvmeDebugInit(RegistryPath);
+    
+    VNVME_DBG_INFO("DriverEntry: VNVME driver loading, version 0x%08X", VNVME_VERSION);
+    VNVME_FUNC_ENTER();
     
     // 启用 NX 池 - 安全性要求
     ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
@@ -64,12 +68,14 @@ DriverEntry(
         );
     
     if (!NT_SUCCESS(status)) {
-        TRACE_ERROR("DriverEntry: WdfDriverCreate failed, status=0x%08X", status);
+        VNVME_DBG_ERROR("DriverEntry: WdfDriverCreate failed, status=0x%08X", status);
         WPP_CLEANUP(DriverObject);
+        VNVME_FUNC_EXIT_NTSTATUS(status);
         return status;
     }
     
-    TRACE_INFO("DriverEntry: Driver created successfully");
+    VNVME_DBG_INFO("DriverEntry: Driver created successfully");
+    VNVME_FUNC_EXIT_NTSTATUS(STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
 
@@ -132,6 +138,9 @@ VnvmeEvtDeviceAdd(
     fdoContext->NextControllerId = 1;
     fdoContext->MaxControllers = VNVME_MAX_CONTROLLERS;
     
+    // 命令处理模式 (默认用户态)
+    fdoContext->CommandMode = VNVME_DEFAULT_CMD_MODE;
+    
     // 初始化子设备链表
     InitializeListHead(&fdoContext->ChildDeviceList);
     KeInitializeSpinLock(&fdoContext->ChildDeviceListLock);
@@ -139,6 +148,10 @@ VnvmeEvtDeviceAdd(
     // 初始化事件
     KeInitializeEvent(&fdoContext->CommandReadyEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&fdoContext->UserReadyEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&fdoContext->ShutdownEvent, NotificationEvent, FALSE);
+    
+    // 初始化关闭标志
+    fdoContext->ShutdownRequested = FALSE;
     
     // 保存全局指针
     g_FdoContext = fdoContext;
@@ -225,7 +238,7 @@ VnvmeEvtDeviceD0Entry(
 }
 
 /**
- * @brief 退出 D0 电源状态
+ * @brief 退出 D0 电源状态 - 触发优雅关闭
  */
 NTSTATUS
 VnvmeEvtDeviceD0Exit(
@@ -233,9 +246,40 @@ VnvmeEvtDeviceD0Exit(
     _In_ WDF_POWER_DEVICE_STATE TargetState
     )
 {
-    UNREFERENCED_PARAMETER(Device);
+    PVNVME_FDO_CONTEXT fdoContext = VnvmeGetFdoContext(Device);
+    LARGE_INTEGER timeout;
     
     TRACE_INFO("VnvmeEvtDeviceD0Exit: Exiting D0 to %d", TargetState);
+    
+    // 设置关闭标志
+    fdoContext->ShutdownRequested = TRUE;
+    
+    // 触发关闭事件通知用户态
+    KeSetEvent(&fdoContext->ShutdownEvent, IO_NO_INCREMENT, FALSE);
+    
+    // 更新共享内存中的关闭标志
+    if (fdoContext->ShmKernelVirtAddr != NULL) {
+        PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = 
+            (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)fdoContext->ShmKernelVirtAddr;
+        shm->ShutdownRequested = TRUE;
+    }
+    
+    // 等待用户态完成 (最多 5 秒)
+    if (fdoContext->UserReady) {
+        TRACE_INFO("VnvmeEvtDeviceD0Exit: Waiting for user-mode to shutdown");
+        
+        timeout.QuadPart = -50000000LL;  // 5 秒 (负数表示相对时间，100ns 单位)
+        KeWaitForSingleObject(
+            &fdoContext->UserReadyEvent,
+            Executive,
+            KernelMode,
+            FALSE,
+            &timeout
+            );
+        
+        TRACE_INFO("VnvmeEvtDeviceD0Exit: User-mode shutdown complete or timed out");
+    }
+    
     return STATUS_SUCCESS;
 }
 

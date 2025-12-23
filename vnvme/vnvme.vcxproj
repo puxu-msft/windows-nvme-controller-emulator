@@ -120,12 +120,20 @@
     <ClCompile Include="doorbell.c" />
     <ClCompile Include="queue.c" />
     <ClCompile Include="prp.c" />
+    <ClCompile Include="admin_cmd.c" />
+    <ClCompile Include="io_cmd.c" />
+    <ClCompile Include="storage.c" />
+    <ClCompile Include="user_forward.c" />
     <ClCompile Include="utils.c" />
+    <ClCompile Include="debug.c">
+      <WppEnabled>false</WppEnabled>
+    </ClCompile>
   </ItemGroup>
   
   <ItemGroup>
     <ClInclude Include="vnvme.h" />
     <ClInclude Include="trace.h" />
+    <ClInclude Include="debug.h" />
   </ItemGroup>
   
   <ItemGroup>

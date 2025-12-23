@@ -114,6 +114,10 @@ VnvmeEvtPollingTimer(
  * @brief 处理 Doorbell 变化
  * 
  * 检测 stornvme 对 Doorbell 寄存器的写入，处理新提交的命令。
+ * 
+ * 根据 CommandMode 选择处理方式:
+ * - VNVME_CMD_MODE_KERNEL: 直接在内核中调用 admin_cmd.c/io_cmd.c
+ * - VNVME_CMD_MODE_USER:   转发命令到共享内存，由用户态处理
  */
 VOID
 VnvmeProcessDoorbells(
@@ -124,9 +128,15 @@ VnvmeProcessDoorbells(
     ULONG sqTail;
     ULONG cqHead;
     BOOLEAN hadWork = FALSE;
+    VNVME_COMMAND_MODE cmdMode = VNVME_DEFAULT_CMD_MODE;
     
     if (PdoContext->Doorbells == NULL || PdoContext->Registers == NULL) {
         return;
+    }
+    
+    // 获取命令处理模式
+    if (g_FdoContext != NULL) {
+        cmdMode = g_FdoContext->CommandMode;
     }
     
     // 1. 检查 CC 寄存器变化 (控制器启用/禁用)
@@ -170,8 +180,14 @@ VnvmeProcessDoorbells(
         TRACE_INFO("VnvmeProcessDoorbells: Admin SQ tail %lu -> %lu",
                    PdoContext->LastAdminSqTail, sqTail);
         
-        // TODO Phase 4: 通知用户态处理 Admin 命令
-        // VnvmeProcessAdminCommands(PdoContext, sqTail);
+        // 根据模式选择处理方式
+        if (cmdMode == VNVME_CMD_MODE_KERNEL) {
+            // 内核模式: 直接处理命令
+            VnvmeProcessAdminCommands(PdoContext, sqTail);
+        } else {
+            // 用户态模式: 转发到共享内存
+            VnvmeForwardAdminCommandsToUser(PdoContext, sqTail);
+        }
         
         PdoContext->LastAdminSqTail = sqTail;
         hadWork = TRUE;
@@ -186,12 +202,41 @@ VnvmeProcessDoorbells(
         PdoContext->LastAdminCqHead = cqHead;
     }
     
-    // TODO Phase 5: 处理 I/O 队列的 Doorbell
-    // for (i = 0; i < IoQueueCount; i++) {
-    //     sqTail = Doorbells[2 + i * 2];      // I/O SQ Tail
-    //     cqHead = Doorbells[2 + i * 2 + 1];  // I/O CQ Head
-    //     ...
-    // }
+    // 4. 处理 I/O 队列的 Doorbell
+    for (USHORT qid = 1; qid <= PdoContext->IoQueueCount; qid++) {
+        ULONG ioSqTailIdx = qid * 2;      // I/O SQ Tail Doorbell index
+        ULONG ioCqHeadIdx = qid * 2 + 1;  // I/O CQ Head Doorbell index
+        
+        if (!PdoContext->IoSq[qid - 1].Created) {
+            continue;
+        }
+        
+        sqTail = PdoContext->Doorbells[ioSqTailIdx] & 0xFFFF;
+        
+        if (sqTail != PdoContext->IoSq[qid - 1].Tail) {
+            TRACE_VERBOSE("VnvmeProcessDoorbells: I/O SQ[%u] tail %lu -> %lu",
+                          qid, PdoContext->IoSq[qid - 1].Tail, sqTail);
+            
+            // 根据模式选择处理方式
+            if (cmdMode == VNVME_CMD_MODE_KERNEL) {
+                // 内核模式: 直接处理命令
+                VnvmeProcessIoCommands(PdoContext, qid, sqTail);
+            } else {
+                // 用户态模式: 转发到共享内存
+                VnvmeForwardIoCommandsToUser(PdoContext, qid, sqTail);
+            }
+            
+            PdoContext->IoSq[qid - 1].Tail = sqTail;
+            hadWork = TRUE;
+        }
+        
+        cqHead = PdoContext->Doorbells[ioCqHeadIdx] & 0xFFFF;
+        if (cqHead != PdoContext->IoCq[qid - 1].Head) {
+            TRACE_VERBOSE("VnvmeProcessDoorbells: I/O CQ[%u] head %lu -> %lu",
+                          qid, PdoContext->IoCq[qid - 1].Head, cqHead);
+            PdoContext->IoCq[qid - 1].Head = cqHead;
+        }
+    }
     
     UNREFERENCED_PARAMETER(hadWork);
     // TODO Phase 4: 自适应轮询间隔

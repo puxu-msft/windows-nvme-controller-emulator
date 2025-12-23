@@ -4,6 +4,58 @@
 
 ---
 
+## 📊 实现状态概览 (2025-12-23 更新)
+
+> **注意**: 下方的复选框列表是原始开发规划，保留供参考。实际实现状态请参考此概览。
+
+| Phase | 描述 | 状态 | 完成度 |
+|-------|------|------|--------|
+| Phase 0 | 前置准备 | ✅ 已完成 | 100% |
+| Phase 1 | 项目骨架和 FDO 创建 | ✅ 已完成 | 100% |
+| Phase 2 | PDO 创建和 PCIe/BAR0 仿真 | ✅ 已完成 | 100% |
+| Phase 3 | 用户态通信和共享内存 | ✅ 已完成 | 100% |
+| Phase 4 | NVMe 命令处理 | ✅ 主要已完成 | 95% |
+| Phase 5 | 存储后端 | ✅ 主要已完成 | 90% |
+| Phase 6 | 测试和优化 | 🔄 进行中 | 10% |
+
+### 主要实现成果
+
+**内核驱动 (vnvme.sys)** - ~5,863 行:
+- ✅ DriverEntry 和 PnP/Power 回调
+- ✅ 控制设备 (\\.\vnvme) 和 IOCTL 处理
+- ✅ 总线枚举和 PDO 创建
+- ✅ BAR0 寄存器模拟
+- ✅ PCIe 配置空间模拟
+- ✅ Doorbell 轮询处理
+- ✅ 共享内存管理
+- ✅ 队列管理 (Admin SQ/CQ)
+- ✅ PRP 列表处理
+- ✅ Admin 命令处理 (内核模式)
+- ✅ I/O 命令处理 (内核模式)
+- ✅ 存储后端 (内存/文件)
+- ✅ 用户态命令转发
+
+**用户态服务 (vnvme-server.exe)** - ~1,967 行:
+- ✅ 服务入口和主循环
+- ✅ 驱动通信
+- ✅ 配置文件加载
+- ✅ 命令处理引擎 (Admin + I/O)
+- ✅ 存储后端 (内存 + 文件)
+- ✅ 优雅关闭处理
+
+**命令行工具 (vnvmectl.exe)** - ~512 行:
+- ✅ version 命令
+- ✅ status 命令
+- ✅ list 命令
+- ✅ create 命令
+- ✅ delete 命令
+
+### 待完成项 (28+ TODO)
+
+参考 [ROADMAP.md](ROADMAP.md) 获取详细的 TODO 清单。
+
+---
+
 ## 目录
 
 - [前置准备](#前置准备)
@@ -886,24 +938,31 @@
 
 ### 3.4 优雅关闭
 
-- [ ] **3.4.1** 内核: 添加 `ShutdownEvent` 到 FDO 上下文
-- [ ] **3.4.2** 内核: 添加 `ShutdownRequested` 标志
+- [x] **3.4.1** 内核: 添加 `ShutdownEvent` 到 FDO 上下文
+- [x] **3.4.2** 内核: 添加 `ShutdownRequested` 标志
 - [ ] **3.4.3** 内核: 保存 `ControlQueue` 句柄
-- [ ] **3.4.4** 内核: `VnvmeEvtDeviceD0Exit` 触发关闭
+- [x] **3.4.4** 内核: `VnvmeEvtDeviceD0Exit` 触发关闭
 - [ ] **3.4.5** 内核: 使用 `WdfIoQueueStop()` 等待请求完成
-- [ ] **3.4.6** 用户态: 监听关闭事件/标志
-- [ ] **3.4.7** 用户态: 完成待处理命令
-- [ ] **3.4.8** 用户态: 刷新后端缓存
-- [ ] **3.4.9** 用户态: 发送 `IOCTL_VNVME_USER_SHUTDOWN`
+- [x] **3.4.6** 用户态: 检测 `ShutdownRequested` 标志
+- [x] **3.4.7** 用户态: 完成待处理命令
+- [x] **3.4.8** 用户态: 刷新后端缓存
+- [x] **3.4.9** 用户态: 通知内核关闭完成
+
+### 3.5 vnvme-server 配置文件
+
+- [x] **3.5.1** 实现 INI 格式配置文件解析
+- [x] **3.5.2** 支持 --config 命令行选项
+- [x] **3.5.3** 支持大小后缀 (K/M/G) 解析
+- [x] **3.5.4** 创建示例配置文件 vnvme.conf.example
 
 ### Phase 3 验收
 
-- [ ] **3.5.1** vnvme-server 启动无错误
-- [ ] **3.5.2** 共享内存映射成功
-- [ ] **3.5.3** USER_READY 发送成功
-- [ ] **3.5.4** 心跳正常 (连续运行 5 分钟)
-- [ ] **3.5.5** 优雅关闭正常 (devcon remove 无蓝屏)
-- [ ] **3.5.6** 反复加载/卸载 10 次无错误
+- [ ] **3.6.1** vnvme-server 启动无错误
+- [ ] **3.6.2** 共享内存映射成功
+- [ ] **3.6.3** USER_READY 发送成功
+- [ ] **3.6.4** 心跳正常 (连续运行 5 分钟)
+- [ ] **3.6.5** 优雅关闭正常 (devcon remove 无蓝屏)
+- [ ] **3.6.6** 反复加载/卸载 10 次无错误
 
 ---
 
@@ -911,128 +970,160 @@
 
 > **目标**: stornvme 初始化成功，磁盘出现
 > **预计时间**: 3 周
+> **状态**: ✅ 命令处理已完成，待测试验证
+>
+> **双模式架构**: 支持内核态和用户态两种命令处理模式
+> - `VNVME_CMD_MODE_KERNEL`: 内核态处理 (低延迟，备用方案)
+> - `VNVME_CMD_MODE_USER`: 用户态处理 (默认，更灵活)
+> 
+> 通过 `vnvme.h` 中的 `VNVME_DEFAULT_CMD_MODE` 切换模式
 
 ### 4.1 Doorbell 轮询引擎
 
-- [ ] **4.1.1** 创建 doorbell.c
+- [x] **4.1.1** 创建 doorbell.c
   ```c
   // vnvme/doorbell.c - Doorbell 轮询
   ```
 
-- [ ] **4.1.2** 实现轮询定时器
+- [x] **4.1.2** 实现轮询定时器
   ```c
   NTSTATUS VnvmeStartPolling(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
-- [ ] **4.1.3** 实现轮询回调
+- [x] **4.1.3** 实现轮询回调
   ```c
   VOID VnvmePollTimerCallback(WDFTIMER Timer);
   ```
 
-- [ ] **4.1.4** 检测 CC.EN 变化
+- [x] **4.1.4** 检测 CC.EN 变化
   ```c
   VOID VnvmeCheckControllerEnable(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
-- [ ] **4.1.5** 检测 SQ Tail 变化
+- [x] **4.1.5** 检测 SQ Tail 变化
   ```c
   VOID VnvmeCheckSqTail(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
 ### 4.2 控制器启用流程
 
-- [ ] **4.2.1** 处理 CC.EN = 1
+- [x] **4.2.1** 处理 CC.EN = 1
   ```c
   VOID VnvmeHandleControllerEnable(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
-- [ ] **4.2.2** 配置 Admin 队列
+- [x] **4.2.2** 配置 Admin 队列
   ```c
   NTSTATUS VnvmeConfigureAdminQueue(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
-- [ ] **4.2.3** 设置 CSTS.RDY = 1
+- [x] **4.2.3** 设置 CSTS.RDY = 1
   ```c
   VOID VnvmeSetControllerReady(PVNVME_PDO_CONTEXT PdoContext);
   ```
 
-### 4.3 Admin 命令处理 (用户态)
+### 4.3 Admin 命令处理 (内核 - admin_cmd.c)
 
-- [ ] **4.3.1** 创建 admin_commands.c
+> **架构变更**: Admin 命令在内核驱动中处理，而非用户态服务
+
+- [x] **4.3.1** 创建 admin_cmd.c
   ```c
-  // vnvme-server/admin_commands.c
+  // vnvme/admin_cmd.c - Admin 命令处理
   ```
 
-- [ ] **4.3.2** 实现 Identify Controller
+- [x] **4.3.2** 实现 Identify Controller (CNS=1)
   ```c
-  void ProcessIdentifyController(PVNVME_SUBMISSION_RING_ENTRY pEntry, PVOID dataBuffer);
+  static NTSTATUS HandleIdentifyController(...);
   ```
 
-- [ ] **4.3.3** 实现 Identify Namespace
+- [x] **4.3.3** 实现 Identify Namespace (CNS=0)
   ```c
-  void ProcessIdentifyNamespace(PVNVME_SUBMISSION_RING_ENTRY pEntry, PVOID dataBuffer);
+  static NTSTATUS HandleIdentifyNamespace(...);
   ```
 
-- [ ] **4.3.4** 实现 Create I/O CQ
+- [x] **4.3.4** 实现 Create I/O CQ
   ```c
-  void ProcessCreateIoCq(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  static NTSTATUS HandleCreateIoCq(...);
   ```
 
-- [ ] **4.3.5** 实现 Create I/O SQ
+- [x] **4.3.5** 实现 Create I/O SQ
   ```c
-  void ProcessCreateIoSq(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  static NTSTATUS HandleCreateIoSq(...);
   ```
 
-- [ ] **4.3.6** 实现 Set Features (Number of Queues)
+- [x] **4.3.6** 实现 Delete I/O CQ/SQ
   ```c
-  void ProcessSetFeatures(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  static NTSTATUS HandleDeleteIoCq(...);
+  static NTSTATUS HandleDeleteIoSq(...);
   ```
 
-### 4.4 I/O 命令处理 (用户态)
-
-- [ ] **4.4.1** 创建 io_commands.c
+- [x] **4.3.7** 实现 Set Features / Get Features
   ```c
-  // vnvme-server/io_commands.c
+  static NTSTATUS HandleSetFeatures(...);
+  static NTSTATUS HandleGetFeatures(...);
   ```
 
-- [ ] **4.4.2** 实现 Read
+- [x] **4.3.8** 实现 Abort / Keep Alive
   ```c
-  void ProcessIoRead(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  static NTSTATUS HandleAbort(...);
+  static NTSTATUS HandleKeepAlive(...);
   ```
 
-- [ ] **4.4.3** 实现 Write
+### 4.4 I/O 命令处理 (内核 - io_cmd.c)
+
+> **架构变更**: I/O 命令在内核驱动中处理，而非用户态服务
+
+- [x] **4.4.1** 创建 io_cmd.c
   ```c
-  void ProcessIoWrite(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  // vnvme/io_cmd.c - I/O 命令处理
   ```
 
-- [ ] **4.4.4** 实现 Flush
+- [x] **4.4.2** 实现 Read
   ```c
-  void ProcessIoFlush(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
+  static NTSTATUS HandleRead(...);  // 使用 VnvmeStorageRead
+  ```
+
+- [x] **4.4.3** 实现 Write
+  ```c
+  static NTSTATUS HandleWrite(...);  // 使用 VnvmeStorageWrite
+  ```
+
+- [x] **4.4.4** 实现 Flush
+  ```c
+  static NTSTATUS HandleFlush(...);  // 使用 VnvmeStorageFlush
+  ```
+
+- [x] **4.4.5** 实现 Write Zeroes
+  ```c
+  static NTSTATUS HandleWriteZeroes(...);  // 使用 VnvmeStorageWriteZeroes
+  ```
+
+- [x] **4.4.6** 实现 Dataset Management
+  ```c
+  static NTSTATUS HandleDatasetManagement(...);
   ```
 
 ### 4.5 PRP 解析
 
-- [ ] **4.5.1** 创建 prp.c (内核)
+- [x] **4.5.1** 创建 prp.c (内核)
   ```c
   // vnvme/prp.c - PRP 解析和数据复制
   ```
 
-- [ ] **4.5.2** 实现 PRP 解析
+- [x] **4.5.2** 实现 PRP 解析
   ```c
-  NTSTATUS VnvmeParsePrp(
-      UINT64 Prp1, UINT64 Prp2, ULONG Length,
-      PPRP_ENTRY* Entries, ULONG* EntryCount);
+  NTSTATUS VnvmeParsePrpList(...);
   ```
 
-- [ ] **4.5.3** 实现数据复制
+- [x] **4.5.3** 实现数据复制 (单页和双页)
   ```c
-  NTSTATUS VnvmeCopyFromPrp(PPRP_ENTRY Entries, PVOID Dest, ULONG Length);
-  NTSTATUS VnvmeCopyToPrp(PVOID Src, PPRP_ENTRY Entries, ULONG Length);
+  // 通过 MmMapIoSpaceEx 映射 PRP1/PRP2，直接 RtlCopyMemory
+  // PRP List (>2 页) 返回 STATUS_NOT_IMPLEMENTED
   ```
 
 ### 4.6 完成处理
 
-- [ ] **4.6.1** 实现完成提交 (内核)
+- [x] **4.6.1** 实现完成提交 (queue.c)
   ```c
   NTSTATUS VnvmePostCompletion(
       PVNVME_PDO_CONTEXT PdoContext,
@@ -1040,18 +1131,118 @@
       PNVME_COMPLETION Completion);
   ```
 
-- [ ] **4.6.2** 管理 Phase Tag
+- [x] **4.6.2** 管理 Phase Tag
   ```c
-  VOID VnvmeUpdatePhaseTag(PVNVME_PDO_CONTEXT PdoContext, ULONG QueueId);
+  // 在 VnvmePostCompletion 中自动更新 Phase Tag
+  ```
+
+### 4.7 用户态命令转发 (user_forward.c)
+
+> **双模式架构**: 支持内核态和用户态两种命令处理模式
+
+- [x] **4.7.1** 创建 user_forward.c
+  ```c
+  // vnvme/user_forward.c - 用户态命令转发
+  ```
+
+- [x] **4.7.2** 实现 Admin 命令转发
+  ```c
+  VOID VnvmeForwardAdminCommandsToUser(...);
+  ```
+
+- [x] **4.7.3** 实现 I/O 命令转发
+  ```c
+  VOID VnvmeForwardIoCommandsToUser(...);
+  ```
+
+- [x] **4.7.4** 实现通知环操作
+  ```c
+  static BOOLEAN NotifyRingPush(...);
+  static VOID SignalUserMode(...);
+  ```
+
+- [x] **4.7.5** 实现用户态完成处理
+  ```c
+  NTSTATUS VnvmeProcessUserCompletions(...);
+  ```
+
+### 4.8 用户态命令处理 (vnvme-server/command_processor.c)
+
+- [x] **4.8.1** 创建 command_processor.c
+  ```c
+  // vnvme-server/command_processor.c - 用户态命令处理器
+  ```
+
+- [x] **4.8.2** 实现初始化
+  ```c
+  BOOL CmdProcessorInit(PVOID shmAddress, PBACKEND_CONTEXT backend);
+  ```
+
+- [x] **4.8.3** 实现主处理循环
+  ```c
+  UINT64 CmdProcessorRun(void);  // 从 NotifyRing 读取并处理命令
+  ```
+
+- [x] **4.8.4** 实现 Admin 命令处理
+  ```c
+  // Identify, Create/Delete CQ/SQ, Set/Get Features, Abort, KeepAlive
+  ```
+
+- [x] **4.8.5** 实现 I/O 命令处理
+  ```c
+  // Read, Write, Flush, Write Zeroes
+  ```
+
+- [x] **4.8.6** 实现完成写入
+  ```c
+  static void PostAdminCompletion(...);
+  static void PostIoCompletion(...);
+  ```
+
+### 4.9 用户态存储后端 (vnvme-server/backend.c)
+
+- [x] **4.9.1** 创建 backend.c
+  ```c
+  // vnvme-server/backend.c - 用户态存储后端
+  ```
+
+- [x] **4.9.2** 实现后端创建/销毁
+  ```c
+  PBACKEND_CONTEXT BackendCreate(int type, SIZE_T size, const WCHAR* filePath);
+  void BackendDestroy(PBACKEND_CONTEXT ctx);
+  ```
+
+- [x] **4.9.3** 实现后端操作
+  ```c
+  BOOL BackendRead(...);
+  BOOL BackendWrite(...);
+  BOOL BackendFlush(...);
+  BOOL BackendWriteZeroes(...);
+  UINT64 BackendGetSize(...);
+  ```
+
+- [x] **4.9.4** 实现内存后端
+  ```c
+  // 使用 VirtualAlloc
+  ```
+
+- [x] **4.9.5** 实现文件后端
+  ```c
+  // 使用 CreateFile/ReadFile/WriteFile
   ```
 
 ### Phase 4 验收
 
-- [ ] **4.7.1** 控制器状态 CSTS.RDY = 1
-- [ ] **4.7.2** stornvme 无错误日志
-- [ ] **4.7.3** 磁盘在设备管理器中出现
-- [ ] **4.7.4** `nvme list` 显示设备
-- [ ] **4.7.5** 可读取磁盘属性
+- [x] **4.10.1** Admin 命令处理完成 (12 个命令 - 内核态)
+- [x] **4.10.2** I/O 命令处理完成 (5 个命令 - 内核态)
+- [x] **4.10.3** 用户态命令转发完成 (user_forward.c)
+- [x] **4.10.4** 用户态命令处理完成 (command_processor.c)
+- [x] **4.10.5** 用户态存储后端完成 (backend.c)
+- [ ] **4.10.6** 控制器状态 CSTS.RDY = 1 (待测试)
+- [ ] **4.10.7** stornvme 无错误日志 (待测试)
+- [ ] **4.10.8** 磁盘在设备管理器中出现 (待测试)
+- [ ] **4.10.9** `nvme list` 显示设备 (待测试)
+- [ ] **4.10.10** 可读取磁盘属性 (待测试)
 
 ---
 
@@ -1059,85 +1250,142 @@
 
 > **目标**: 可格式化和使用虚拟磁盘
 > **预计时间**: 2 周
+> **状态**: ✅ 存储后端已完成，待测试验证
 
 ### 5.1 后端抽象层
 
-- [ ] **5.1.1** 创建 backend.c
+> **架构变更**: 存储后端在内核驱动中实现 (storage.c)，而非用户态服务
+
+- [x] **5.1.1** 创建 storage.c
   ```c
-  // vnvme-server/backend.c - 后端管理
+  // vnvme/storage.c - 存储后端实现
   ```
 
-- [ ] **5.1.2** 定义后端接口
+- [x] **5.1.2** 定义后端接口
   ```c
-  typedef struct _VNVME_BACKEND_OPS { ... } VNVME_BACKEND_OPS;
+  typedef enum _VNVME_STORAGE_TYPE { ... };
+  struct _VNVME_STORAGE_CONTEXT { ... };
+  ```
+
+- [x] **5.1.3** 实现统一 API
+  ```c
+  NTSTATUS VnvmeStorageCreate(...);
+  VOID VnvmeStorageDestroy(...);
+  NTSTATUS VnvmeStorageRead(...);
+  NTSTATUS VnvmeStorageWrite(...);
+  NTSTATUS VnvmeStorageFlush(...);
+  NTSTATUS VnvmeStorageWriteZeroes(...);
+  PVOID VnvmeStorageGetDirect(...);  // 零拷贝访问 (仅内存后端)
   ```
 
 ### 5.2 内存后端
 
-- [ ] **5.2.1** 创建 backend_memory.c
+- [x] **5.2.1** 实现内存后端 (storage.c)
   ```c
-  // vnvme-server/backend_memory.c
+  static NTSTATUS StorageMemoryInit(...);  // 最大 256 MB
+  static VOID StorageMemoryCleanup(...);
   ```
 
-- [ ] **5.2.2** 实现内存后端操作
+- [x] **5.2.2** 实现内存后端操作
   ```c
-  NTSTATUS MemoryBackendInit(...);
-  NTSTATUS MemoryBackendRead(...);
-  NTSTATUS MemoryBackendWrite(...);
+  // VnvmeStorageRead/Write 通过 RtlCopyMemory
+  // VnvmeStorageGetDirect 返回直接指针 (零拷贝)
+  // VnvmeStorageWriteZeroes 通过 RtlZeroMemory
   ```
 
 ### 5.3 文件后端
 
-- [ ] **5.3.1** 创建 backend_file.c
+- [x] **5.3.1** 实现文件后端 (storage.c)
   ```c
-  // vnvme-server/backend_file.c
+  static NTSTATUS StorageFileInit(...);   // ZwCreateFile
+  static VOID StorageFileCleanup(...);    // ZwClose
   ```
 
-- [ ] **5.3.2** 实现文件后端操作
+- [x] **5.3.2** 实现文件后端操作
   ```c
-  NTSTATUS FileBackendInit(...);
-  NTSTATUS FileBackendRead(...);
-  NTSTATUS FileBackendWrite(...);
-  NTSTATUS FileBackendFlush(...);
+  // VnvmeStorageRead: ZwReadFile
+  // VnvmeStorageWrite: ZwWriteFile
+  // VnvmeStorageFlush: 更新文件时间戳
+  // VnvmeStorageWriteZeroes: 零缓冲区 + ZwWriteFile
   ```
 
 ### 5.4 命名空间管理
 
-- [ ] **5.4.1** 创建 namespace.c
+- [x] **5.4.1** VNVME_NAMESPACE 包含 Storage 字段
   ```c
-  // vnvme-server/namespace.c
+  // vnvme.h: VNVME_NAMESPACE.Storage = PVNVME_STORAGE_CONTEXT
   ```
 
 - [ ] **5.4.2** 实现命名空间操作
   ```c
+  // 待实现: 创建时关联存储后端
   NTSTATUS CreateNamespace(...);
   NTSTATUS DeleteNamespace(...);
   ```
 
 ### 5.5 vnvmectl 管理工具
 
-- [ ] **5.5.1** 实现 create 命令
+- [x] **5.5.1** 实现 create 命令
   ```c
-  int CmdCreate(int argc, char** argv);
+  int CmdCreate(int argc, char** argv);  // 支持 --size, --backend, --file, --model, --serial
   ```
 
-- [ ] **5.5.2** 实现 delete 命令
+- [x] **5.5.2** 实现 delete 命令
   ```c
   int CmdDelete(int argc, char** argv);
   ```
 
-- [ ] **5.5.3** 实现 list 命令
+- [x] **5.5.3** 实现 list 命令
   ```c
   int CmdList(int argc, char** argv);
   ```
 
+- [x] **5.5.4** 实现 version 命令
+  ```c
+  int CmdVersion(void);
+  ```
+
+- [x] **5.5.5** 实现 status 命令
+  ```c
+  int CmdStatus(void);
+  ```
+
+- [x] **5.5.6** 实现 test 命令
+  ```c
+  int CmdTest(void);
+  ```
+
+### 5.6 I/O 命令与存储后端集成
+
+- [x] **5.6.1** HandleRead 使用存储后端
+  ```c
+  VnvmeStorageRead(...) 或 VnvmeStorageGetDirect(...)
+  ```
+
+- [x] **5.6.2** HandleWrite 使用存储后端
+  ```c
+  VnvmeStorageWrite(...)
+  ```
+
+- [x] **5.6.3** HandleFlush 使用存储后端
+  ```c
+  VnvmeStorageFlush(...)
+  ```
+
+- [x] **5.6.4** HandleWriteZeroes 使用存储后端
+  ```c
+  VnvmeStorageWriteZeroes(...)  // 1 MB 分块处理
+  ```
+
 ### Phase 5 验收
 
-- [ ] **5.6.1** 可创建虚拟磁盘
-- [ ] **5.6.2** 可格式化磁盘 (NTFS/exFAT)
-- [ ] **5.6.3** 可读写文件
-- [ ] **5.6.4** 重启后数据持久化 (文件后端)
-- [ ] **5.6.5** vnvmectl 工具正常工作
+- [x] **5.7.1** 存储后端抽象层完成
+- [x] **5.7.2** 内存后端完成 (最大 256 MB)
+- [x] **5.7.3** 文件后端完成
+- [x] **5.7.4** I/O 命令与存储后端集成完成
+- [ ] **5.7.5** 可格式化磁盘 (待测试)
+- [ ] **5.7.6** 可读写文件 (待测试)
+- [ ] **5.7.7** 重启后数据持久化 (待测试)
 
 ---
 

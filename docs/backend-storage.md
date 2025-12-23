@@ -2,6 +2,44 @@
 
 本文档详细说明虚拟 NVMe 控制器的存储后端实现。
 
+## 实现状态
+
+### 内核态存储后端
+
+> **✅ 已实现**: 内核驱动存储后端 (`vnvme/storage.c`)
+> 
+> 实际实现采用简化的同步 API 设计，位于内核驱动中：
+> - `VnvmeStorageCreate()` - 创建存储后端 (内存或文件)
+> - `VnvmeStorageDestroy()` - 销毁存储后端
+> - `VnvmeStorageRead()` / `VnvmeStorageWrite()` - 同步读写
+> - `VnvmeStorageFlush()` - 刷新缓存
+> - `VnvmeStorageWriteZeroes()` - 零填充
+> - `VnvmeStorageGetDirect()` - 零拷贝直接访问 (仅内存后端)
+> - `VnvmeStorageGetStats()` - 获取统计信息
+>
+> **限制**: 
+> - 内存后端最大 256 MB
+> - 异步 I/O 和 TRIM 尚未实现
+> - VHD 后端尚未实现
+
+### 用户态存储后端
+
+> **✅ 已实现**: 用户态存储后端 (`vnvme-server/backend.c`)
+> 
+> 用于双模式架构的用户态命令处理模式：
+> - `BackendCreate()` - 创建存储后端 (内存或文件)
+> - `BackendDestroy()` - 销毁存储后端
+> - `BackendRead()` / `BackendWrite()` - 同步读写
+> - `BackendFlush()` - 刷新缓存
+> - `BackendWriteZeroes()` - 零填充
+> - `BackendGetSize()` - 获取后端大小
+> - `BackendGetStats()` - 获取统计信息
+>
+> **特点**:
+> - 内存后端: 使用 `VirtualAlloc` 分配
+> - 文件后端: 使用 `CreateFile/ReadFile/WriteFile`
+> - 无大小限制 (取决于系统内存/磁盘空间)
+
 ## 概述
 
 存储后端负责实际的数据持久化。我们支持多种后端类型：

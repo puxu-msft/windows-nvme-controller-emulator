@@ -104,26 +104,31 @@
   </ItemDefinitionGroup>
   
   <ItemGroup>
+    <!-- v1 原始实现 (当前正在使用) -->
     <ClCompile Include="main.c" />
-    <!-- TODO: Phase 2+ 待实现的源文件
-    <ClCompile Include="config.c" />
-    <ClCompile Include="kernel_comm.c" />
-    <ClCompile Include="command_engine.c" />
-    <ClCompile Include="admin_commands.c" />
-    <ClCompile Include="io_commands.c" />
+    <ClCompile Include="command_processor.c" />
     <ClCompile Include="backend.c" />
+    
+    <!-- v2 模块化组件 (暂时禁用，待完成后启用) -->
+    <!-- 
+    <ClCompile Include="config.c" />
+    <ClCompile Include="logger.c" />
+    <ClCompile Include="driver_comm.c" />
+    <ClCompile Include="backend_common.c" />
     <ClCompile Include="backend_memory.c" />
     <ClCompile Include="backend_file.c" />
-    <ClCompile Include="namespace.c" />
-    <ClCompile Include="logger.c" />
-    <ClCompile Include="heartbeat.c" />
+    <ClCompile Include="main_v2.c" />
     -->
   </ItemGroup>
   
   <ItemGroup>
-    <!-- TODO: Phase 2+ 待实现的头文件
-    <ClInclude Include="server.h" />
-    -->
+    <!-- 公共头文件 -->
+    <ClInclude Include="types.h" />
+    <ClInclude Include="vnvme_server.h" />
+    <ClInclude Include="config.h" />
+    <ClInclude Include="logger.h" />
+    <ClInclude Include="driver_comm.h" />
+    <ClInclude Include="backend.h" />
   </ItemGroup>
   
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

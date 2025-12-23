@@ -156,20 +156,23 @@ typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
     UINT32 DataBufferSize;              // 0x84: 数据缓冲区大小
     UINT64 Reserved5;                   // 0x88
     
-    /* 状态 (0x90-0x9F) */
+    /* 状态 (0x90-0xAF) */
     volatile UINT32 KernelReady;        // 0x90: 内核就绪标志
     volatile UINT32 UserReady;          // 0x94: 用户态就绪标志
     volatile UINT32 ErrorCode;          // 0x98: 错误码
     volatile UINT32 ControllerState;    // 0x9C: 控制器状态
+    volatile UINT32 ShutdownRequested;  // 0xA0: 关闭请求标志
+    UINT32 Reserved6;                   // 0xA4
+    UINT64 Reserved7;                   // 0xA8
     
-    /* 统计 (0xA0-0xBF) */
-    volatile UINT64 CommandsProcessed;  // 0xA0: 已处理命令数
-    volatile UINT64 CompletionsPosted;  // 0xA8: 已提交完成数
-    volatile UINT64 BytesRead;          // 0xB0: 读取字节数
-    volatile UINT64 BytesWritten;       // 0xB8: 写入字节数
+    /* 统计 (0xB0-0xCF) */
+    volatile UINT64 CommandsProcessed;  // 0xB0: 已处理命令数
+    volatile UINT64 CompletionsPosted;  // 0xB8: 已提交完成数
+    volatile UINT64 BytesRead;          // 0xC0: 读取字节数
+    volatile UINT64 BytesWritten;       // 0xC8: 写入字节数
     
     /* 保留 */
-    UINT8 Reserved[4096 - 0xC0];
+    UINT8 Reserved[4096 - 0xD0];
     
 } VNVME_SHARED_MEMORY_CONTROL_BLOCK, *PVNVME_SHARED_MEMORY_CONTROL_BLOCK;
 
@@ -276,6 +279,13 @@ typedef struct _VNVME_CONTROLLER_CONFIG {
     UINT32 MaxQueuePairs;               // 最大队列对数
     UINT32 MaxQueueDepth;               // 最大队列深度
     UINT32 MaxTransferSize;             // 最大传输大小 (字节)
+    
+    // 存储后端配置
+    UINT32 StorageType;                 // 存储类型 (1=内存, 2=文件)
+    UINT64 NamespaceSize;               // 命名空间大小 (字节)
+    UINT32 BlockSize;                   // 块大小 (512/4096)
+    UINT32 Reserved;
+    WCHAR FilePath[260];                // 文件后端路径
 } VNVME_CONTROLLER_CONFIG, *PVNVME_CONTROLLER_CONFIG;
 
 /**

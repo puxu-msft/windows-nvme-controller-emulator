@@ -174,23 +174,51 @@ start vnvme.sln
 msbuild vnvme.sln /p:Configuration=Release /p:Platform=x64
 ```
 
-### 安装 (规划中)
-
-> ⚠️ **注意**: 以下命令为设计规划，实际工具正在开发中。
+### 安装
 
 ```powershell
-# 启用测试签名 (需要管理员权限)
+# 1. 启用测试签名 (需要管理员权限)
 bcdedit /set testsigning on
 # 重启
 
-# 安装内核驱动
+# 2. 安装内核驱动
 pnputil /add-driver vnvme.inf /install
 
-# 启动用户态服务
+# 3. 启动用户态服务
+#    方式 A: 使用命令行参数
+vnvme-server.exe --size 100G --backend file --file C:\vnvme\disk.img
+
+#    方式 B: 使用配置文件
 vnvme-server.exe --config vnvme.conf
 
-# 创建虚拟 NVMe 设备
-vnvmectl create --size 100GB --backend file --path C:\vnvme\disk.img
+# 4. 使用管理工具
+vnvmectl status     # 查看驱动和服务状态
+vnvmectl list       # 列出虚拟控制器
+vnvmectl create --size 100G --backend memory    # 创建内存后端控制器
+vnvmectl delete 1   # 删除控制器
+```
+
+### 配置文件示例
+
+```ini
+; vnvme.conf - 虚拟 NVMe 控制器配置
+[controller]
+ControllerName=Virtual NVMe Controller
+VendorId=0x1234
+DeviceId=0x5678
+SubsystemVendorId=0x1234
+SubsystemId=0x5678
+
+[namespace]
+NamespaceSize=100G        ; 支持 K/M/G/T 后缀
+BlockSize=512
+BackendType=file          ; memory 或 file
+BackendFile=C:\vnvme\disk.img
+
+[storage]
+Type=file
+File=C:\vnvme\disk.img
+ReadOnly=false
 ```
 
 ### 验证
@@ -226,46 +254,63 @@ Get-PhysicalDisk | Where-Object BusType -eq "NVMe"
 
 ---
 
-## 项目组成 (v2 混合架构 - 规划)
+## 项目组成 (v2 混合架构 - 已实现)
 
-> 📋 **注意**: 以下为规划的项目结构，实际源文件将在开发过程中创建。
+> 📋 **状态**: 截至 2025-12-23，核心功能已实现，待测试验证
+
+### 代码统计
+
+| 组件 | 源文件数 | 总行数 | 状态 |
+|------|---------|--------|------|
+| **vnvme.sys** (内核驱动) | 15 | ~5,863 | ✅ 主要功能已实现 |
+| **vnvme-server.exe** (用户态服务) | 3 | ~1,967 | ✅ 核心功能已实现 |
+| **vnvmectl.exe** (命令行工具) | 1 | ~512 | ✅ 基本功能已实现 |
+| **共享头文件** | 3 | ~1,160 | ✅ 完整定义 |
 
 ```
 virtual-nvme-driver/
 ├── vnvme/                  # 内核驱动 (单一驱动)
-│   ├── vnvme.c             # 驱动入口
-│   ├── bus.c               # 总线管理模块
-│   ├── bar0.c              # BAR0 内存管理
-│   ├── poll.c              # Doorbell 轮询引擎
-│   ├── prp.c               # PRP 解析
-│   ├── shared_mem.c        # 共享内存管理
-│   ├── completion.c        # 完成处理
-│   └── vnvme.inf           # 安装文件
+│   ├── vnvme.c             # ✅ 驱动入口、PnP/Power 回调 (292行)
+│   ├── vnvme.h             # ✅ 主头文件、数据结构定义 (761行)
+│   ├── ctrl_dev.c          # ✅ 控制设备、IOCTL 处理 (865行)
+│   ├── bus.c               # ✅ 总线枚举、PDO 创建 (362行)
+│   ├── pdo.c               # ✅ PDO PnP 处理 (496行)
+│   ├── bar0.c              # ✅ BAR0 寄存器模拟 (246行)
+│   ├── pcie_config.c       # ✅ PCIe 配置空间模拟 (375行)
+│   ├── doorbell.c          # ✅ Doorbell 轮询处理 (240行)
+│   ├── shm.c               # ✅ 共享内存管理 (263行)
+│   ├── queue.c             # ✅ 队列管理 (185行)
+│   ├── prp.c               # ✅ PRP 列表处理 (175行)
+│   ├── admin_cmd.c         # ✅ Admin 命令处理 (686行)
+│   ├── io_cmd.c            # ✅ I/O 命令处理 (639行)
+│   ├── storage.c           # ✅ 内核存储后端 (733行)
+│   ├── user_forward.c      # ✅ 用户态命令转发 (231行)
+│   ├── utils.c             # ✅ 工具函数 (75行)
+│   └── vnvme.inf           # ✅ 安装文件
 │
 ├── vnvme-server/           # 用户态服务
-│   ├── main.c              # 服务入口
-│   ├── command_engine.c    # 命令处理引擎
-│   ├── admin_cmds.c        # Admin 命令实现
-│   ├── io_cmds.c           # I/O 命令实现
-│   └── backend/            # 存储后端
-│       ├── backend.c       # 后端抽象
-│       ├── memory.c        # 内存后端
-│       ├── file.c          # 文件后端
-│       └── vhd.c           # VHD 后端
+│   ├── main.c              # ✅ 服务入口、配置加载、主循环 (621行)
+│   ├── command_processor.c # ✅ 命令处理引擎 Admin+I/O (943行)
+│   ├── backend.c           # ✅ 存储后端 内存+文件 (403行)
+│   └── vnvme.conf.example  # ✅ 示例配置文件
 │
 ├── vnvmectl/               # 命令行管理工具
-│   └── vnvmectl.c          # 主程序
+│   └── main.c              # ✅ 主程序 version/status/list/create/delete (512行)
+│
+├── include/                # 共享头文件
+│   ├── vnvme_common.h      # ✅ 公共定义、共享内存结构 (372行)
+│   ├── vnvme_ioctl.h       # ✅ IOCTL 接口定义 (252行)
+│   └── nvme_spec.h         # ✅ NVMe 规范定义 (536行)
 │
 ├── docs/                   # 文档
 │   ├── README.md           # 本文件
-│   ├── architecture-v2.md  # ★ 混合架构设计
-│   ├── core-mechanisms.md  # ★ 核心机制详解
-│   └── ...                 # 其他文档
+│   ├── ROADMAP.md          # 开发路线图
+│   ├── architecture-v2.md  # 混合架构设计
+│   └── ...                 # 其他文档 (20+ 文件)
 │
+├── scripts/                # 构建和安装脚本
+├── templates/              # INF 模板等
 └── tests/                  # 测试
-    ├── unit/               # 单元测试
-    └── integration/        # 集成测试
-```
 
 ---
 

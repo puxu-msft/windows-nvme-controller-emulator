@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../include/vnvme_common.h"
 #include "../include/vnvme_ioctl.h"
 
 #define VNVME_DEVICE_PATH L"\\\\.\\VNVMEControl"
@@ -201,6 +202,198 @@ static int CmdListControllers(void)
     return 0;
 }
 
+/**
+ * @brief 解析大小字符串 (支持 K/M/G/T 后缀)
+ */
+static UINT64 ParseSizeString(const char* str)
+{
+    UINT64 value = 0;
+    char suffix = 0;
+    int len = (int)strlen(str);
+    
+    if (len == 0) return 0;
+    
+    // 检查后缀
+    suffix = str[len - 1];
+    if (suffix == 'K' || suffix == 'k' || 
+        suffix == 'M' || suffix == 'm' || 
+        suffix == 'G' || suffix == 'g' ||
+        suffix == 'T' || suffix == 't') {
+        char* temp = _strdup(str);
+        if (temp) {
+            temp[len - 1] = '\0';
+            value = (UINT64)_atoi64(temp);
+            free(temp);
+        }
+    } else {
+        value = (UINT64)_atoi64(str);
+        suffix = 0;
+    }
+    
+    // 应用后缀乘数
+    switch (suffix) {
+        case 'K': case 'k': value *= 1024ULL; break;
+        case 'M': case 'm': value *= 1024ULL * 1024; break;
+        case 'G': case 'g': value *= 1024ULL * 1024 * 1024; break;
+        case 'T': case 't': value *= 1024ULL * 1024 * 1024 * 1024; break;
+    }
+    
+    return value;
+}
+
+static int CmdCreate(int argc, char* argv[])
+{
+    HANDLE hDevice;
+    VNVME_CREATE_CONTROLLER_INPUT input = {0};
+    VNVME_CREATE_CONTROLLER_OUTPUT output = {0};
+    DWORD bytesReturned;
+    BOOL result;
+    int i;
+    
+    // 默认值
+    input.Config.NamespaceSize = 64ULL * 1024 * 1024;  // 64 MB
+    input.Config.BlockSize = 512;
+    input.Config.StorageType = 1;  // VNVME_STORAGE_TYPE_MEMORY
+    input.Config.MaxNamespaces = 1;
+    input.Config.MaxQueuePairs = 16;
+    input.Config.MaxQueueDepth = 256;
+    input.Config.MaxTransferSize = 1024 * 1024;  // 1 MB
+    strcpy_s(input.Config.ModelNumber, sizeof(input.Config.ModelNumber), "Virtual NVMe");
+    strcpy_s(input.Config.SerialNumber, sizeof(input.Config.SerialNumber), "VNVME00001");
+    strcpy_s(input.Config.FirmwareRevision, sizeof(input.Config.FirmwareRevision), "1.0.0");
+    
+    // 解析参数
+    for (i = 2; i < argc; i++) {
+        if (strncmp(argv[i], "--size=", 7) == 0) {
+            input.Config.NamespaceSize = ParseSizeString(argv[i] + 7);
+            if (input.Config.NamespaceSize == 0) {
+                fprintf(stderr, "Error: Invalid size '%s'\n", argv[i] + 7);
+                return 1;
+            }
+        }
+        else if (strncmp(argv[i], "--backend=", 10) == 0) {
+            const char* backend = argv[i] + 10;
+            if (strcmp(backend, "memory") == 0) {
+                input.Config.StorageType = 1;
+            }
+            else if (strcmp(backend, "file") == 0) {
+                input.Config.StorageType = 2;
+            }
+            else {
+                fprintf(stderr, "Error: Unknown backend '%s'\n", backend);
+                return 1;
+            }
+        }
+        else if (strncmp(argv[i], "--file=", 7) == 0) {
+            if (MultiByteToWideChar(CP_UTF8, 0, argv[i] + 7, -1, 
+                                   input.Config.FilePath, 260) == 0) {
+                fprintf(stderr, "Error: Invalid file path '%s'\n", argv[i] + 7);
+                return 1;
+            }
+        }
+        else if (strncmp(argv[i], "--model=", 8) == 0) {
+            strncpy_s(input.Config.ModelNumber, sizeof(input.Config.ModelNumber), 
+                     argv[i] + 8, _TRUNCATE);
+        }
+        else if (strncmp(argv[i], "--serial=", 9) == 0) {
+            strncpy_s(input.Config.SerialNumber, sizeof(input.Config.SerialNumber), 
+                     argv[i] + 9, _TRUNCATE);
+        }
+        else {
+            fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
+            return 1;
+        }
+    }
+    
+    // 验证
+    if (input.Config.StorageType == 2 && input.Config.FilePath[0] == L'\0') {
+        fprintf(stderr, "Error: File backend requires --file=<path>\n");
+        return 1;
+    }
+    
+    printf("Creating controller...\n");
+    printf("  Size: %llu bytes (%.2f MB)\n", 
+           (unsigned long long)input.Config.NamespaceSize,
+           (double)input.Config.NamespaceSize / (1024.0 * 1024.0));
+    printf("  Backend: %s\n", input.Config.StorageType == 1 ? "memory" : "file");
+    printf("  Model: %s\n", input.Config.ModelNumber);
+    printf("  Serial: %s\n", input.Config.SerialNumber);
+    
+    hDevice = OpenVnvmeDevice();
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_VNVME_CREATE_CONTROLLER,
+        &input, (DWORD)sizeof(input),
+        &output, (DWORD)sizeof(output),
+        &bytesReturned,
+        NULL
+        );
+    
+    CloseHandle(hDevice);
+    
+    if (!result) {
+        fprintf(stderr, "Error: IOCTL_VNVME_CREATE_CONTROLLER failed (Error: %lu)\n",
+                GetLastError());
+        return 1;
+    }
+    
+    printf("\nController created successfully!\n");
+    printf("  Controller ID: %u\n", output.ControllerId);
+    
+    return 0;
+}
+
+static int CmdDelete(int argc, char* argv[])
+{
+    HANDLE hDevice;
+    VNVME_DELETE_CONTROLLER_INPUT input = {0};
+    DWORD bytesReturned;
+    BOOL result;
+    
+    if (argc < 3) {
+        fprintf(stderr, "Usage: vnvmectl delete <controller_id>\n");
+        return 1;
+    }
+    
+    input.ControllerId = (ULONG)atoi(argv[2]);
+    if (input.ControllerId == 0 && strcmp(argv[2], "0") != 0) {
+        fprintf(stderr, "Error: Invalid controller ID '%s'\n", argv[2]);
+        return 1;
+    }
+    
+    printf("Deleting controller %u...\n", input.ControllerId);
+    
+    hDevice = OpenVnvmeDevice();
+    if (hDevice == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+    
+    result = DeviceIoControl(
+        hDevice,
+        IOCTL_VNVME_DELETE_CONTROLLER,
+        &input, (DWORD)sizeof(input),
+        NULL, 0U,
+        &bytesReturned,
+        NULL
+        );
+    
+    CloseHandle(hDevice);
+    
+    if (!result) {
+        fprintf(stderr, "Error: IOCTL_VNVME_DELETE_CONTROLLER failed (Error: %lu)\n",
+                GetLastError());
+        return 1;
+    }
+    
+    printf("Controller %u deleted successfully.\n", input.ControllerId);
+    
+    return 0;
+}
+
 static int CmdTest(void)
 {
     int result = 0;
@@ -256,8 +449,22 @@ static void PrintUsage(const char* progName)
     printf("  version     - Show driver version\n");
     printf("  status      - Show driver status\n");
     printf("  list        - List controllers\n");
+    printf("  create      - Create a new controller\n");
+    printf("  delete      - Delete a controller\n");
     printf("  test        - Run test suite\n");
     printf("  help        - Show this help\n");
+    printf("\n");
+    printf("Create Options:\n");
+    printf("  --size=<size>       Namespace size (e.g., 64M, 1G, 256M)\n");
+    printf("  --backend=<type>    Backend type: memory (default), file\n");
+    printf("  --file=<path>       File path (required for file backend)\n");
+    printf("  --model=<name>      Controller model name\n");
+    printf("  --serial=<sn>       Controller serial number\n");
+    printf("\n");
+    printf("Examples:\n");
+    printf("  %s create --size=128M                    # 128MB memory\n", progName);
+    printf("  %s create --backend=file --file=disk.img --size=1G\n", progName);
+    printf("  %s delete 1                              # Delete controller 1\n", progName);
     printf("\n");
 }
 
@@ -280,6 +487,12 @@ int main(int argc, char* argv[])
     }
     else if (_stricmp(argv[1], "list") == 0) {
         return CmdListControllers();
+    }
+    else if (_stricmp(argv[1], "create") == 0) {
+        return CmdCreate(argc, argv);
+    }
+    else if (_stricmp(argv[1], "delete") == 0) {
+        return CmdDelete(argc, argv);
     }
     else if (_stricmp(argv[1], "test") == 0) {
         return CmdTest();

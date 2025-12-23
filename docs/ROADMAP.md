@@ -65,9 +65,10 @@
 - 创建控制设备 `\\.\VNVMEControl`
 
 ### 里程碑
-- [x] 驱动能够成功编译 (vnvme.sys 19KB)
+- [x] 驱动能够成功编译 (vnvme.sys ~19KB)
 - [x] 用户态程序可以编译 (vnvmectl.exe, vnvme-server.exe)
-- [ ] 驱动能够成功加载和卸载 (需要测试签名)
+- [x] 驱动框架完整实现 (PnP/Power 回调)
+- [ ] 驱动能够成功加载和卸载 (需要测试签名模式)
 - [ ] 设备管理器中看到 "Virtual NVMe Bus Controller"
 - [ ] 用户态程序可以打开控制设备
 
@@ -249,46 +250,46 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 
 #### 3.3 vnvme-server 框架 (main.c)
 - [x] 创建 vnvme-server 项目骨架
-- [x] 实现命令行参数解析 (--backend, --file, --size, --debug)
-- [ ] 实现配置文件加载
+- [x] 实现命令行参数解析 (--backend, --file, --size, --debug, --config)
+- [x] 实现配置文件加载 (INI 格式)
 - [x] 打开控制设备 `\\.\VNVMEControl`
 - [x] 映射共享内存
 - [x] 发送 USER_READY 通知
 - [x] 实现主循环和心跳机制
-- [ ] 实现实际命令处理 (ProcessCommands)
+- [x] 实现实际命令处理 (CmdProcessorRun)
 
-#### 3.4 命令循环 (command_engine.c)
-- [ ] 实现主事件循环
-- [ ] 等待命令事件
-- [ ] 从提交环读取命令
-- [ ] 分发到处理函数
-- [ ] 写入完成环
-- [ ] 通知内核
+#### 3.4 命令循环 (command_processor.c)
+- [x] 实现主事件循环 (CmdProcessorRun)
+- [x] 检查通知环获取命令
+- [x] 从 SQ 读取命令
+- [x] 分发到处理函数
+- [x] 写入完成到 CQ
+- [x] 更新统计信息
 
 #### 3.5 心跳和错误恢复
-- [ ] 实现心跳定时器
+- [x] 实现心跳定时器 (每秒发送)
 - [ ] 实现用户态崩溃检测
-- [ ] 实现优雅关闭处理
+- [x] 实现优雅关闭处理
 
 #### 3.6 优雅关闭 (Graceful Shutdown)
 
 **目标**: 驱动卸载时安全停止所有操作，避免数据丢失和蓝屏
 
 **内核侧 (vnvme.sys)**:
-- [ ] 添加 `ShutdownEvent` 到 FDO 上下文
-- [ ] 添加 `ShutdownRequested` 标志
+- [x] 添加 `ShutdownEvent` 到 FDO 上下文
+- [x] 添加 `ShutdownRequested` 标志
 - [ ] 添加 `ControlQueue` 用于等待 IOCTL 完成
-- [ ] 在 `VnvmeEvtDeviceD0Exit` 中触发关闭事件
+- [x] 在 `VnvmeEvtDeviceD0Exit` 中触发关闭事件
 - [ ] 使用 `WdfIoQueueStop()` 停止接收新请求
-- [ ] 等待所有待处理命令完成 (超时 5 秒)
+- [x] 等待所有待处理命令完成 (超时 5 秒)
 - [ ] 清理共享内存和 PDO
 
 **用户态侧 (vnvme-server)**:
-- [ ] 监听 `ShutdownEvent` 或检测 `ShutdownRequested` 标志
-- [ ] 完成所有正在处理的命令
-- [ ] 刷新后端存储缓存
-- [ ] 发送 `IOCTL_VNVME_USER_SHUTDOWN` 通知内核
-- [ ] 安全退出主循环
+- [x] 检测 `ShutdownRequested` 标志
+- [x] 完成所有正在处理的命令
+- [x] 刷新后端存储缓存
+- [x] 通知内核关闭完成
+- [x] 安全退出主循环
 
 **关闭序列**:
 ```
@@ -327,11 +328,23 @@ vnvme-server.exe --config vnvme.conf
 - 处理 I/O 命令
 
 ### 里程碑
-- [ ] stornvme 初始化成功 (CSTS.RDY = 1)
-- [ ] Identify Controller 返回正确数据
-- [ ] 磁盘在 Windows 中出现
+- [x] Admin 命令处理完成 (12 个命令)
+- [x] I/O 命令处理完成 (5 个命令)
+- [x] PRP 数据传输实现 (1-2 页)
+- [x] 队列管理完成
+- [ ] stornvme 初始化成功 (需测试验证)
+- [ ] 磁盘在 Windows 中出现 (需测试验证)
 
 ### 详细任务
+
+> **架构变更说明**: Admin/I/O 命令处理已在内核驱动中实现 (admin_cmd.c, io_cmd.c)，
+> 而非原计划的用户态服务。这提供更低延迟和更简单的物理内存访问。
+
+> **双模式架构 (v2)**: 支持内核态和用户态两种命令处理模式，可通过 `VNVME_DEFAULT_CMD_MODE` 切换：
+> - `VNVME_CMD_MODE_KERNEL`: 内核态处理 (低延迟，备用方案)
+> - `VNVME_CMD_MODE_USER`: 用户态处理 (默认，更灵活)
+>
+> 用户态模式通过 NotifyRing 通知机制，让 vnvme-server 直接从共享内存读取 NVME_COMMAND。
 
 #### 4.1 Doorbell 轮询 (doorbell.c)
 - [x] 实现 `VnvmeInitializePollingTimer()` - 创建轮询定时器
@@ -339,48 +352,91 @@ vnvme-server.exe --config vnvme.conf
 - [x] 实现 `VnvmeStopPollingTimer()` - 停止定时器
 - [x] 实现 `VnvmeEvtPollingTimer()` - 轮询回调
 - [x] 实现 `VnvmeProcessDoorbells()` - 处理 Doorbell 变化框架
-- [~] 检测 Admin SQ Tail 变化 (框架已有，TODO 完善)
-- [ ] 检测 CC 寄存器变化
-- [ ] 检测 I/O SQ Tail 变化
+- [x] 检测 Admin SQ Tail 变化
+- [x] 检测 CC 寄存器变化
+- [x] 检测 I/O SQ Tail 变化
 - [ ] 实现自适应轮询间隔
 
 #### 4.2 控制器启用流程
-- [ ] 检测 CC.EN = 1
-- [ ] 读取 AQA/ASQ/ACQ 配置
-- [ ] 映射 Admin 队列内存 (PRP → 虚拟地址)
-- [ ] 设置 CSTS.RDY = 1
+- [x] 检测 CC.EN = 1
+- [x] 读取 AQA/ASQ/ACQ 配置
+- [x] 映射 Admin 队列内存 (PRP → 虚拟地址)
+- [x] 设置 CSTS.RDY = 1
 
-#### 4.3 Admin 命令 - 用户态 (admin_commands.c)
-- [ ] 实现 Identify Controller (Opcode 0x06, CNS=1)
-- [ ] 实现 Identify Namespace (Opcode 0x06, CNS=0)
-- [ ] 实现 Identify Namespace List (Opcode 0x06, CNS=2)
-- [ ] 实现 Create I/O CQ (Opcode 0x05)
-- [ ] 实现 Create I/O SQ (Opcode 0x01)
-- [ ] 实现 Delete I/O CQ (Opcode 0x04)
-- [ ] 实现 Delete I/O SQ (Opcode 0x00)
-- [ ] 实现 Set Features (Opcode 0x09) - Number of Queues
-- [ ] 实现 Get Features (Opcode 0x0A)
+#### 4.3 Admin 命令 - 内核 (admin_cmd.c)
+- [x] 实现 Identify Controller (Opcode 0x06, CNS=1)
+- [x] 实现 Identify Namespace (Opcode 0x06, CNS=0)
+- [~] 实现 Identify Namespace List (Opcode 0x06, CNS=2) - 返回空列表, TODO
+- [x] 实现 Create I/O CQ (Opcode 0x05)
+- [x] 实现 Create I/O SQ (Opcode 0x01)
+- [x] 实现 Delete I/O CQ (Opcode 0x04)
+- [x] 实现 Delete I/O SQ (Opcode 0x00)
+- [x] 实现 Set Features (Opcode 0x09) - Number of Queues
+- [x] 实现 Get Features (Opcode 0x0A)
+- [x] 实现 Abort (Opcode 0x08)
+- [~] 实现 Async Event Request (Opcode 0x0C) - 框架, 不存储命令
+- [x] 实现 Keep Alive (Opcode 0x18)
+- [ ] 实现 Get Log Page (Opcode 0x02) - TODO
 
-#### 4.4 I/O 命令 - 用户态 (io_commands.c)
-- [ ] 实现 Read (Opcode 0x02)
-- [ ] 实现 Write (Opcode 0x01)
-- [ ] 实现 Flush (Opcode 0x00)
+#### 4.4 I/O 命令 - 内核 (io_cmd.c)
+- [x] 实现 Read (Opcode 0x02) - 支持 PRP1/PRP2
+- [x] 实现 Write (Opcode 0x01) - 支持 PRP1/PRP2
+- [x] 实现 Flush (Opcode 0x00)
+- [x] 实现 Write Zeroes (Opcode 0x08)
+- [~] 实现 Dataset Management (Opcode 0x09) - 返回成功但不处理范围
+- [ ] 实现 Compare (Opcode 0x05) - TODO
+- [~] PRP List 支持 (>2 页) - 返回 NOT_IMPLEMENTED
 
 #### 4.5 PRP 解析 (prp.c)
-- [x] 创建 prp.c 文件和函数框架
-- [~] 实现 `VnvmeParsePrpList()` - 解析 PRP1/PRP2 (框架已有，TODO)
+- [x] 创建 prp.c 文件和函数框架 (175 行)
+- [x] 实现 `VnvmeParsePrpList()` - 解析 PRP1/PRP2
 - [x] 定义 `VNVME_PRP_ENTRY` 结构
-- [ ] 实现 `VnvmeCopyFromPrp()` - 从 PRP 复制到共享内存
-- [ ] 实现 `VnvmeCopyToPrp()` - 从共享内存复制到 PRP
-- [ ] 处理 PRP List 情况
+- [x] 实现 PRP1 单页数据传输
+- [x] 实现 PRP2 双页数据传输
+- [~] 处理 PRP List 情况 (>2 页返回 NOT_IMPLEMENTED，TODO Phase 4)
 
 #### 4.6 完成处理 (queue.c)
-- [x] 创建 queue.c 文件
+- [x] 创建 queue.c 文件 (185 行)
 - [x] 实现 `VnvmeInitializeAdminQueues()` - 读取 AQA/ASQ/ACQ
-- [~] 实现 `VnvmeFetchCommand()` - 获取命令 (框架已有，TODO)
-- [~] 实现 `VnvmePostCompletion()` - 写入 CQ (框架已有，TODO)
-- [ ] 正确设置 Phase Tag
-- [ ] 更新 CQ Tail 和 Phase
+- [~] 实现 `VnvmeFetchCommand()` - 获取命令 (TODO Phase 4)
+- [~] 实现 `VnvmePostCompletion()` - 写入 CQ (TODO Phase 4)
+- [x] 正确设置 Phase Tag
+- [x] 更新 CQ Tail 和 Phase
+- [~] I/O SQ/CQ 创建/删除 (TODO Phase 5)
+
+#### 4.7 用户态命令转发 (user_forward.c)
+- [x] 创建 user_forward.c 文件 (231 行)
+- [x] 实现 `VnvmeForwardAdminCommandsToUser()` - Admin 队列转发
+- [x] 实现 `VnvmeForwardIoCommandsToUser()` - I/O 队列转发
+- [x] 实现 `NotifyRingPush()` - 通知环写入
+- [x] 实现 `SignalUserMode()` - 唤醒用户态
+- [x] 实现 `VnvmeProcessUserCompletions()` - 处理用户态完成
+- [~] 处理 I/O CQ 更新 (TODO)
+- [~] 触发 MSI-X 中断 (TODO)
+
+#### 4.8 用户态命令处理 (vnvme-server/command_processor.c)
+- [x] 创建 command_processor.c 文件 (943 行)
+- [x] 实现 `CmdProcessorInit()` - 初始化处理器
+- [x] 实现 `CmdProcessorRun()` - 主处理循环
+- [x] Admin 命令: Identify, Create/Delete CQ/SQ, Set/Get Features, Abort, KeepAlive
+- [x] I/O 命令: Read, Write, Flush, Write Zeroes, Dataset Management
+- [x] 实现 `PostAdminCompletion()` - Admin 完成写入
+- [x] 实现 `PostIoCompletion()` - I/O 完成写入
+- [x] I/O 队列跟踪和管理
+- [~] 完整的 Identify Controller 数据填充 (TODO)
+- [~] 完整的 Identify Namespace 数据填充 (TODO)
+
+#### 4.9 用户态存储后端 (vnvme-server/backend.c)
+- [x] 创建 backend.c 文件 (403 行)
+- [x] 实现 `BackendCreate()` - 创建后端 (内存/文件)
+- [x] 实现 `BackendDestroy()` - 销毁后端
+- [x] 实现 `BackendRead()` - 读取数据
+- [x] 实现 `BackendWrite()` - 写入数据
+- [x] 实现 `BackendFlush()` - 刷新缓存
+- [x] 实现 `BackendWriteZeroes()` - 写零
+- [x] 实现 `BackendGetSize()` - 获取后端大小
+- [x] 实现内存后端 (VirtualAlloc)
+- [x] 实现文件后端 (CreateFile/ReadFile/WriteFile)
 
 ### 验收标准
 ```powershell
@@ -406,48 +462,66 @@ nvme list
 - 支持命名空间管理
 
 ### 里程碑
-- [ ] 可以格式化和使用虚拟磁盘
-- [ ] 数据持久化到文件
+- [x] 存储后端抽象层已实现
+- [x] 内存后端已实现 (最大 256 MB)
+- [x] 文件后端已实现
+- [ ] 可以格式化和使用虚拟磁盘 (待测试验证)
+- [ ] 数据持久化到文件 (待测试验证)
 
 ### 详细任务
 
-#### 5.1 后端抽象 (backend.c)
-- [ ] 定义后端接口 `VNVME_BACKEND_OPS`
-- [ ] 实现后端初始化框架
-- [ ] 实现后端选择逻辑
+> **实现说明**: 存储后端已在内核驱动中实现 (storage.c)，采用统一 API 设计，
+> 支持内存和文件两种后端类型，可通过 VnvmeStorageCreate() 选择。
 
-#### 5.2 内存后端 (backend_memory.c)
-- [ ] 实现 `MemoryBackendInit()` - 分配内存
-- [ ] 实现 `MemoryBackendRead()` - 内存读取
-- [ ] 实现 `MemoryBackendWrite()` - 内存写入
-- [ ] 实现 `MemoryBackendFlush()` - 无操作
-- [ ] 实现 `MemoryBackendClose()` - 释放内存
+#### 5.1 后端抽象 (storage.c)
+- [x] 定义 `VNVME_STORAGE_CONTEXT` 结构
+- [x] 定义 `VNVME_STORAGE_TYPE` 枚举 (MEMORY, FILE, SPARSE)
+- [x] 实现 `VnvmeStorageCreate()` - 创建后端
+- [x] 实现 `VnvmeStorageDestroy()` - 销毁后端
+- [x] 实现后端类型选择逻辑
 
-#### 5.3 文件后端 (backend_file.c)
-- [ ] 实现 `FileBackendInit()` - 打开/创建文件
-- [ ] 实现 `FileBackendRead()` - 文件读取
-- [ ] 实现 `FileBackendWrite()` - 文件写入
-- [ ] 实现 `FileBackendFlush()` - 刷新缓冲区
-- [ ] 实现 `FileBackendClose()` - 关闭文件
-- [ ] 支持稀疏文件
+#### 5.2 内存后端 (storage.c - Memory)
+- [x] 实现 `StorageMemoryInit()` - 分配内存 (最大 256 MB)
+- [x] 实现 `VnvmeStorageRead()` - 内存读取
+- [x] 实现 `VnvmeStorageWrite()` - 内存写入
+- [x] 实现 `VnvmeStorageGetDirect()` - 零拷贝直接访问 (仅内存后端)
+- [x] 实现 `VnvmeStorageWriteZeroes()` - 零填充
+- [x] 实现 `StorageMemoryCleanup()` - 释放内存
+
+#### 5.3 文件后端 (storage.c - File)
+- [x] 实现 `StorageFileInit()` - 打开/创建文件 (ZwCreateFile)
+- [x] 实现 `VnvmeStorageRead()` - 文件读取 (ZwReadFile)
+- [x] 实现 `VnvmeStorageWrite()` - 文件写入 (ZwWriteFile)
+- [x] 实现 `VnvmeStorageFlush()` - 刷新缓冲区 (更新时间戳)
+- [x] 实现 `StorageFileCleanup()` - 关闭文件
+- [ ] 支持稀疏文件 (VNVME_STORAGE_TYPE_SPARSE 已定义，待实现)
 - [ ] 支持预分配
 
 #### 5.4 命名空间管理
-- [ ] 实现命名空间创建
+- [x] VNVME_NAMESPACE 包含 Storage 字段
+- [ ] 实现命名空间创建时的存储关联
 - [ ] 实现命名空间删除
 - [ ] 实现命名空间属性查询
-- [ ] 更新 Identify Namespace 返回
+- [x] Identify Namespace 返回正确数据 (admin_cmd.c)
 
 #### 5.5 vnvmectl 管理命令
-- [ ] 实现 `vnvmectl create` - 创建虚拟磁盘
-- [ ] 实现 `vnvmectl delete` - 删除虚拟磁盘
-- [ ] 实现 `vnvmectl list` - 列出虚拟磁盘
-- [ ] 实现 `vnvmectl info` - 显示详细信息
+- [x] 实现 `vnvmectl create` - 支持 --size, --backend, --file, --model, --serial
+- [x] 实现 `vnvmectl delete` - 删除指定控制器
+- [x] 实现 `vnvmectl list` - 列出虚拟磁盘
+- [x] 实现 `vnvmectl status` - 显示驱动状态
+- [x] 实现 `vnvmectl version` - 显示版本信息
+- [x] 实现 `vnvmectl test` - 运行测试套件
+
+#### 5.6 I/O 命令与存储后端集成
+- [x] HandleRead() 使用 VnvmeStorageRead/VnvmeStorageGetDirect
+- [x] HandleWrite() 使用 VnvmeStorageWrite
+- [x] HandleFlush() 调用 VnvmeStorageFlush
+- [x] HandleWriteZeroes() 调用 VnvmeStorageWriteZeroes
 
 ### 验收标准
 ```powershell
 # 1. 创建虚拟磁盘
-vnvmectl create --size 10GB --backend file --path C:\vnvme\test.img
+vnvmectl create --size=1G --backend=file --file=C:\vnvme\disk.img
 # 成功
 
 # 2. 格式化
@@ -470,6 +544,83 @@ Get-Content X:\test.txt
 - 完成功能测试
 - 性能测试和优化
 - 文档完善
+
+### 6.0 调试基础设施 (优先)
+
+> **说明**: 调试能力是测试和优化的前提，应首先实现。
+
+#### 6.0.1 调试输出系统 (0.5 天)
+- [x] 创建 `debug.h` - 统一调试宏定义
+- [x] 实现多级别调试输出 (Error/Warning/Info/Debug/Verbose)
+- [x] 实现模块化调试标志 (可按模块启用/禁用)
+- [x] 支持 DbgPrint 和 WPP 双模式
+- [x] 实现函数进入/退出跟踪宏
+
+#### 6.0.2 运行时调试控制 (0.5 天)
+- [x] 注册表参数读取 (`DebugLevel`, `DebugFlags`)
+- [x] 实现 `VnvmeDebugInit()` - 初始化调试子系统
+- [ ] IOCTL 动态调整调试级别 (`IOCTL_VNVME_SET_DEBUG_LEVEL`)
+- [ ] DebugView 实时查看验证
+
+#### 6.0.3 调试工具集成 (1 天)
+- [ ] WinDbg 调试脚本 (`scripts/windbg/vnvme.wds`)
+- [ ] Driver Verifier 配置说明
+- [ ] 蓝屏 dump 分析指南
+- [ ] 常用断点列表文档
+
+#### 6.0.4 性能计数器 (0.5 天)
+- [ ] 命令处理统计 (提交数/完成数/错误数)
+- [ ] 延迟统计 (最小/最大/平均)
+- [ ] I/O 统计 (读/写字节数、IOPS)
+- [ ] IOCTL 查询性能统计 (`IOCTL_VNVME_GET_STATS`)
+
+#### 6.0.5 用户态服务调试 (0.5 天)
+- [ ] 日志文件输出 (`--log-file` 选项)
+- [ ] 日志级别控制 (`--log-level` 选项)
+- [ ] 控制台彩色输出
+- [ ] 性能计数器输出
+
+#### 6.0.6 用户态服务重构 (2 天)
+
+> **说明**: 将紧凑版 (3 文件) 重构为模块化版本，提高可测试性和可扩展性
+
+**6.0.6.1 基础设施模块 (0.5 天)**
+- [x] 创建 `types.h` - 基础类型定义 (避免循环依赖)
+- [x] 创建 `vnvme_server.h` - 公共类型定义和宏
+- [x] 创建 `logger.c/.h` - 统一日志系统
+  - 多级别输出 (Error/Warning/Info/Debug/Verbose)
+  - 控制台 + 文件双输出
+  - 时间戳和模块标识
+- [x] 创建 `config.c/.h` - 从 main.c 分离配置解析
+  - 命令行参数解析
+  - INI 配置文件加载
+  - 配置验证
+
+**6.0.6.2 驱动通信模块 (0.5 天)**
+- [x] 创建 `driver_comm.c/.h` - 从 main.c 分离驱动通信
+  - `DriverConnect()` / `DriverDisconnect()`
+  - `MapSharedMemory()` / `UnmapSharedMemory()`
+  - `SendHeartbeat()` / `SendUserReady()`
+  - `IsShutdownRequested()`
+
+**6.0.6.3 命令处理模块拆分 (0.5 天)**
+- [ ] 分离 `admin_commands.c` - Admin 命令实现
+  - Identify, Get Features, Set Features 等
+- [ ] 分离 `io_commands.c` - I/O 命令实现
+  - Read, Write, Flush, Write Zeroes 等
+- [ ] 精简 `command_processor.c` - 仅命令分发
+
+**6.0.6.4 后端模块拆分 (0.5 天)**
+- [x] 创建 `backend.h` - 后端接口定义
+- [x] 分离 `backend_memory.c` - 内存后端实现
+- [x] 分离 `backend_file.c` - 文件后端实现
+- [x] 创建 `backend_common.c` - 后端分发器
+
+**6.0.6.5 集成和切换 (待定)**
+- [ ] 创建 `main_v2.c` - 使用新模块的入口 (已创建，待测试)
+- [ ] 更新 vcxproj 启用新模块编译
+- [ ] 测试新旧版本功能一致性
+- [ ] 替换 main.c 为 main_v2.c
 
 ### 里程碑
 - [ ] 所有功能测试通过

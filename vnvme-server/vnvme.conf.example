@@ -1,0 +1,21 @@
+# VNVME Server Configuration Example
+# Copy this file to vnvme.conf and modify as needed
+
+# Storage backend type: memory, file
+backend=memory
+
+# Backend size in bytes (for memory backend)
+# Supports suffixes: K, M, G (e.g., 128M = 128 MB)
+size=64M
+
+# File path for file backend (required when backend=file)
+# file=C:\vnvme\disk.img
+
+# Enable debug output
+debug=false
+
+# Polling interval in milliseconds (1-1000)
+polling_interval=1
+
+# Maximum concurrent I/O operations
+# max_io=32

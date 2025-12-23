@@ -470,6 +470,66 @@ C_ASSERT(sizeof(NVME_IDENTIFY_NAMESPACE_DATA) == 4096);
 #define NVME_FEATURE_RESERVATION_PERSISTENCE    0x83
 
 /*===========================================================================
+ * 状态码 (Status Codes)
+ *===========================================================================*/
+
+/* Status Code Type (SCT) */
+#define NVME_SCT_GENERIC                        0x00
+#define NVME_SCT_COMMAND                        0x01
+#define NVME_SCT_MEDIA_ERROR                    0x02
+#define NVME_SCT_PATH                           0x03
+#define NVME_SCT_VENDOR                         0x07
+
+/* Generic Command Status (SCT=0x00) */
+#define NVME_SC_SUCCESS                         0x00
+#define NVME_SC_INVALID_OPCODE                  0x01
+#define NVME_SC_INVALID_FIELD                   0x02
+#define NVME_SC_COMMAND_ID_CONFLICT             0x03
+#define NVME_SC_DATA_TRANSFER_ERROR             0x04
+#define NVME_SC_ABORTED_POWER_LOSS              0x05
+#define NVME_SC_INTERNAL_ERROR                  0x06
+#define NVME_SC_COMMAND_ABORT_REQUESTED         0x07
+#define NVME_SC_COMMAND_ABORTED_SQ_DELETED      0x08
+#define NVME_SC_COMMAND_ABORTED_FUSED_FAIL      0x09
+#define NVME_SC_COMMAND_ABORTED_FUSED_MISSING   0x0A
+#define NVME_SC_INVALID_NAMESPACE               0x0B
+#define NVME_SC_COMMAND_SEQUENCE_ERROR          0x0C
+#define NVME_SC_INVALID_SGL                     0x0D
+#define NVME_SC_INVALID_SGL_COUNT               0x0E
+#define NVME_SC_INVALID_SGL_LENGTH              0x0F
+#define NVME_SC_LBA_OUT_OF_RANGE                0x80
+#define NVME_SC_CAPACITY_EXCEEDED               0x81
+#define NVME_SC_NAMESPACE_NOT_READY             0x82
+
+/* Command Specific Status (SCT=0x01) */
+#define NVME_SC_COMPLETION_QUEUE_INVALID        0x00
+#define NVME_SC_INVALID_QUEUE_ID                0x01
+#define NVME_SC_INVALID_QUEUE_SIZE              0x02
+#define NVME_SC_ABORT_LIMIT_EXCEEDED            0x03
+#define NVME_SC_ASYNC_EVENT_LIMIT_EXCEEDED      0x05
+#define NVME_SC_INVALID_FIRMWARE_SLOT           0x06
+#define NVME_SC_INVALID_FIRMWARE_IMAGE          0x07
+#define NVME_SC_INVALID_INTERRUPT_VECTOR        0x08
+#define NVME_SC_INVALID_LOG_PAGE                0x09
+#define NVME_SC_INVALID_FORMAT                  0x0A
+#define NVME_SC_FW_ACTIVATION_REQUIRES_RESET    0x0B
+#define NVME_SC_INVALID_QUEUE_DELETION          0x0C
+#define NVME_SC_FEATURE_NOT_SAVEABLE            0x0D
+#define NVME_SC_FEATURE_NOT_CHANGEABLE          0x0E
+#define NVME_SC_FEATURE_NOT_PER_NAMESPACE       0x0F
+#define NVME_SC_CQ_INVALID                      0x18
+
+/* Media and Data Integrity Errors (SCT=0x02) */
+#define NVME_SC_WRITE_FAULT                     0x80
+#define NVME_SC_UNRECOVERED_READ_ERROR          0x81
+#define NVME_SC_GUARD_CHECK_ERROR               0x82
+#define NVME_SC_APP_TAG_CHECK_ERROR             0x83
+#define NVME_SC_REF_TAG_CHECK_ERROR             0x84
+#define NVME_SC_COMPARE_FAILURE                 0x85
+#define NVME_SC_ACCESS_DENIED                   0x86
+#define NVME_SC_DEALLOCATED_LOGICAL_BLOCK       0x87
+
+/*===========================================================================
  * PCIe 配置空间
  *===========================================================================*/
 

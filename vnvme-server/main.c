@@ -56,11 +56,23 @@ typedef struct _SERVER_CONFIG {
  * 全局变量
  *===========================================================================*/
 
-static volatile BOOL g_Running = TRUE;
+volatile BOOL g_Running = TRUE;
+BOOL g_DebugMode = FALSE;                           // 供其他模块使用
 static HANDLE g_DriverHandle = INVALID_HANDLE_VALUE;
 static SERVER_CONFIG g_Config = {0};
 static PVOID g_ShmAddress = NULL;                   // 共享内存地址
 static SIZE_T g_ShmSize = 0;                        // 共享内存大小
+
+// 外部函数声明
+struct _BACKEND_CONTEXT;
+typedef struct _BACKEND_CONTEXT BACKEND_CONTEXT, *PBACKEND_CONTEXT;
+PBACKEND_CONTEXT BackendCreate(int type, SIZE_T size, const WCHAR* filePath);
+void BackendDestroy(PBACKEND_CONTEXT ctx);
+BOOL BackendFlush(PBACKEND_CONTEXT ctx);
+BOOL CmdProcessorInit(PVOID shmAddress, PBACKEND_CONTEXT backend);
+UINT64 CmdProcessorRun(void);
+
+static PBACKEND_CONTEXT g_Backend = NULL;
 
 /*===========================================================================
  * 控制台处理程序
@@ -84,6 +96,106 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType)
  * 辅助函数
  *===========================================================================*/
 
+/**
+ * @brief 解析大小字符串 (支持 K/M/G 后缀)
+ */
+static SIZE_T ParseSizeString(const char* str)
+{
+    SIZE_T value = 0;
+    char suffix = 0;
+    int len = (int)strlen(str);
+    
+    if (len == 0) return 0;
+    
+    // 检查后缀
+    suffix = str[len - 1];
+    if (suffix == 'K' || suffix == 'k' || 
+        suffix == 'M' || suffix == 'm' || 
+        suffix == 'G' || suffix == 'g') {
+        char* temp = _strdup(str);
+        if (temp) {
+            temp[len - 1] = '\0';
+            value = (SIZE_T)_atoi64(temp);
+            free(temp);
+        }
+    } else {
+        value = (SIZE_T)_atoi64(str);
+        suffix = 0;
+    }
+    
+    // 应用后缀乘数
+    switch (suffix) {
+        case 'K': case 'k': value *= 1024; break;
+        case 'M': case 'm': value *= 1024 * 1024; break;
+        case 'G': case 'g': value *= 1024ULL * 1024 * 1024; break;
+    }
+    
+    return value;
+}
+
+/**
+ * @brief 从配置文件加载设置
+ */
+static BOOL LoadConfigFile(const char* path, PSERVER_CONFIG config)
+{
+    FILE* file;
+    char line[512];
+    char key[64];
+    char value[256];
+    
+    file = fopen(path, "r");
+    if (file == NULL) {
+        return FALSE;
+    }
+    
+    printf("Loading configuration from: %s\n", path);
+    
+    while (fgets(line, sizeof(line), file) != NULL) {
+        // 跳过空行和注释
+        if (line[0] == '\0' || line[0] == '\n' || line[0] == '#') {
+            continue;
+        }
+        
+        // 去除行尾换行
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
+        }
+        
+        // 解析 key=value
+        if (sscanf(line, "%63[^=]=%255s", key, value) == 2) {
+            // 去除 key 的空白
+            char* p = key;
+            while (*p == ' ' || *p == '\t') p++;
+            
+            if (strcmp(p, "backend") == 0) {
+                if (strcmp(value, "memory") == 0) {
+                    config->BackendType = BACKEND_MEMORY;
+                } else if (strcmp(value, "file") == 0) {
+                    config->BackendType = BACKEND_FILE;
+                }
+            }
+            else if (strcmp(p, "size") == 0) {
+                config->BackendSize = ParseSizeString(value);
+            }
+            else if (strcmp(p, "file") == 0) {
+                if (MultiByteToWideChar(CP_UTF8, 0, value, -1, 
+                                       config->FilePath, MAX_PATH) == 0) {
+                    fprintf(stderr, "Warning: Invalid file path in config\n");
+                }
+            }
+            else if (strcmp(p, "debug") == 0) {
+                config->DebugMode = (strcmp(value, "true") == 0 || 
+                                    strcmp(value, "1") == 0 ||
+                                    strcmp(value, "yes") == 0);
+            }
+        }
+    }
+    
+    fclose(file);
+    return TRUE;
+}
+
 static void PrintUsage(const char* progname)
 {
     printf("Usage: %s [options]\n", progname);
@@ -92,14 +204,16 @@ static void PrintUsage(const char* progname)
     printf("  -h, --help          Show this help message\n");
     printf("  -v, --version       Show version information\n");
     printf("  -d, --debug         Enable debug output\n");
+    printf("  -c, --config=<file> Load configuration from file\n");
     printf("  --backend=<type>    Storage backend: memory (default), file\n");
     printf("  --file=<path>       File path for file backend\n");
-    printf("  --size=<bytes>      Backend size in bytes (default: 64MB)\n");
+    printf("  --size=<size>       Backend size (e.g., 64M, 1G)\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s                          # Use memory backend (64MB)\n", progname);
-    printf("  %s --backend=memory --size=134217728  # 128MB memory\n", progname);
-    printf("  %s --backend=file --file=disk.img     # File backend\n", progname);
+    printf("  %s --config=vnvme.conf      # Load from config file\n", progname);
+    printf("  %s --backend=memory --size=128M   # 128MB memory\n", progname);
+    printf("  %s --backend=file --file=disk.img # File backend\n", progname);
     printf("\n");
 }
 
@@ -121,6 +235,28 @@ static BOOL ParseArgs(int argc, char* argv[], PSERVER_CONFIG config)
     config->BackendSize = DEFAULT_BACKEND_SIZE;
     config->FilePath[0] = L'\0';
     
+    // 第一遍: 查找配置文件选项
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--config=", 9) == 0) {
+            const char* configPath = argv[i] + 9;
+            if (!LoadConfigFile(configPath, config)) {
+                fprintf(stderr, "Warning: Cannot load config file '%s'\n", configPath);
+            }
+        }
+        else if (strncmp(argv[i], "-c", 2) == 0) {
+            const char* configPath = NULL;
+            if (argv[i][2] != '\0') {
+                configPath = argv[i] + 2;
+            } else if (i + 1 < argc) {
+                configPath = argv[++i];
+            }
+            if (configPath != NULL && !LoadConfigFile(configPath, config)) {
+                fprintf(stderr, "Warning: Cannot load config file '%s'\n", configPath);
+            }
+        }
+    }
+    
+    // 第二遍: 处理命令行选项 (覆盖配置文件)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             PrintUsage(argv[0]);
@@ -132,6 +268,13 @@ static BOOL ParseArgs(int argc, char* argv[], PSERVER_CONFIG config)
         }
         else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0) {
             config->DebugMode = TRUE;
+            g_DebugMode = TRUE;  // 设置全局调试标志
+        }
+        else if (strncmp(argv[i], "--config=", 9) == 0 || strncmp(argv[i], "-c", 2) == 0) {
+            // 已在第一遍处理
+            if (strncmp(argv[i], "-c", 2) == 0 && argv[i][2] == '\0') {
+                i++;  // 跳过下一个参数
+            }
         }
         else if (strncmp(argv[i], "--backend=", 10) == 0) {
             const char* backend = argv[i] + 10;
@@ -156,7 +299,7 @@ static BOOL ParseArgs(int argc, char* argv[], PSERVER_CONFIG config)
         }
         else if (strncmp(argv[i], "--size=", 7) == 0) {
             const char* sizeStr = argv[i] + 7;
-            config->BackendSize = (SIZE_T)_atoi64(sizeStr);
+            config->BackendSize = ParseSizeString(sizeStr);
             if (config->BackendSize == 0) {
                 fprintf(stderr, "Error: Invalid size '%s'\n", sizeStr);
                 return FALSE;
@@ -167,6 +310,11 @@ static BOOL ParseArgs(int argc, char* argv[], PSERVER_CONFIG config)
             PrintUsage(argv[0]);
             return FALSE;
         }
+    }
+    
+    // 更新全局调试标志
+    if (config->DebugMode) {
+        g_DebugMode = TRUE;
     }
     
     // 验证配置
@@ -320,32 +468,39 @@ static BOOL SendHeartbeat(UINT64 commandsProcessed)
 
 static UINT64 ProcessCommands(void)
 {
-    UINT64 processedCount = 0;
-    
-    // TODO Phase 3: 实现真正的命令处理
-    // 1. 读取 NotifyRing 检查是否有新命令
-    // 2. 遍历各 SQ 检查新命令
-    // 3. 处理 Admin 命令和 I/O 命令
-    // 4. 写入 CQ 完成条目
-    // 5. 调用 IOCTL_VNVME_SUBMIT_COMPLETIONS
-    
-    // 当前: 仅检查共享内存有效性
+    // 调用命令处理器处理所有待处理命令
+    return CmdProcessorRun();
+}
+
+/**
+ * @brief 检查内核是否请求关闭
+ */
+static BOOL IsShutdownRequested(void)
+{
     if (g_ShmAddress != NULL) {
-        PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = VnvmeGetControlBlock(g_ShmAddress);
-        
-        // 验证 magic
-        if (shm->Magic != VNVME_SHARED_MEMORY_MAGIC) {
-            if (g_Config.DebugMode) {
-                static BOOL warned = FALSE;
-                if (!warned) {
-                    printf("DEBUG: Waiting for shared memory initialization...\n");
-                    warned = TRUE;
-                }
-            }
-        }
+        PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = 
+            (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)g_ShmAddress;
+        return shm->ShutdownRequested != 0;
     }
+    return FALSE;
+}
+
+/**
+ * @brief 通知内核用户态关闭完成
+ */
+static void NotifyShutdownComplete(void)
+{
+    DWORD bytesReturned;
     
-    return processedCount;
+    // 通过心跳 IOCTL 或专用 IOCTL 通知内核
+    // 这里使用心跳标记完成
+    DeviceIoControl(
+        g_DriverHandle,
+        IOCTL_VNVME_HEARTBEAT,
+        NULL, 0,
+        NULL, 0,
+        &bytesReturned,
+        NULL);
 }
 
 /*===========================================================================
@@ -360,6 +515,13 @@ static void MainLoop(void)
     printf("Entering main loop (Ctrl+C to exit)...\n\n");
     
     while (g_Running) {
+        // 检查内核是否请求关闭
+        if (IsShutdownRequested()) {
+            printf("\nKernel requested shutdown...\n");
+            g_Running = FALSE;
+            break;
+        }
+        
         // 处理命令
         UINT64 processed = ProcessCommands();
         totalCommands += processed;
@@ -380,6 +542,15 @@ static void MainLoop(void)
         // TODO: 使用事件等待替代轮询
         Sleep(POLLING_INTERVAL_MS);
     }
+    
+    // 刷新后端存储
+    if (g_Backend != NULL) {
+        printf("Flushing storage backend...\n");
+        BackendFlush(g_Backend);
+    }
+    
+    // 通知内核关闭完成
+    NotifyShutdownComplete();
     
     printf("\nShutdown complete. Total commands processed: %llu\n", totalCommands);
 }
@@ -442,9 +613,28 @@ int main(int argc, char* argv[])
     printf("  Address:    %p\n", g_ShmAddress);
     printf("  Size:       %zu bytes\n", g_ShmSize);
     
+    // 创建存储后端
+    printf("Creating storage backend...\n");
+    g_Backend = BackendCreate(g_Config.BackendType, g_Config.BackendSize, g_Config.FilePath);
+    if (g_Backend == NULL) {
+        fprintf(stderr, "Failed to create storage backend\n");
+        CloseDriver();
+        return 1;
+    }
+    
+    // 初始化命令处理器
+    printf("Initializing command processor...\n");
+    if (!CmdProcessorInit(g_ShmAddress, g_Backend)) {
+        fprintf(stderr, "Failed to initialize command processor\n");
+        BackendDestroy(g_Backend);
+        CloseDriver();
+        return 1;
+    }
+    
     // 通知驱动用户态就绪
     printf("Notifying driver...\n");
     if (!NotifyUserReady()) {
+        BackendDestroy(g_Backend);
         CloseDriver();
         return 1;
     }
@@ -455,6 +645,10 @@ int main(int argc, char* argv[])
     MainLoop();
     
     // 清理
+    if (g_Backend != NULL) {
+        BackendDestroy(g_Backend);
+        g_Backend = NULL;
+    }
     CloseDriver();
     
     return 0;

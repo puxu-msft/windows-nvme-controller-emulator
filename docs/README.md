@@ -140,6 +140,7 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 |------|------|
 | [testing.md](testing.md) | 测试策略和验证方法 |
 | [troubleshooting.md](troubleshooting.md) | 故障排查指南 |
+| [performance-optimization.md](performance-optimization.md) | **性能优化指南** - 轮询优化、事件通知、批处理、内存访问 |
 
 ### 📜 历史记录
 

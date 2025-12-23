@@ -88,9 +88,8 @@ virtual-nvme-driver/
 │   │   │   ══════════════════════════════════════════════════════
 │   │   ├── fdo.c                   # FDO PnP/Power IRP 处理
 │   │   ├── bus.c                   # 子设备枚举、PDO 创建/删除
-│   │   ├── control_device.c        # \\.\VNVMEControl 控制设备
-│   │   ├── shared_memory.c         # 共享内存分配 (内核侧)
-│   │   ├── user_comm.c             # 用户态通信 (IOCTL, 事件通知)
+│   │   ├── ctrl_dev.c              # \\.\VNVMEControl 控制设备 + IOCTL
+│   │   ├── shm.c                   # 共享内存分配 (内核侧)
 │   │   │
 │   │   │   ══════════════════════════════════════════════════════
 │   │   │   PDO 层 - NVMe 仿真 (操作 VNVME_PDO_CONTEXT)
@@ -169,8 +168,8 @@ virtual-nvme-driver/
 │  │  │             │ 创建/管理  │             │                    │  │
 │  │  │ • fdo.c     │──────────▶│ • pdo.c     │                    │  │
 │  │  │ • bus.c     │           │ • pcie.c    │                    │  │
-│  │  │ • user_comm │           │ • bar0.c    │                    │  │
-│  │  │ • shared_mem│◀─────────▶│ • doorbell  │                    │  │
+│  │  │ • ctrl_dev │          │ • bar0.c    │                    │  │
+│  │  │ • shm.c     │◀─────────▶│ • doorbell  │                    │  │
 │  │  │             │ 共享内存   │ • queue.c   │                    │  │
 │  │  └─────────────┘           └─────────────┘                    │  │
 │  │         │                         │                           │  │

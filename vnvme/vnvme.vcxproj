@@ -110,12 +110,12 @@
   
   <ItemGroup>
     <ClCompile Include="vnvme.c" />
-    <ClCompile Include="control_device.c" />
+    <ClCompile Include="ctrl_dev.c" />
     <ClCompile Include="bus.c" />
     <ClCompile Include="pdo.c" />
     <ClCompile Include="bar0.c" />
     <ClCompile Include="pcie_config.c" />
-    <ClCompile Include="shared_memory.c" />
+    <ClCompile Include="shm.c" />
     <ClCompile Include="doorbell.c" />
     <ClCompile Include="queue.c" />
     <ClCompile Include="prp.c" />

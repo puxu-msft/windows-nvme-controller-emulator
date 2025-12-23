@@ -231,9 +231,9 @@ vnvme.sys 在物理上是单一驱动，但在逻辑上分为两层：
 │  │                         │   │                                 │  │
 │  │ • fdo.c     FDO PnP     │   │ • pdo.c       PDO PnP/资源      │  │
 │  │ • bus.c     子设备枚举  │──▶│ • pcie_config PCIe 配置空间     │  │
-│  │ • user_comm 用户态 IOCTL│   │ • bar0.c      BAR0/寄存器       │  │
-│  │ • shared_mem 共享内存   │◀─▶│ • doorbell.c  轮询引擎          │  │
-│  │ • control_dev 控制设备  │   │ • queue.c     队列管理          │  │
+│  │ • ctrl_dev  控制设备   │   │ • bar0.c      BAR0/寄存器       │  │
+│  │ • shm.c      共享内存   │◀─▶│ • doorbell.c  轮询引擎          │  │
+│  │                         │   │ • queue.c     队列管理          │  │
 │  │                         │   │ • prp.c       PRP 解析          │  │
 │  └─────────────────────────┘   └─────────────────────────────────┘  │
 │           │                                │                        │

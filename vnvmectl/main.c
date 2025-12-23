@@ -127,9 +127,9 @@ static int CmdStatus(void)
     printf("  User PID: %u\n", status.UserPid);
     printf("\n");
     printf("Shared Memory:\n");
-    printf("  Mapped: %s\n", status.SharedMemoryMapped ? "Yes" : "No");
-    printf("  Size: %u bytes (%.2f MB)\n", status.SharedMemorySize,
-           (double)status.SharedMemorySize / (1024.0 * 1024.0));
+    printf("  Mapped: %s\n", status.ShmMapped ? "Yes" : "No");
+    printf("  Size: %u bytes (%.2f MB)\n", status.ShmSize,
+           (double)status.ShmSize / (1024.0 * 1024.0));
     printf("\n");
     printf("Devices:\n");
     printf("  Controller Count: %u\n", status.ControllerCount);

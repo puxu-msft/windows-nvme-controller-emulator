@@ -89,7 +89,7 @@
 - [x] 配置 WDF 设备属性和 PnP 回调
 - [x] 实现 `VNVME_FDO_CONTEXT` 初始化
 
-#### 1.3 控制设备 (control_device.c)
+#### 1.3 控制设备 (ctrl_dev.c)
 - [x] 实现 `VnvmeCreateControlDevice()` - 创建 `\\.\VNVMEControl`
 - [x] 实现 `VnvmeEvtIoDeviceControl()` - IOCTL 分发
 - [x] 实现基本 IOCTL: `IOCTL_VNVME_GET_VERSION`
@@ -212,13 +212,13 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 
 ### 详细任务
 
-#### 3.1 共享内存 (shared_memory.c)
-- [x] 实现 `VnvmeAllocateSharedMemory()` - 分配 64MB
+#### 3.1 共享内存 (shm.c)
+- [x] 实现 `VnvmeAllocateShm()` - 分配 64MB
 - [x] 初始化控制块 (魔数、版本、指针)
 - [x] 初始化提交环和完成环
 - [x] 初始化数据缓冲区
 
-#### 3.2 用户态映射 (control_device.c)
+#### 3.2 用户态映射 (ctrl_dev.c)
 - [x] 实现 `IOCTL_VNVME_MAP_SHARED_MEMORY` - 映射到用户空间
 - [x] 实现 `IOCTL_VNVME_USER_READY` - 用户态就绪通知
 - [~] 实现 `IOCTL_VNVME_GET_COMMAND_EVENT` - 获取事件句柄 (框架已有，TODO)
@@ -245,6 +245,40 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 - [ ] 实现心跳定时器
 - [ ] 实现用户态崩溃检测
 - [ ] 实现优雅关闭处理
+
+#### 3.6 优雅关闭 (Graceful Shutdown)
+
+**目标**: 驱动卸载时安全停止所有操作，避免数据丢失和蓝屏
+
+**内核侧 (vnvme.sys)**:
+- [ ] 添加 `ShutdownEvent` 到 FDO 上下文
+- [ ] 添加 `ShutdownRequested` 标志
+- [ ] 添加 `ControlQueue` 用于等待 IOCTL 完成
+- [ ] 在 `VnvmeEvtDeviceD0Exit` 中触发关闭事件
+- [ ] 使用 `WdfIoQueueStop()` 停止接收新请求
+- [ ] 等待所有待处理命令完成 (超时 5 秒)
+- [ ] 清理共享内存和 PDO
+
+**用户态侧 (vnvme-server)**:
+- [ ] 监听 `ShutdownEvent` 或检测 `ShutdownRequested` 标志
+- [ ] 完成所有正在处理的命令
+- [ ] 刷新后端存储缓存
+- [ ] 发送 `IOCTL_VNVME_USER_SHUTDOWN` 通知内核
+- [ ] 安全退出主循环
+
+**关闭序列**:
+```
+1. 用户请求卸载驱动 (devcon remove / pnputil)
+2. WDF 调用 VnvmeEvtDeviceD0Exit()
+3. 内核设置 ShutdownRequested = TRUE
+4. 内核 KeSetEvent(ShutdownEvent)
+5. 用户态检测到关闭事件
+6. 用户态完成所有待处理命令
+7. 用户态发送 IOCTL_VNVME_USER_SHUTDOWN
+8. 内核等待 ControlQueue 清空
+9. 内核删除 PDO 和释放资源
+10. 驱动卸载完成
+```
 
 ### 验收标准
 ```powershell
@@ -435,10 +469,39 @@ Get-Content X:\test.txt
 - [ ] 识别瓶颈
 
 #### 6.3 性能优化
-- [ ] 优化轮询间隔
-- [ ] 优化批处理大小
-- [ ] 减少内存复制
-- [ ] 优化锁竞争
+
+> 详见 [performance-optimization.md](performance-optimization.md)
+
+**6.3.1 自适应轮询 (1 天)**
+- [ ] 实现 `VNVME_ADAPTIVE_POLL` 结构
+- [ ] 实现 `VnvmeAdjustPollingInterval()` 函数
+- [ ] 添加注册表参数配置 (`PollingIntervalUs`, `AdaptivePolling`)
+- [ ] 测试验证轮询间隔动态调整
+
+**6.3.2 批处理优化 (1 天)**
+- [ ] 实现 `VnvmeFetchCommandBatch()` 批量获取命令
+- [ ] 实现 `VnvmePostCompletionBatch()` 批量投递完成
+- [ ] 用户态服务批处理实现
+- [ ] 测试验证吞吐量提升
+
+**6.3.3 事件通知 (2 天)**
+- [ ] 实现 `VnvmeCreateUserEventHandle()` 创建用户可等待事件
+- [ ] 实现混合通知模式 (低负载事件 + 高负载轮询)
+- [ ] 用户态 `WaitForSingleObject()` 等待实现
+- [ ] IOCTL 返回事件句柄给用户态
+- [ ] 测试验证延迟降低
+
+**6.3.4 内存访问优化 (1 天)**
+- [ ] 缓存行对齐关键结构 (`DECLSPEC_CACHEALIGN`)
+- [ ] 优化内存屏障使用 (减少不必要的屏障)
+- [ ] 预取优化 (`_mm_prefetch`)
+- [ ] 测试验证 CPU 使用率降低
+
+**6.3.5 后端存储优化 (1 天)**
+- [ ] 实现异步 I/O (I/O Completion Port)
+- [ ] 直接 I/O 支持 (`FILE_FLAG_NO_BUFFERING`)
+- [ ] 可选: 内存映射后端
+- [ ] 测试验证后端 I/O 性能
 
 #### 6.4 文档完善
 - [ ] 更新所有文档

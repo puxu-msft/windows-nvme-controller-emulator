@@ -36,7 +36,7 @@ vnvme.sys 内部分为两层，每层有独立的上下文结构：
 
 ### VNVME_FDO_CONTEXT
 
-FDO (Functional Device Object) 上下文，由 `fdo.c`, `bus.c`, `user_comm.c`, `shared_memory.c` 操作。
+FDO (Functional Device Object) 上下文，由 `fdo.c`, `bus.c`, `ctrl_dev.c`, `shm.c` 操作。
 
 ```c
 //
@@ -52,17 +52,17 @@ typedef struct _VNVME_FDO_CONTEXT {
     WDFDEVICE               WdfDevice;          // FDO 设备对象
     WDFCHILDLIST            ChildList;          // PDO 子设备列表
     
-    // === 控制设备 (user_comm.c) ===
+    // === 控制设备 (ctrl_dev.c) ===
     WDFDEVICE               ControlDevice;      // \\.\VNVMEControl
     WDFQUEUE                ControlQueue;       // 控制设备 IOCTL 队列
     
-    // === 用户态通信 (user_comm.c) ===
+    // === 用户态通信 (ctrl_dev.c) ===
     BOOLEAN                 UserModeReady;      // vnvme-server 已连接
     LARGE_INTEGER           LastHeartbeat;      // 最后心跳时间 (KeQuerySystemTime)
     KEVENT                  CommandReadyEvent;  // 通知用户态有新命令
     HANDLE                  UserEventHandle;    // 用户态事件句柄 (用于 IOCTL 返回)
     
-    // === 共享内存 (shared_memory.c) ===
+    // === 共享内存 (shm.c) ===
     PVOID                   SharedMemoryKernel; // 内核虚拟地址
     PVOID                   SharedMemoryUser;   // 用户态映射地址 (映射后填充)
     PHYSICAL_ADDRESS        SharedMemoryPhys;   // 物理地址

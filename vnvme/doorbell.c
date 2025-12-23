@@ -115,55 +115,93 @@ VnvmeEvtPollingTimer(
 
 /**
  * @brief 处理 Doorbell 变化
+ * 
+ * 检测 stornvme 对 Doorbell 寄存器的写入，处理新提交的命令。
  */
 VOID
 VnvmeProcessDoorbells(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     )
 {
-    ULONG queueId;
-    ULONG doorbellOffset;
+    ULONG currentCC;
     ULONG sqTail;
     ULONG cqHead;
-    PULONG doorbellReg;
+    BOOLEAN hadWork = FALSE;
     
-    if (PdoContext->Bar0VirtAddr == NULL) {
+    if (PdoContext->Doorbells == NULL || PdoContext->Registers == NULL) {
         return;
     }
     
-    /* TODO: Phase 4 - 实现完整的 Doorbell 轮询逻辑 */
-    /*
-     * 对每个队列：
-     * 1. 读取 SQ Tail Doorbell
-     * 2. 如果有变化，处理新的命令
-     * 3. 读取 CQ Head Doorbell  
-     * 4. 如果有变化，更新完成队列状态
-     */
-    
-    /* 处理 Admin 队列 (Queue ID = 0) */
-    queueId = 0;
-    doorbellOffset = NVME_DOORBELL_OFFSET(queueId, 0); /* DSTRD = 0 */
-    
-    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + doorbellOffset);
-    sqTail = *doorbellReg & 0xFFFF;
-    
-    if (sqTail != PdoContext->LastAdminSqTail) {
-        TRACE_INFO("VnvmeProcessDoorbells: Admin SQ tail changed %u -> %u",
-                   PdoContext->LastAdminSqTail, sqTail);
-        PdoContext->LastAdminSqTail = sqTail;
+    /* 1. 检查 CC 寄存器变化 (控制器启用/禁用) */
+    currentCC = PdoContext->Registers->CC.AsUint32;
+    if (currentCC != PdoContext->CachedCC) {
+        TRACE_INFO("VnvmeProcessDoorbells: CC changed 0x%08X -> 0x%08X",
+                   PdoContext->CachedCC, currentCC);
         
-        /* TODO: 处理 Admin 命令 */
+        /* 检测 CC.EN 位变化 */
+        if ((currentCC & 0x1) && !(PdoContext->CachedCC & 0x1)) {
+            /* CC.EN: 0 -> 1, 控制器启用请求 */
+            TRACE_INFO("VnvmeProcessDoorbells: CC.EN set, enabling controller");
+            
+            /* TODO: Phase 4 - 读取 AQA/ASQ/ACQ 并设置 Admin 队列 */
+            
+            /* 设置 CSTS.RDY = 1 表示控制器就绪 */
+            PdoContext->Registers->CSTS.AsUint32 = 0x1;
+            TRACE_INFO("VnvmeProcessDoorbells: CSTS.RDY set (CSTS=0x%08X)",
+                       PdoContext->Registers->CSTS.AsUint32);
+        } else if (!(currentCC & 0x1) && (PdoContext->CachedCC & 0x1)) {
+            /* CC.EN: 1 -> 0, 控制器禁用请求 */
+            TRACE_INFO("VnvmeProcessDoorbells: CC.EN cleared, disabling controller");
+            PdoContext->Registers->CSTS.AsUint32 = 0x0;
+        }
+        
+        PdoContext->CachedCC = currentCC;
+        hadWork = TRUE;
     }
     
-    /* CQ Head Doorbell */
-    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + doorbellOffset + 4);
-    cqHead = *doorbellReg & 0xFFFF;
+    /* 2. 如果控制器未就绪 (CC.EN=0 或 CSTS.RDY=0)，不处理 Doorbell */
+    if (!(PdoContext->Registers->CC.EN && PdoContext->Registers->CSTS.RDY)) {
+        return;
+    }
+    
+    /* 3. 处理 Admin 队列 (Queue ID = 0) */
+    /* Doorbell 布局: SQ0 Tail (0x1000), CQ0 Head (0x1004), SQ1 Tail (0x1008), ... */
+    sqTail = PdoContext->Doorbells[0] & 0xFFFF;  /* Admin SQ Tail */
+    
+    if (sqTail != PdoContext->LastAdminSqTail) {
+        TRACE_INFO("VnvmeProcessDoorbells: Admin SQ tail %u -> %u",
+                   PdoContext->LastAdminSqTail, sqTail);
+        
+        /* TODO: Phase 4 - 调用 VnvmeProcessAdminCommands() */
+        
+        PdoContext->LastAdminSqTail = sqTail;
+        hadWork = TRUE;
+    }
+    
+    /* Admin CQ Head Doorbell */
+    cqHead = PdoContext->Doorbells[1] & 0xFFFF;  /* Admin CQ Head */
     
     if (cqHead != PdoContext->LastAdminCqHead) {
-        TRACE_VERBOSE("VnvmeProcessDoorbells: Admin CQ head changed %u -> %u",
+        TRACE_VERBOSE("VnvmeProcessDoorbells: Admin CQ head %u -> %u",
                       PdoContext->LastAdminCqHead, cqHead);
         PdoContext->LastAdminCqHead = cqHead;
     }
     
     /* TODO: Phase 5 - 处理 I/O 队列的 Doorbell */
+    /*
+     * for (i = 0; i < IoQueueCount; i++) {
+     *     sqTail = Doorbells[2 + i * 2];      // I/O SQ Tail
+     *     cqHead = Doorbells[2 + i * 2 + 1];  // I/O CQ Head
+     *     ...
+     * }
+     */
+    
+    UNREFERENCED_PARAMETER(hadWork);
+    /* TODO: Phase 4 - 自适应轮询间隔
+     * if (hadWork) {
+     *     PollingIntervalUs = max(PollingIntervalUs / 2, 10);
+     * } else {
+     *     PollingIntervalUs = min(PollingIntervalUs * 2, 1000);
+     * }
+     */
 }

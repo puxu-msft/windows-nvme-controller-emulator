@@ -115,15 +115,20 @@ VnvmeEvtDeviceAdd(
     fdoContext = VnvmeGetFdoContext(device);
     RtlZeroMemory(fdoContext, sizeof(VNVME_FDO_CONTEXT));
     
+    /* 设置标识 */
+    fdoContext->IsFdo = TRUE;
+    fdoContext->Signature = VNVME_FDO_SIGNATURE;
+    
     fdoContext->Device = device;
     fdoContext->NextControllerId = 1;
+    fdoContext->MaxControllers = VNVME_MAX_CONTROLLERS;
     
     /* 初始化子设备链表 */
     InitializeListHead(&fdoContext->ChildDeviceList);
     KeInitializeSpinLock(&fdoContext->ChildDeviceListLock);
     
     /* 初始化事件 */
-    KeInitializeEvent(&fdoContext->CommandEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&fdoContext->CommandReadyEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&fdoContext->UserReadyEvent, NotificationEvent, FALSE);
     
     /* 保存全局指针 */
@@ -163,9 +168,9 @@ VnvmeEvtDevicePrepareHardware(
     TRACE_INFO("VnvmeEvtDevicePrepareHardware: Allocating shared memory");
     
     /* 分配共享内存 */
-    status = VnvmeAllocateSharedMemory(fdoContext);
+    status = VnvmeAllocateShm(fdoContext);
     if (!NT_SUCCESS(status)) {
-        TRACE_ERROR("VnvmeEvtDevicePrepareHardware: VnvmeAllocateSharedMemory failed, status=0x%08X", status);
+        TRACE_ERROR("VnvmeEvtDevicePrepareHardware: VnvmeAllocateShm failed, status=0x%08X", status);
         return status;
     }
     
@@ -189,7 +194,7 @@ VnvmeEvtDeviceReleaseHardware(
     TRACE_INFO("VnvmeEvtDeviceReleaseHardware: Releasing resources");
     
     /* 释放共享内存 */
-    VnvmeFreeSharedMemory(fdoContext);
+    VnvmeFreeShm(fdoContext);
     
     TRACE_INFO("VnvmeEvtDeviceReleaseHardware: Resources released");
     return STATUS_SUCCESS;

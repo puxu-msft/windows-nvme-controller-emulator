@@ -23,10 +23,15 @@
 
 #define VNVME_POOL_TAG              'MVNV'  // VNVM
 #define VNVME_MAX_CONTROLLERS       16
+#define VNVME_MAX_NAMESPACES        16              // 每个控制器最大命名空间数
 #define VNVME_BAR0_SIZE             (64 * 1024)     // 64 KB
 #define VNVME_PCIE_CONFIG_SIZE      4096            // 4 KB PCIe配置空间
 #define VNVME_MAX_QUEUES            64
 #define VNVME_POLLING_INTERVAL_MS   1               // 轮询间隔 (毫秒)
+
+/* 签名常量 */
+#define VNVME_FDO_SIGNATURE         'FDOV'
+#define VNVME_PDO_SIGNATURE         'PDOV'
 
 /* Doorbell 偏移计算 */
 #define NVME_DOORBELL_OFFSET(qid, dstrd) \
@@ -37,29 +42,38 @@
  *===========================================================================*/
 
 typedef struct _VNVME_FDO_CONTEXT {
+    /* 标识 */
+    BOOLEAN IsFdo;                      /* TRUE = FDO, FALSE = PDO */
+    ULONG Signature;                    /* 'FDOV' */
+    
     /* WDF 设备对象 */
     WDFDEVICE Device;
     WDFDEVICE ControlDevice;
+    /* WDFQUEUE ControlQueue; */        /* TODO: 优雅关闭时需要保存队列句柄 */
     
     /* 共享内存 */
-    PVOID SharedMemory;
-    PHYSICAL_ADDRESS SharedMemoryPhysical;
-    SIZE_T SharedMemorySize;
-    PMDL SharedMemoryMdl;
-    PVOID SharedMemoryUserVa;
+    PVOID ShmKernelVirtAddr;            /* 内核虚拟地址 */
+    PHYSICAL_ADDRESS ShmPhysAddr;       /* 物理地址 */
+    SIZE_T ShmSize;
+    PMDL ShmMdl;
+    PVOID ShmUserVirtAddr;              /* 用户态虚拟地址 */
     
     /* 子设备管理 */
     LIST_ENTRY ChildDeviceList;
     KSPIN_LOCK ChildDeviceListLock;
-    ULONG ChildDeviceCount;
+    ULONG ChildDeviceCount;             /* 当前控制器数量 */
     ULONG NextControllerId;
+    ULONG MaxControllers;               /* 最大控制器数量 */
     
     /* 用户态通信 */
-    KEVENT CommandEvent;
-    KEVENT UserReadyEvent;
-    volatile BOOLEAN UserReady;
+    KEVENT CommandReadyEvent;           /* 通知用户态有新命令就绪 */
+    KEVENT UserReadyEvent;              /* 用户态服务就绪事件 */
+    /* KEVENT ShutdownEvent; */         /* TODO: 通知用户态关闭 */
+    volatile BOOLEAN UserReady;         /* 用户态服务是否就绪 */
+    /* volatile BOOLEAN ShutdownRequested; */ /* TODO: 关闭请求标志 */
     ULONG UserPid;
     LARGE_INTEGER LastHeartbeat;
+    /* HANDLE UserEventHandle; */       /* TODO: 用户可等待事件句柄 (性能优化) */
     
     /* 统计 */
     volatile LONG64 CommandsProcessed;
@@ -83,6 +97,10 @@ typedef struct _VNVME_QUEUE_STATE {
 } VNVME_QUEUE_STATE, *PVNVME_QUEUE_STATE;
 
 typedef struct _VNVME_PDO_CONTEXT {
+    /* 标识 */
+    BOOLEAN IsFdo;                      /* FALSE = PDO */
+    ULONG Signature;                    /* 'PDOV' */
+    
     /* WDF 设备对象 */
     WDFDEVICE Device;
     WDFDEVICE ParentFdo;
@@ -96,6 +114,8 @@ typedef struct _VNVME_PDO_CONTEXT {
     
     /* NVMe 寄存器指针 */
     volatile PNVME_CONTROLLER_REGISTERS Registers;
+    volatile PULONG Doorbells;          /* Doorbell 区域基地址 */
+    ULONG CachedCC;                     /* CC 寄存器缓存 (检测变化) */
     
     /* PCIe 配置空间 */
     PVOID PcieConfig;
@@ -116,6 +136,7 @@ typedef struct _VNVME_PDO_CONTEXT {
     VNVME_QUEUE_STATE IoSq[VNVME_MAX_QUEUES];
     VNVME_QUEUE_STATE IoCq[VNVME_MAX_QUEUES];
     ULONG IoQueueCount;
+    ULONG MaxIoQueues;                  /* 最大 I/O 队列数 */
     
     /* Doorbell 轮询 */
     WDFTIMER PollingTimer;
@@ -123,9 +144,9 @@ typedef struct _VNVME_PDO_CONTEXT {
     volatile BOOLEAN PollingEnabled;
     volatile BOOLEAN PollingActive;
     
-    /* 控制器状态 */
-    volatile BOOLEAN ControllerEnabled;
-    volatile BOOLEAN ControllerReady;
+    /* 命名空间 */
+    ULONG NamespaceCount;               /* 活动命名空间数量 */
+    ULONGLONG NamespaceSizes[VNVME_MAX_NAMESPACES]; /* 每个命名空间大小 (字节) */
     
     /* 链表节点 */
     LIST_ENTRY ListEntry;
@@ -133,6 +154,8 @@ typedef struct _VNVME_PDO_CONTEXT {
     /* 统计 */
     volatile LONG64 AdminCommandsProcessed;
     volatile LONG64 IoCommandsProcessed;
+    volatile LONG64 BytesRead;          /* 读取字节数 */
+    volatile LONG64 BytesWritten;       /* 写入字节数 */
     
 } VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
 
@@ -157,7 +180,7 @@ EVT_WDF_DEVICE_D0_ENTRY VnvmeEvtDeviceD0Entry;
 EVT_WDF_DEVICE_D0_EXIT VnvmeEvtDeviceD0Exit;
 
 /*===========================================================================
- * 函数声明 - control_device.c
+ * 函数声明 - ctrl_dev.c
  *===========================================================================*/
 
 NTSTATUS
@@ -218,27 +241,27 @@ VnvmeWriteBar0Register64(
     );
 
 /*===========================================================================
- * 函数声明 - shared_memory.c
+ * 函数声明 - shm.c
  *===========================================================================*/
 
 NTSTATUS
-VnvmeAllocateSharedMemory(
+VnvmeAllocateShm(
     _In_ PVNVME_FDO_CONTEXT FdoContext
     );
 
 VOID
-VnvmeFreeSharedMemory(
+VnvmeFreeShm(
     _In_ PVNVME_FDO_CONTEXT FdoContext
     );
 
 NTSTATUS
-VnvmeMapSharedMemoryToUser(
+VnvmeMapShmToUser(
     _In_ PVNVME_FDO_CONTEXT FdoContext,
     _Out_ PVOID* UserAddress
     );
 
 VOID
-VnvmeUnmapSharedMemoryFromUser(
+VnvmeUnmapShmFromUser(
     _In_ PVNVME_FDO_CONTEXT FdoContext
     );
 

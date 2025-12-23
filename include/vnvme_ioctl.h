@@ -120,8 +120,8 @@ typedef struct _VNVME_GET_STATUS_OUTPUT {
     UINT32 NamespaceCount;              // 命名空间数量
     
     /* 共享内存状态 */
-    UINT32 SharedMemoryMapped;          // 共享内存是否已映射 (0/1)
-    UINT32 SharedMemorySize;            // 共享内存大小 (字节)
+    UINT32 ShmMapped;                   // 共享内存是否已映射 (0/1)
+    UINT32 ShmSize;                     // 共享内存大小 (字节)
     
     /* 用户态连接 */
     UINT32 UserReady;                   // 用户态是否就绪 (0/1)

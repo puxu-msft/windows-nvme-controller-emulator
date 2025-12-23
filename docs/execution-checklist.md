@@ -320,11 +320,11 @@
   #endif // _VNVME_H_
   ```
 
-### 1.3 实现控制设备 (control_device.c)
+### 1.3 实现控制设备 (ctrl_dev.c)
 
 - [ ] **1.3.1** 创建控制设备
   ```c
-  // vnvme/control_device.c
+  // vnvme/ctrl_dev.c
   #include "vnvme.h"
   
   NTSTATUS VnvmeCreateControlDevice(WDFDEVICE Device)
@@ -808,16 +808,16 @@
 > **目标**: vnvme-server 能连接并接收命令
 > **预计时间**: 2 周
 
-### 3.1 共享内存分配 (shared_memory.c)
+### 3.1 共享内存分配 (shm.c)
 
-- [ ] **3.1.1** 创建 shared_memory.c
+- [ ] **3.1.1** 创建 shm.c
   ```c
-  // vnvme/shared_memory.c - 共享内存管理
+  // vnvme/shm.c - 共享内存管理
   ```
 
 - [ ] **3.1.2** 实现分配函数
   ```c
-  NTSTATUS VnvmeAllocateSharedMemory(PVNVME_FDO_CONTEXT FdoContext);
+  NTSTATUS VnvmeAllocateShm(PVNVME_FDO_CONTEXT FdoContext);
   ```
 
 - [ ] **3.1.3** 初始化控制块
@@ -884,13 +884,26 @@
   DWORD WINAPI HeartbeatThreadProc(LPVOID lpParam);
   ```
 
+### 3.4 优雅关闭
+
+- [ ] **3.4.1** 内核: 添加 `ShutdownEvent` 到 FDO 上下文
+- [ ] **3.4.2** 内核: 添加 `ShutdownRequested` 标志
+- [ ] **3.4.3** 内核: 保存 `ControlQueue` 句柄
+- [ ] **3.4.4** 内核: `VnvmeEvtDeviceD0Exit` 触发关闭
+- [ ] **3.4.5** 内核: 使用 `WdfIoQueueStop()` 等待请求完成
+- [ ] **3.4.6** 用户态: 监听关闭事件/标志
+- [ ] **3.4.7** 用户态: 完成待处理命令
+- [ ] **3.4.8** 用户态: 刷新后端缓存
+- [ ] **3.4.9** 用户态: 发送 `IOCTL_VNVME_USER_SHUTDOWN`
+
 ### Phase 3 验收
 
-- [ ] **3.4.1** vnvme-server 启动无错误
-- [ ] **3.4.2** 共享内存映射成功
-- [ ] **3.4.3** USER_READY 发送成功
-- [ ] **3.4.4** 心跳正常 (连续运行 5 分钟)
-- [ ] **3.4.5** 优雅关闭正常
+- [ ] **3.5.1** vnvme-server 启动无错误
+- [ ] **3.5.2** 共享内存映射成功
+- [ ] **3.5.3** USER_READY 发送成功
+- [ ] **3.5.4** 心跳正常 (连续运行 5 分钟)
+- [ ] **3.5.5** 优雅关闭正常 (devcon remove 无蓝屏)
+- [ ] **3.5.6** 反复加载/卸载 10 次无错误
 
 ---
 
@@ -1147,13 +1160,42 @@
 - [ ] **6.2.1** CrystalDiskMark 测试
 - [ ] **6.2.2** fio 测试
 - [ ] **6.2.3** 记录基线性能
+- [ ] **6.2.4** 延迟分析 (识别瓶颈)
 
 ### 6.3 性能优化
 
-- [ ] **6.3.1** 优化轮询间隔
-- [ ] **6.3.2** 批处理优化
-- [ ] **6.3.3** 减少内存复制
-- [ ] **6.3.4** 锁优化
+> 详见 [performance-optimization.md](performance-optimization.md)
+
+**6.3.1 自适应轮询 (1 天)**
+- [ ] **6.3.1.1** 实现 `VNVME_ADAPTIVE_POLL` 结构
+- [ ] **6.3.1.2** 实现 `VnvmeAdjustPollingInterval()` 函数
+- [ ] **6.3.1.3** 添加注册表参数配置
+- [ ] **6.3.1.4** 测试验证
+
+**6.3.2 批处理优化 (1 天)**
+- [ ] **6.3.2.1** 实现 `VnvmeFetchCommandBatch()`
+- [ ] **6.3.2.2** 实现 `VnvmePostCompletionBatch()`
+- [ ] **6.3.2.3** 用户态批处理实现
+- [ ] **6.3.2.4** 测试验证
+
+**6.3.3 事件通知 (2 天)**
+- [ ] **6.3.3.1** 实现 `VnvmeCreateUserEventHandle()`
+- [ ] **6.3.3.2** 实现混合通知模式
+- [ ] **6.3.3.3** 用户态等待实现
+- [ ] **6.3.3.4** IOCTL 返回事件句柄
+- [ ] **6.3.3.5** 测试验证
+
+**6.3.4 内存访问优化 (1 天)**
+- [ ] **6.3.4.1** 缓存行对齐关键结构
+- [ ] **6.3.4.2** 优化内存屏障使用
+- [ ] **6.3.4.3** 预取优化
+- [ ] **6.3.4.4** 测试验证
+
+**6.3.5 后端存储优化 (1 天)**
+- [ ] **6.3.5.1** 实现异步 I/O (IOCP)
+- [ ] **6.3.5.2** 直接 I/O 支持
+- [ ] **6.3.5.3** 可选: 内存映射后端
+- [ ] **6.3.5.4** 测试验证
 
 ### 6.4 文档和发布
 

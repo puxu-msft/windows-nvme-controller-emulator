@@ -1,5 +1,5 @@
 /**
- * @file control_device.c
+ * @file ctrl_dev.c
  * @brief 控制设备实现
  * 
  * 创建 \\Device\\VNVMEControl 设备，处理用户态 IOCTL 请求。
@@ -26,7 +26,7 @@ VnvmeHandleGetStatus(
     );
 
 static NTSTATUS
-VnvmeHandleMapSharedMemory(
+VnvmeHandleMapShm(
     _In_ WDFREQUEST Request,
     _In_ size_t OutputBufferLength,
     _Out_ size_t* BytesReturned
@@ -190,7 +190,7 @@ VnvmeEvtIoDeviceControl(
             break;
         
         case IOCTL_VNVME_MAP_SHARED_MEMORY:
-            status = VnvmeHandleMapSharedMemory(Request, OutputBufferLength, &bytesReturned);
+            status = VnvmeHandleMapShm(Request, OutputBufferLength, &bytesReturned);
             break;
         
         case IOCTL_VNVME_USER_READY:
@@ -297,6 +297,8 @@ VnvmeHandleGetStatus(
         VNVME_USER_STATUS_READY : VNVME_USER_STATUS_NOT_CONNECTED;
     output->ControllerCount = fdoContext->ChildDeviceCount;
     output->NamespaceCount = 0;  /* TODO: 计算命名空间数 */
+    output->ShmMapped = (fdoContext->ShmUserVirtAddr != NULL) ? 1 : 0;
+    output->ShmSize = (UINT32)fdoContext->ShmSize;
     output->CommandsProcessed = fdoContext->CommandsProcessed;
     output->ErrorCount = fdoContext->ErrorCount;
     
@@ -308,7 +310,7 @@ VnvmeHandleGetStatus(
  * @brief 处理 IOCTL_VNVME_MAP_SHARED_MEMORY
  */
 static NTSTATUS
-VnvmeHandleMapSharedMemory(
+VnvmeHandleMapShm(
     _In_ WDFREQUEST Request,
     _In_ size_t OutputBufferLength,
     _Out_ size_t* BytesReturned
@@ -341,26 +343,26 @@ VnvmeHandleMapSharedMemory(
     }
     
     /* 如果已经映射，先取消映射 */
-    if (fdoContext->SharedMemoryUserVa != NULL) {
-        VnvmeUnmapSharedMemoryFromUser(fdoContext);
+    if (fdoContext->ShmUserVirtAddr != NULL) {
+        VnvmeUnmapShmFromUser(fdoContext);
     }
     
     /* 映射到用户空间 */
-    status = VnvmeMapSharedMemoryToUser(fdoContext, &userAddress);
+    status = VnvmeMapShmToUser(fdoContext, &userAddress);
     if (!NT_SUCCESS(status)) {
-        TRACE_ERROR("VnvmeHandleMapSharedMemory: VnvmeMapSharedMemoryToUser failed, status=0x%08X", status);
+        TRACE_ERROR("VnvmeHandleMapShm: VnvmeMapShmToUser failed, status=0x%08X", status);
         return status;
     }
     
     output->UserAddress = userAddress;
-    output->ActualSize = (UINT32)fdoContext->SharedMemorySize;
+    output->ActualSize = (UINT32)fdoContext->ShmSize;
     output->Reserved = 0;
     output->CommandEventHandle = NULL;  /* TODO: 创建用户可见的事件句柄 */
     
     *BytesReturned = sizeof(VNVME_MAP_SHARED_MEMORY_OUTPUT);
     
-    TRACE_INFO("VnvmeHandleMapSharedMemory: Mapped at %p, size=%llu", 
-               userAddress, fdoContext->SharedMemorySize);
+    TRACE_INFO("VnvmeHandleMapShm: Mapped at %p, size=%llu", 
+               userAddress, fdoContext->ShmSize);
     return STATUS_SUCCESS;
 }
 

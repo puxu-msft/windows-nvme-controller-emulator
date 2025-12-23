@@ -2,6 +2,62 @@
 
 本文档详细描述 vnvme-server.exe 的实现细节，包括架构设计、模块划分、核心算法和配置。
 
+---
+
+## 何时需要 vnvme-server？
+
+> **重要**: vnvme-server.exe 仅在 **用户态命令模式** 下需要。
+
+本项目采用**双模式架构**，通过 `VNVME_DEFAULT_CMD_MODE` 宏切换：
+
+| 模式 | 宏值 | vnvme-server | 使用场景 |
+|------|------|--------------|----------|
+| **内核命令模式** | `VNVME_CMD_MODE_KERNEL` | ❌ 不需要 | 生产环境、性能优先 |
+| **用户态命令模式** | `VNVME_CMD_MODE_USER` | ✅ 必须运行 | 开发调试、功能扩展 |
+
+### 模式对比
+
+```
+【内核命令模式】                        【用户态命令模式】
+                                        
+stornvme.sys                            stornvme.sys
+     │                                       │
+     ▼                                       ▼
+vnvme.sys                               vnvme.sys
+┌────────────────┐                      ┌────────────────┐
+│ admin_cmd.c    │                      │ user_forward.c │──┐
+│ io_cmd.c       │                      │ (转发到 SHM)   │  │
+│ storage.c      │                      └────────────────┘  │
+│ (内核态后端)    │                                          │
+└────────────────┘                      ┌────────────────┐  │
+                                        │ vnvme-server   │◀─┘
+❌ 无用户态服务                          │  .exe          │
+                                        │ ┌────────────┐ │
+优点:                                   │ │ command_   │ │
+• 最低延迟 (~1μs)                       │ │ processor  │ │
+• 无进程依赖                            │ │ backend    │ │
+• 系统级稳定性                          │ └────────────┘ │
+                                        └────────────────┘
+缺点:                                   
+• 内核开发复杂                          优点:
+• 后端功能受限                          • 灵活性高 (丰富后端)
+• 调试困难                              • 调试方便 (用户态)
+• 蓝屏风险                              • 崩溃不影响系统
+```
+
+### 运行配置
+
+```powershell
+# 内核命令模式 - 直接加载驱动即可
+pnputil /add-driver vnvme.inf /install
+
+# 用户态命令模式 - 需要同时运行服务
+pnputil /add-driver vnvme.inf /install
+vnvme-server.exe --config vnvme.conf   # 必须运行！
+```
+
+---
+
 ## 实现状态
 
 > **✅ 已实现**: 用户态服务核心功能 (v1 - 紧凑版)

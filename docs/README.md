@@ -116,6 +116,8 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 | [inf-guide.md](inf-guide.md) | INF 文件详解、安装/卸载脚本、测试签名 |
 | [data-structures.md](data-structures.md) | 核心数据结构 (FDO/PDO Context、共享内存) |
 | [user-mode-service.md](user-mode-service.md) | vnvme-server.exe 详细设计 |
+| [vnvme-server-modular-design.md](vnvme-server-modular-design.md) | vnvme-server 模块化架构 (v2) |
+| [debugging.md](debugging.md) | 调试基础设施和 WinDbg 使用 |
 
 ### 📚 NVMe/PCIe 规范参考
 

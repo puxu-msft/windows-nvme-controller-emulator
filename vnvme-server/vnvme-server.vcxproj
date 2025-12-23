@@ -119,6 +119,13 @@
     <ClCompile Include="backend_file.c" />
     <ClCompile Include="main_v2.c" />
     -->
+    
+    <!-- v2 命令处理模块 (暂时禁用，待集成后启用) -->
+    <!--
+    <ClCompile Include="admin_commands.c" />
+    <ClCompile Include="io_commands.c" />
+    <ClCompile Include="command_engine.c" />
+    -->
   </ItemGroup>
   
   <ItemGroup>
@@ -129,6 +136,11 @@
     <ClInclude Include="logger.h" />
     <ClInclude Include="driver_comm.h" />
     <ClInclude Include="backend.h" />
+    
+    <!-- v2 命令处理模块头文件 -->
+    <ClInclude Include="admin_commands.h" />
+    <ClInclude Include="io_commands.h" />
+    <ClInclude Include="command_engine.h" />
   </ItemGroup>
   
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

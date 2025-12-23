@@ -58,10 +58,10 @@ VnvmeAllocateSharedMemory(
     controlBlock->ControlBlockSize = VNVME_CONTROL_BLOCK_SIZE;
     
     /* 计算环偏移 */
-    controlBlock->CommandRingOffset = VNVME_CONTROL_BLOCK_SIZE;
-    controlBlock->CommandRingSize = VNVME_COMMAND_RING_SIZE;
-    controlBlock->CompletionRingOffset = controlBlock->CommandRingOffset + 
-        sizeof(VNVME_COMMAND_RING);
+    controlBlock->SubmissionRingOffset = VNVME_CONTROL_BLOCK_SIZE;
+    controlBlock->SubmissionRingSize = VNVME_SUBMISSION_RING_SIZE;
+    controlBlock->CompletionRingOffset = controlBlock->SubmissionRingOffset + 
+        sizeof(VNVME_SUBMISSION_RING);
     controlBlock->CompletionRingSize = VNVME_COMPLETION_RING_SIZE;
     
     /* 计算数据缓冲区偏移 */
@@ -76,8 +76,8 @@ VnvmeAllocateSharedMemory(
     
     TRACE_INFO("VnvmeAllocateSharedMemory: Allocated at VA=%p, PA=0x%llX",
                virtualAddress, FdoContext->SharedMemoryPhysical.QuadPart);
-    TRACE_INFO("  CommandRing: offset=0x%X, size=%u",
-               controlBlock->CommandRingOffset, controlBlock->CommandRingSize);
+    TRACE_INFO("  SubmissionRing: offset=0x%X, size=%u",
+               controlBlock->SubmissionRingOffset, controlBlock->SubmissionRingSize);
     TRACE_INFO("  CompletionRing: offset=0x%X, size=%u",
                controlBlock->CompletionRingOffset, controlBlock->CompletionRingSize);
     TRACE_INFO("  DataBuffer: offset=0x%X, size=%u",

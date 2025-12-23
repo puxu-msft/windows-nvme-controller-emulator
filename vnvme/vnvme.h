@@ -28,14 +28,6 @@
 #define VNVME_MAX_QUEUES            64
 #define VNVME_POLLING_INTERVAL_MS   1               // 轮询间隔 (毫秒)
 
-/* 共享内存配置 */
-#define VNVME_SHARED_MEMORY_SIZE    (16 * 1024 * 1024)  // 16 MB
-#define VNVME_SHARED_MEMORY_MAGIC   0x454D564E  // 'NVME'
-#define VNVME_SHARED_MEMORY_VERSION 1
-#define VNVME_CONTROL_BLOCK_SIZE    4096
-#define VNVME_COMMAND_RING_SIZE     1024
-#define VNVME_COMPLETION_RING_SIZE  1024
-
 /* Doorbell 偏移计算 */
 #define NVME_DOORBELL_OFFSET(qid, dstrd) \
     (0x1000 + ((2 * (qid)) * (4 << (dstrd))))
@@ -97,13 +89,10 @@ typedef struct _VNVME_PDO_CONTEXT {
     ULONG ControllerId;
     
     /* BAR0 内存 */
-    PVOID Bar0;
-    PHYSICAL_ADDRESS Bar0Physical;
+    PVOID Bar0VirtAddr;                 /* 内核虚拟地址 */
+    PHYSICAL_ADDRESS Bar0PhysAddr;      /* 物理地址 (报告给 stornvme) */
     SIZE_T Bar0Size;
     PMDL Bar0Mdl;
-    
-    /* BAR0 兼容指针 */
-    PVOID Bar0Virtual;  /* 别名，等于 Bar0 */
     
     /* NVMe 寄存器指针 */
     volatile PNVME_CONTROLLER_REGISTERS Registers;
@@ -182,22 +171,6 @@ VnvmeDeleteControlDevice(
     );
 
 EVT_WDF_IO_QUEUE_IO_DEVICE_CONTROL VnvmeEvtIoDeviceControl;
-
-/*===========================================================================
- * 函数声明 - bus.c
- *===========================================================================*/
-
-NTSTATUS
-VnvmeCreateControllerPdo(
-    _In_ WDFDEVICE ParentDevice,
-    _In_ ULONG ControllerId,
-    _Out_ WDFDEVICE* PdoDevice
-    );
-
-NTSTATUS
-VnvmeDeleteControllerPdo(
-    _In_ PVNVME_PDO_CONTEXT PdoContext
-    );
 
 /*===========================================================================
  * 函数声明 - bar0.c
@@ -422,7 +395,7 @@ VnvmeWritePcieConfig(
     );
 
 /*===========================================================================
- * 函数声明 - bus.c
+ * 函数声明 - bus.c (高层 API - 供 IOCTL 调用)
  *===========================================================================*/
 
 NTSTATUS
@@ -441,6 +414,22 @@ VnvmeDeleteVirtualController(
 NTSTATUS
 VnvmeEnumerateChildren(
     _In_ PVNVME_FDO_CONTEXT FdoContext
+    );
+
+/*===========================================================================
+ * 函数声明 - bus.c (低层实现 - 内部 PDO 操作)
+ *===========================================================================*/
+
+NTSTATUS
+VnvmeCreateControllerPdo(
+    _In_ WDFDEVICE ParentDevice,
+    _In_ ULONG ControllerId,
+    _Out_ WDFDEVICE* PdoDevice
+    );
+
+NTSTATUS
+VnvmeDeleteControllerPdo(
+    _In_ PVNVME_PDO_CONTEXT PdoContext
     );
 
 /*===========================================================================
@@ -466,73 +455,6 @@ VnvmePdoQueryDeviceText(
     _In_ LCID LocaleId,
     _Out_ PWSTR* DeviceText
     );
-
-/*===========================================================================
- * 共享内存结构 (内核/用户态共享)
- *===========================================================================*/
-
-/* 命令环条目 */
-typedef struct _VNVME_COMMAND_RING_ENTRY {
-    UINT32 Opcode;
-    UINT32 ControllerId;
-    UINT32 NamespaceId;
-    UINT32 Flags;
-    UINT64 DataOffset;
-    UINT32 DataLength;
-    UINT32 Reserved;
-    UINT8 CommandData[64];
-} VNVME_COMMAND_RING_ENTRY, *PVNVME_COMMAND_RING_ENTRY;
-
-/* 完成环条目 */
-typedef struct _VNVME_COMPLETION_RING_ENTRY {
-    UINT32 Status;
-    UINT32 ControllerId;
-    UINT32 CommandId;
-    UINT32 Result;
-    UINT8 CompletionData[32];
-} VNVME_COMPLETION_RING_ENTRY, *PVNVME_COMPLETION_RING_ENTRY;
-
-/* 命令环 */
-typedef struct _VNVME_COMMAND_RING {
-    volatile UINT32 Head;
-    volatile UINT32 Tail;
-    UINT32 Size;
-    UINT32 Reserved;
-    VNVME_COMMAND_RING_ENTRY Entries[VNVME_COMMAND_RING_SIZE];
-} VNVME_COMMAND_RING, *PVNVME_COMMAND_RING;
-
-/* 完成环 */
-typedef struct _VNVME_COMPLETION_RING {
-    volatile UINT32 Head;
-    volatile UINT32 Tail;
-    UINT32 Size;
-    UINT32 Reserved;
-    VNVME_COMPLETION_RING_ENTRY Entries[VNVME_COMPLETION_RING_SIZE];
-} VNVME_COMPLETION_RING, *PVNVME_COMPLETION_RING;
-
-/* 共享内存控制块 */
-typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
-    UINT32 Magic;
-    UINT32 Version;
-    UINT32 TotalSize;
-    UINT32 ControlBlockSize;
-    
-    /* 环偏移 */
-    UINT32 CommandRingOffset;
-    UINT32 CommandRingSize;
-    UINT32 CompletionRingOffset;
-    UINT32 CompletionRingSize;
-    
-    /* 数据缓冲区 */
-    UINT32 DataBufferOffset;
-    UINT32 DataBufferSize;
-    
-    /* 状态标志 */
-    volatile UINT32 KernelReady;
-    volatile UINT32 UserReady;
-    volatile UINT32 ErrorCode;
-    UINT32 Reserved[3];
-} VNVME_SHARED_MEMORY_CONTROL_BLOCK, *PVNVME_SHARED_MEMORY_CONTROL_BLOCK;
 
 /*===========================================================================
  * 辅助宏

@@ -237,6 +237,8 @@ VnvmeEvtDriverContextCleanup(
     _In_ WDFOBJECT DriverObject
     )
 {
+    UNREFERENCED_PARAMETER(DriverObject);
+    
     TRACE_INFO("VnvmeEvtDriverContextCleanup: Driver unloading");
     
     /* 删除控制设备 */

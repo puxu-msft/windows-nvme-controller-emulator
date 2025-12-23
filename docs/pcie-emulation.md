@@ -2,14 +2,14 @@
 
 > ⚠️ **架构更新说明 (v2)**
 > 
-> 本文档基于 v1 双驱动架构编写，其中描述了 `vnvme_bus.sys` + `vnvme_emu.sys` 的分离设计。
+> 本文档包含两种代码风格：
 > 
-> **v2 架构已合并为单一驱动 `vnvme.sys`**，该驱动同时实现：
-> - PCIe 总线仿真 (此文档内容)
-> - NVMe 控制器仿真
-> - 用户态通信
+> | 章节 | 代码风格 | 说明 |
+> |------|----------|------|
+> | 概述、设备结构 | WDM 概念示例 | 说明 PCIe 总线概念，使用传统命名 |
+> | 动态设备管理 | WDF 实际实现 | v2 架构的实际函数签名 |
 > 
-> 本文档中关于 **PCIe 配置空间、BAR 资源分配、PDO 创建** 的技术内容仍然适用，只是驱动名称和层次已改变。
+> **实际代码请以 vnvme/*.c 源文件为准。**
 > 
 > 请优先参考：[architecture-v2.md](architecture-v2.md)
 
@@ -792,108 +792,140 @@ pnputil /add-driver vnvme_bus.inf /install
 
 ### 添加虚拟 NVMe 控制器
 
+控制器创建采用分层设计：
+- **高层 API**: `VnvmeCreateVirtualController()` - IOCTL 入口，参数验证
+- **低层实现**: `VnvmeCreateControllerPdo()` - 实际 PDO 创建
+
 ```c
 //
-// IOCTL: 创建新的虚拟 NVMe 控制器
+// 高层 API: IOCTL 入口
 //
-NTSTATUS VnvmeBusCreateController(
-    _In_ PBUS_FDO_EXTENSION BusExt,
-    _In_ PVNVME_CREATE_PARAMS Params,
-    _Out_ PULONG ControllerId)
+NTSTATUS VnvmeCreateVirtualController(
+    _In_ PVNVME_FDO_CONTEXT FdoContext,
+    _In_ ULONG ControllerId,
+    _Out_opt_ WDFDEVICE* ChildDevice)
 {
-    PCHILD_PDO_EXTENSION pdoExt;
-    PDEVICE_OBJECT pdo;
     NTSTATUS status;
+    WDFDEVICE pdoDevice = NULL;
     
-    // 创建子设备 PDO
-    status = IoCreateDevice(
-        BusExt->Self->DriverObject,
-        sizeof(CHILD_PDO_EXTENSION),
-        NULL,
-        FILE_DEVICE_BUS_EXTENDER,
-        FILE_DEVICE_SECURE_OPEN,
-        FALSE,
-        &pdo);
+    // 1. 验证 ControllerId 是否已存在
+    if (VnvmeFindController(FdoContext, ControllerId) != NULL) {
+        return STATUS_OBJECT_NAME_COLLISION;
+    }
+    
+    // 2. 调用低层实现创建 PDO
+    status = VnvmeCreateControllerPdo(
+        FdoContext->WdfDevice,
+        ControllerId,
+        &pdoDevice);
     
     if (!NT_SUCCESS(status)) {
         return status;
     }
     
-    pdoExt = (PCHILD_PDO_EXTENSION)pdo->DeviceExtension;
-    RtlZeroMemory(pdoExt, sizeof(CHILD_PDO_EXTENSION));
+    // 3. 添加到子设备列表
+    // 4. 触发总线重新枚举
     
-    pdoExt->Self = pdo;
-    pdoExt->BusExtension = BusExt;
-    pdoExt->ControllerId = InterlockedIncrement(&BusExt->ChildCount) - 1;
-    pdoExt->Present = TRUE;
+    if (ChildDevice) {
+        *ChildDevice = pdoDevice;
+    }
     
-    // 分配 BAR 空间
-    status = VnvmeAllocateBarSpace(pdoExt);
+    return STATUS_SUCCESS;
+}
+
+//
+// 低层实现: 实际创建 WDF PDO
+//
+NTSTATUS VnvmeCreateControllerPdo(
+    _In_ WDFDEVICE ParentDevice,
+    _In_ ULONG ControllerId,
+    _Out_ WDFDEVICE* PdoDevice)
+{
+    NTSTATUS status;
+    PWDFDEVICE_INIT deviceInit = NULL;
+    WDFDEVICE pdo = NULL;
+    PVNVME_PDO_CONTEXT pdoContext;
+    WDF_OBJECT_ATTRIBUTES attributes;
+    
+    // 分配 PDO 初始化结构
+    deviceInit = WdfPdoInitAllocate(ParentDevice);
+    if (deviceInit == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    // 设置硬件 ID
+    DECLARE_UNICODE_STRING_SIZE(hardwareId, 64);
+    RtlUnicodeStringPrintf(&hardwareId,
+        L"PCI\\VEN_1B36&DEV_0010&SUBSYS_11001AF4&REV_02");
+    WdfPdoInitAssignDeviceID(deviceInit, &hardwareId);
+    
+    // 创建 PDO
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VNVME_PDO_CONTEXT);
+    status = WdfDeviceCreate(&deviceInit, &attributes, &pdo);
     if (!NT_SUCCESS(status)) {
-        IoDeleteDevice(pdo);
+        return status;
+    }
+    
+    // 初始化 PDO 上下文
+    pdoContext = VnvmeGetPdoContext(pdo);
+    pdoContext->ControllerId = ControllerId;
+    pdoContext->ParentFdo = VnvmeGetFdoContext(ParentDevice);
+    
+    // 分配 BAR0
+    status = VnvmeAllocateBar0(pdoContext);
+    if (!NT_SUCCESS(status)) {
+        WdfObjectDelete(pdo);
         return status;
     }
     
     // 初始化 PCIe 配置空间
-    VnvmeInitPciConfig(pdoExt);
+    VnvmeInitializePcieConfig(pdoContext);
     
-    // 添加到子设备列表
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&BusExt->ChildListLock, &oldIrql);
-    InsertTailList(&BusExt->ChildList, &pdoExt->ListEntry);
-    KeReleaseSpinLock(&BusExt->ChildListLock, oldIrql);
-    
-    pdo->Flags &= ~DO_DEVICE_INITIALIZING;
-    
-    // 通知 PnP 管理器重新枚举
-    IoInvalidateDeviceRelations(BusExt->Pdo, BusRelations);
-    
-    *ControllerId = pdoExt->ControllerId;
+    *PdoDevice = pdo;
     return STATUS_SUCCESS;
 }
 ```
 
 ### 移除虚拟 NVMe 控制器
 
+同样采用分层设计：
+- **高层 API**: `VnvmeDeleteVirtualController()` - IOCTL 入口
+- **低层实现**: `VnvmeDeleteControllerPdo()` - 实际 PDO 删除
+
 ```c
 //
-// IOCTL: 删除虚拟 NVMe 控制器
+// 高层 API: IOCTL 入口
 //
-NTSTATUS VnvmeBusDeleteController(
-    _In_ PBUS_FDO_EXTENSION BusExt,
+NTSTATUS VnvmeDeleteVirtualController(
+    _In_ PVNVME_FDO_CONTEXT FdoContext,
     _In_ ULONG ControllerId)
 {
-    PLIST_ENTRY entry;
-    PCHILD_PDO_EXTENSION pdoExt = NULL;
+    PVNVME_PDO_CONTEXT pdoContext;
     
-    KIRQL oldIrql;
-    KeAcquireSpinLock(&BusExt->ChildListLock, &oldIrql);
-    
-    // 查找目标控制器
-    for (entry = BusExt->ChildList.Flink;
-         entry != &BusExt->ChildList;
-         entry = entry->Flink) {
-        PCHILD_PDO_EXTENSION ext = 
-            CONTAINING_RECORD(entry, CHILD_PDO_EXTENSION, ListEntry);
-        if (ext->ControllerId == ControllerId) {
-            pdoExt = ext;
-            break;
-        }
-    }
-    
-    if (pdoExt) {
-        // 标记为不存在，让 PnP 移除
-        pdoExt->Present = FALSE;
-    }
-    
-    KeReleaseSpinLock(&BusExt->ChildListLock, oldIrql);
-    
-    if (!pdoExt) {
+    // 1. 查找控制器
+    pdoContext = VnvmeFindController(FdoContext, ControllerId);
+    if (pdoContext == NULL) {
         return STATUS_NOT_FOUND;
     }
     
-    // 通知 PnP 管理器
-    IoInvalidateDeviceRelations(BusExt->Pdo, BusRelations);
+    // 2. 调用低层删除
+    return VnvmeDeleteControllerPdo(pdoContext);
+}
+
+//
+// 低层实现: 实际删除 PDO
+//
+NTSTATUS VnvmeDeleteControllerPdo(
+    _In_ PVNVME_PDO_CONTEXT PdoContext)
+{
+    // 1. 停止轮询定时器
+    VnvmeStopPollingTimer(PdoContext);
+    
+    // 2. 释放 BAR0 内存
+    VnvmeFreeBar0(PdoContext);
+    
+    // 3. 从子设备列表移除
+    // 4. 通知 PnP 重新枚举
     
     return STATUS_SUCCESS;
 }

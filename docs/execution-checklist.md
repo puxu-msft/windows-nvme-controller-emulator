@@ -601,15 +601,37 @@
   } VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
   ```
 
-- [ ] **2.1.3** 实现 CreateControllerPdo
+- [ ] **2.1.3** 实现高层 API - CreateVirtualController (供 IOCTL 调用)
   ```c
+  // 高层 API - 验证参数，调用低层实现
+  NTSTATUS VnvmeCreateVirtualController(
+      PVNVME_FDO_CONTEXT FdoContext,
+      ULONG ControllerId,
+      WDFDEVICE* ChildDevice)
+  {
+      // 1. 验证 ControllerId 是否已存在
+      // 2. 调用低层 VnvmeCreateControllerPdo()
+      // 3. 添加到 FdoContext->ChildDeviceList
+      // 4. 触发总线重新枚举
+  }
+  ```
+
+- [ ] **2.1.4** 实现低层实现 - CreateControllerPdo (实际创建 PDO)
+  ```c
+  // 低层实现 - 实际创建 WDF PDO
   NTSTATUS VnvmeCreateControllerPdo(
       WDFDEVICE ParentDevice,
       ULONG ControllerId,
-      WDFDEVICE* PdoDevice);
+      WDFDEVICE* PdoDevice)
+  {
+      // 1. WdfPdoInitAllocate()
+      // 2. 设置硬件 ID、兼容 ID
+      // 3. WdfDeviceCreate()
+      // 4. 初始化 VNVME_PDO_CONTEXT
+  }
   ```
 
-- [ ] **2.1.4** 设置硬件 ID
+- [ ] **2.1.5** 设置硬件 ID
   ```c
   // 硬件 ID 格式:
   // PCI\VEN_1B36&DEV_0010&SUBSYS_11001AF4&REV_02
@@ -689,13 +711,14 @@
       
       PdoContext->Registers = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0Virtual;
       
-      return VnvmeInitRegisters(PdoContext);
+      VnvmeInitializeBar0Registers(PdoContext);
+      return STATUS_SUCCESS;
   }
   ```
 
 - [ ] **2.3.3** 初始化 NVMe 寄存器
   ```c
-  NTSTATUS VnvmeInitRegisters(PVNVME_PDO_CONTEXT PdoContext)
+  VOID VnvmeInitializeBar0Registers(PVNVME_PDO_CONTEXT PdoContext)
   {
       PNVME_CONTROLLER_REGISTERS regs = PdoContext->Registers;
       
@@ -929,27 +952,27 @@
 
 - [ ] **4.3.2** 实现 Identify Controller
   ```c
-  void ProcessIdentifyController(PRING_COMMAND cmd, PVOID dataBuffer);
+  void ProcessIdentifyController(PVNVME_SUBMISSION_RING_ENTRY pEntry, PVOID dataBuffer);
   ```
 
 - [ ] **4.3.3** 实现 Identify Namespace
   ```c
-  void ProcessIdentifyNamespace(PRING_COMMAND cmd, PVOID dataBuffer);
+  void ProcessIdentifyNamespace(PVNVME_SUBMISSION_RING_ENTRY pEntry, PVOID dataBuffer);
   ```
 
 - [ ] **4.3.4** 实现 Create I/O CQ
   ```c
-  void ProcessCreateIoCq(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessCreateIoCq(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 - [ ] **4.3.5** 实现 Create I/O SQ
   ```c
-  void ProcessCreateIoSq(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessCreateIoSq(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 - [ ] **4.3.6** 实现 Set Features (Number of Queues)
   ```c
-  void ProcessSetFeatures(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessSetFeatures(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 ### 4.4 I/O 命令处理 (用户态)
@@ -961,17 +984,17 @@
 
 - [ ] **4.4.2** 实现 Read
   ```c
-  void ProcessIoRead(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessIoRead(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 - [ ] **4.4.3** 实现 Write
   ```c
-  void ProcessIoWrite(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessIoWrite(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 - [ ] **4.4.4** 实现 Flush
   ```c
-  void ProcessIoFlush(PRING_COMMAND cmd, PNVME_COMPLETION completion);
+  void ProcessIoFlush(PVNVME_SUBMISSION_RING_ENTRY pEntry, PNVME_COMPLETION completion);
   ```
 
 ### 4.5 PRP 解析

@@ -26,12 +26,12 @@ VnvmeInitializeAdminQueues(
     
     TRACE_INFO("VnvmeInitializeAdminQueues");
     
-    if (PdoContext->Bar0 == NULL) {
+    if (PdoContext->Bar0VirtAddr == NULL) {
         TRACE_ERROR("VnvmeInitializeAdminQueues: BAR0 not allocated");
         return STATUS_INVALID_DEVICE_STATE;
     }
     
-    regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0;
+    regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0VirtAddr;
     
     /* 读取 Admin Queue Attributes */
     aqa = regs->AQA.AsUint32;

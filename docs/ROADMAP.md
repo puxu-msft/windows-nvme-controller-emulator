@@ -2,6 +2,14 @@
 
 本文档定义 Virtual NVMe 项目的开发阶段、里程碑和详细任务列表。
 
+## 任务状态图例
+
+| 标记 | 含义 |
+|------|------|
+| `[x]` | ✅ 已完成 - 功能已完整实现并可用 |
+| `[~]` | 🔶 部分完成 - 框架/存根已有，标记 TODO 待完善 |
+| `[ ]` | ⬜ 未开始 - 尚未实现 |
+
 ## 项目概述
 
 ```
@@ -57,46 +65,50 @@
 - 创建控制设备 `\\.\VNVMEControl`
 
 ### 里程碑
-- [ ] 驱动能够成功加载和卸载
+- [x] 驱动能够成功编译 (vnvme.sys 19KB)
+- [x] 用户态程序可以编译 (vnvmectl.exe, vnvme-server.exe)
+- [ ] 驱动能够成功加载和卸载 (需要测试签名)
 - [ ] 设备管理器中看到 "Virtual NVMe Bus Controller"
 - [ ] 用户态程序可以打开控制设备
 
 ### 详细任务
 
 #### 1.1 项目结构创建
-- [ ] 创建 Visual Studio 解决方案 `vnvme.sln`
-- [ ] 创建 KMDF 驱动项目 `vnvme`
-- [ ] 创建用户态服务项目 `vnvme-server`
-- [ ] 创建命令行工具项目 `vnvmectl`
-- [ ] 创建共享头文件 `include/vnvme_common.h`
-- [ ] 创建 IOCTL 定义 `include/vnvme_ioctl.h`
-- [ ] 创建 NVMe 规范定义 `include/nvme_spec.h`
+- [x] 创建 Visual Studio 解决方案 `vnvme.sln`
+- [x] 创建 KMDF 驱动项目 `vnvme`
+- [x] 创建用户态服务项目 `vnvme-server`
+- [x] 创建命令行工具项目 `vnvmectl`
+- [x] 创建共享头文件 `include/vnvme_common.h`
+- [x] 创建 IOCTL 定义 `include/vnvme_ioctl.h`
+- [x] 创建 NVMe 规范定义 `include/nvme_spec.h`
 
 #### 1.2 内核驱动入口 (vnvme.c)
-- [ ] 实现 `DriverEntry()` - 创建 WDF 驱动对象
-- [ ] 实现 `VnvmeEvtDriverUnload()` - 驱动卸载清理
-- [ ] 实现 `VnvmeEvtDeviceAdd()` - FDO 创建
-- [ ] 配置 WDF 设备属性和 PnP 回调
-- [ ] 实现 `VNVME_FDO_CONTEXT` 初始化
+- [x] 实现 `DriverEntry()` - 创建 WDF 驱动对象
+- [x] 实现 `VnvmeEvtDriverContextCleanup()` - 驱动卸载清理
+- [x] 实现 `VnvmeEvtDeviceAdd()` - FDO 创建
+- [x] 配置 WDF 设备属性和 PnP 回调
+- [x] 实现 `VNVME_FDO_CONTEXT` 初始化
 
 #### 1.3 控制设备 (control_device.c)
-- [ ] 实现 `VnvmeCreateControlDevice()` - 创建 `\\.\VNVMEControl`
-- [ ] 实现 `VnvmeEvtControlDeviceIoControl()` - IOCTL 分发
-- [ ] 实现基本 IOCTL: `IOCTL_VNVME_GET_VERSION`
-- [ ] 实现设备访问控制 (仅管理员)
+- [x] 实现 `VnvmeCreateControlDevice()` - 创建 `\\.\VNVMEControl`
+- [x] 实现 `VnvmeEvtIoDeviceControl()` - IOCTL 分发
+- [x] 实现基本 IOCTL: `IOCTL_VNVME_GET_VERSION`
+- [x] 实现设备访问控制 (仅管理员)
 
 #### 1.4 INF 和构建
-- [ ] 复制 `templates/vnvme.inf` 到项目
-- [ ] 配置驱动签名 (测试证书)
-- [ ] 创建 `scripts/build.ps1`
-- [ ] 创建 `scripts/install.ps1`
-- [ ] 验证驱动加载/卸载
+- [x] 复制 `templates/vnvme.inf` 到项目
+- [x] 配置驱动签名 (测试证书)
+- [x] 创建 `scripts/build.ps1`
+- [x] 创建 `scripts/install.ps1`
+- [ ] 验证驱动加载/卸载 (需要测试签名模式)
 
 #### 1.5 用户态工具骨架 (vnvmectl)
-- [ ] 实现 CLI 框架 (参数解析)
-- [ ] 实现 `vnvmectl version` 命令
-- [ ] 实现设备通信库 `vnvmelib.c`
-- [ ] 验证与控制设备的通信
+- [x] 实现 CLI 框架 (参数解析)
+- [x] 实现 `vnvmectl version` 命令
+- [x] 实现 `vnvmectl status` 命令
+- [x] 实现 `vnvmectl list` 命令
+- [x] 实现 `vnvmectl test` 命令
+- [ ] 验证与控制设备的通信 (需要驱动加载)
 
 ### 验收标准
 ```powershell
@@ -131,38 +143,39 @@ vnvmectl version
 ### 详细任务
 
 #### 2.1 PDO 创建 (bus.c)
-- [ ] 实现 `VnvmeCreateControllerPdo()` - 创建 PDO
+- [~] 实现 `VnvmeCreateVirtualController()` - 高层 API，IOCTL 调用入口 (框架已有，TODO)
+- [ ] 实现 `VnvmeCreateControllerPdo()` - 低层实现，实际创建 PDO
 - [ ] 设置 PDO 硬件 ID: `PCI\VEN_1B36&DEV_0010...`
 - [ ] 设置 PDO 设备描述和位置
-- [ ] 实现 `VNVME_PDO_CONTEXT` 初始化
+- [x] 定义 `VNVME_PDO_CONTEXT` 结构
 - [ ] 设置 PDO 与 FDO 的父子关系
 
 #### 2.2 PDO PnP 处理 (pdo.c)
-- [ ] 实现 `VnvmePdoPnp()` - IRP 分发
-- [ ] 处理 `IRP_MN_QUERY_ID` - 返回硬件/兼容/实例 ID
-- [ ] 处理 `IRP_MN_QUERY_DEVICE_TEXT` - 返回设备描述
+- [x] 创建 pdo.c 文件框架
+- [~] 实现 `VnvmePdoQueryDeviceId()` (框架已有，TODO)
+- [~] 实现 `VnvmePdoQueryDeviceText()` (框架已有，TODO)
 - [ ] 处理 `IRP_MN_QUERY_CAPABILITIES` - 设备能力
 - [ ] 处理 `IRP_MN_QUERY_BUS_INFORMATION` - 总线类型 PCIe
 
 #### 2.3 资源报告 (pdo.c)
 - [ ] 处理 `IRP_MN_QUERY_RESOURCES` - 报告 BAR0 内存资源
 - [ ] 处理 `IRP_MN_QUERY_RESOURCE_REQUIREMENTS` - 资源需求
-- [ ] 处理 `IRP_MN_START_DEVICE` - 分配实际资源
-- [ ] 处理 `IRP_MN_STOP_DEVICE` - 释放资源
+- [~] 处理 `IRP_MN_START_DEVICE` (框架已有，TODO)
+- [~] 处理 `IRP_MN_STOP_DEVICE` (框架已有，TODO)
 
 #### 2.4 BAR0 内存 (bar0.c)
-- [ ] 实现 `VnvmeAllocateBar0()` - 分配 64KB 连续物理内存
-- [ ] 实现 `VnvmeInitRegisters()` - 初始化 NVMe 寄存器
-- [ ] 设置 CAP 寄存器 (能力)
-- [ ] 设置 VS 寄存器 (版本 1.4)
-- [ ] 初始化 CSTS 为 0 (等待 CC.EN)
+- [x] 实现 `VnvmeAllocateBar0()` - 分配 64KB 连续物理内存
+- [x] 实现 `VnvmeInitializeBar0Registers()` - 初始化 NVMe 寄存器
+- [x] 设置 CAP 寄存器 (能力)
+- [x] 设置 VS 寄存器 (版本 1.4)
+- [x] 初始化 CSTS 为 0 (等待 CC.EN)
 
 #### 2.5 PCIe 配置空间 (pcie_config.c)
 - [ ] 实现 `VnvmePdoQueryInterface()` - BUS_INTERFACE_STANDARD
-- [ ] 实现 `VnvmeReadConfig()` - 读取配置空间
-- [ ] 实现 `VnvmeWriteConfig()` - 写入配置空间 (忽略)
-- [ ] 填充 256 字节配置头
-- [ ] 填充 PCIe 扩展能力 (PM, MSI-X)
+- [x] 实现 `VnvmeReadPcieConfig()` - 读取配置空间
+- [~] 实现 `VnvmeWritePcieConfig()` - 写入配置空间 (框架已有，TODO)
+- [x] 填充 256 字节配置头
+- [~] 填充 PCIe 扩展能力 (PM, MSI-X) (框架已有，TODO)
 
 #### 2.6 子设备 INF
 - [ ] 验证 `templates/vnvme_child.inf` 与 PDO ID 匹配
@@ -200,19 +213,20 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 ### 详细任务
 
 #### 3.1 共享内存 (shared_memory.c)
-- [ ] 实现 `VnvmeAllocateSharedMemory()` - 分配 64MB
-- [ ] 初始化控制块 (魔数、版本、指针)
-- [ ] 初始化命令环和完成环
-- [ ] 初始化数据缓冲区
+- [x] 实现 `VnvmeAllocateSharedMemory()` - 分配 64MB
+- [x] 初始化控制块 (魔数、版本、指针)
+- [x] 初始化提交环和完成环
+- [x] 初始化数据缓冲区
 
-#### 3.2 用户态映射 (user_comm.c)
-- [ ] 实现 `IOCTL_VNVME_MAP_SHARED_MEMORY` - 映射到用户空间
-- [ ] 实现 `IOCTL_VNVME_USER_READY` - 用户态就绪通知
-- [ ] 实现 `IOCTL_VNVME_GET_COMMAND_EVENT` - 获取事件句柄
-- [ ] 实现 `IOCTL_VNVME_HEARTBEAT` - 心跳
+#### 3.2 用户态映射 (control_device.c)
+- [x] 实现 `IOCTL_VNVME_MAP_SHARED_MEMORY` - 映射到用户空间
+- [x] 实现 `IOCTL_VNVME_USER_READY` - 用户态就绪通知
+- [~] 实现 `IOCTL_VNVME_GET_COMMAND_EVENT` - 获取事件句柄 (框架已有，TODO)
+- [x] 实现 `IOCTL_VNVME_HEARTBEAT` - 心跳
 - [ ] 实现 `IOCTL_VNVME_SUBMIT_COMPLETIONS` - 提交完成
 
 #### 3.3 vnvme-server 框架 (main.c)
+- [x] 创建 vnvme-server 项目骨架
 - [ ] 实现命令行参数解析
 - [ ] 实现配置文件加载
 - [ ] 打开控制设备 `\\.\VNVMEControl`
@@ -222,7 +236,7 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 #### 3.4 命令循环 (command_engine.c)
 - [ ] 实现主事件循环
 - [ ] 等待命令事件
-- [ ] 从命令环读取命令
+- [ ] 从提交环读取命令
 - [ ] 分发到处理函数
 - [ ] 写入完成环
 - [ ] 通知内核
@@ -262,10 +276,13 @@ vnvme-server.exe --config vnvme.conf
 ### 详细任务
 
 #### 4.1 Doorbell 轮询 (doorbell.c)
-- [ ] 实现 `VnvmeStartPolling()` - 启动高精度定时器
-- [ ] 实现 `VnvmePollTimerCallback()` - 轮询回调
+- [x] 实现 `VnvmeInitializePollingTimer()` - 创建轮询定时器
+- [x] 实现 `VnvmeStartPollingTimer()` - 启动定时器
+- [x] 实现 `VnvmeStopPollingTimer()` - 停止定时器
+- [x] 实现 `VnvmeEvtPollingTimer()` - 轮询回调
+- [x] 实现 `VnvmeProcessDoorbells()` - 处理 Doorbell 变化框架
+- [~] 检测 Admin SQ Tail 变化 (框架已有，TODO 完善)
 - [ ] 检测 CC 寄存器变化
-- [ ] 检测 Admin SQ Tail 变化
 - [ ] 检测 I/O SQ Tail 变化
 - [ ] 实现自适应轮询间隔
 
@@ -292,13 +309,18 @@ vnvme-server.exe --config vnvme.conf
 - [ ] 实现 Flush (Opcode 0x00)
 
 #### 4.5 PRP 解析 (prp.c)
-- [ ] 实现 `VnvmeParsePrp()` - 解析 PRP1/PRP2
+- [x] 创建 prp.c 文件和函数框架
+- [~] 实现 `VnvmeParsePrpList()` - 解析 PRP1/PRP2 (框架已有，TODO)
+- [x] 定义 `VNVME_PRP_ENTRY` 结构
 - [ ] 实现 `VnvmeCopyFromPrp()` - 从 PRP 复制到共享内存
 - [ ] 实现 `VnvmeCopyToPrp()` - 从共享内存复制到 PRP
 - [ ] 处理 PRP List 情况
 
 #### 4.6 完成处理 (queue.c)
-- [ ] 实现 `VnvmePostCompletion()` - 写入 CQ
+- [x] 创建 queue.c 文件
+- [x] 实现 `VnvmeInitializeAdminQueues()` - 读取 AQA/ASQ/ACQ
+- [~] 实现 `VnvmeFetchCommand()` - 获取命令 (框架已有，TODO)
+- [~] 实现 `VnvmePostCompletion()` - 写入 CQ (框架已有，TODO)
 - [ ] 正确设置 Phase Tag
 - [ ] 更新 CQ Tail 和 Phase
 

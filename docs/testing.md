@@ -35,8 +35,15 @@
 
 使用 WDK 测试框架或用户模式模拟：
 
+> ⚠️ **注意**：以下为概念性伪代码，展示测试设计思路。
+> 实际 API 请参考 [vnvme/vnvme.h](../vnvme/vnvme.h) 中的函数声明：
+> - `VnvmeCreateIoSubmissionQueue()` / `VnvmeDeleteIoSubmissionQueue()`
+> - `VnvmeCreateIoCompletionQueue()` / `VnvmeDeleteIoCompletionQueue()`
+> - `VnvmeFetchCommand()` / `VnvmePostCompletion()`
+
 ```c
 // tests/unit/test_queue.c
+// ⚠️ 概念伪代码 - 函数名为示意，非实际API
 
 #include "test_framework.h"
 #include "queue.h"
@@ -47,6 +54,7 @@ TEST_CASE(TestSqInitialization)
     VNVME_SUBMISSION_QUEUE sq;
     NTSTATUS status;
     
+    // 伪代码: 实际 API 为 VnvmeCreateIoSubmissionQueue
     status = VnvmeSqInitialize(&sq, 1, 64);
     
     ASSERT_SUCCESS(status);

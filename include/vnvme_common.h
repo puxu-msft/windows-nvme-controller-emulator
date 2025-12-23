@@ -48,8 +48,8 @@ typedef uint64_t UINT64;
 
 #define VNVME_SHARED_MEMORY_SIZE        (64 * 1024 * 1024)  // 64 MB
 #define VNVME_CONTROL_BLOCK_SIZE        4096                 // 4 KB
-#define VNVME_COMMAND_RING_SIZE         1024                 // 命令数
-#define VNVME_COMPLETION_RING_SIZE      1024                 // 完成数
+#define VNVME_SUBMISSION_RING_SIZE      1024                 // 提交条目数
+#define VNVME_COMPLETION_RING_SIZE      1024                 // 完成条目数
 #define VNVME_DATA_BUFFER_SIZE          (60 * 1024 * 1024)   // ~60 MB
 
 #define VNVME_SHARED_MEMORY_MAGIC       0x454D564E          // "NVME"
@@ -70,8 +70,8 @@ typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
     UINT32 ControlBlockSize;            // 0x0C: 控制块大小
     
     /* 环偏移 (0x10-0x1F) */
-    UINT32 CommandRingOffset;           // 0x10: 命令环偏移
-    UINT32 CommandRingSize;             // 0x14: 命令环条目数
+    UINT32 SubmissionRingOffset;        // 0x10: 提交环偏移
+    UINT32 SubmissionRingSize;          // 0x14: 提交环条目数
     UINT32 CompletionRingOffset;        // 0x18: 完成环偏移
     UINT32 CompletionRingSize;          // 0x1C: 完成环条目数
     
@@ -100,7 +100,7 @@ typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
 VNVME_STATIC_ASSERT(sizeof(VNVME_SHARED_MEMORY_CONTROL_BLOCK) == 4096, control_block_size);
 
 /*===========================================================================
- * 命令环
+ * 提交环 (Submission Ring) - 内核向用户态提交命令
  *===========================================================================*/
 
 /**
@@ -118,9 +118,9 @@ typedef enum _VNVME_COMMAND_TYPE {
 } VNVME_COMMAND_TYPE;
 
 /**
- * @brief 命令环条目
+ * @brief 提交环条目 - 内核提交给用户态处理的命令
  */
-typedef struct _VNVME_RING_COMMAND {
+typedef struct _VNVME_SUBMISSION_RING_ENTRY {
     /* 基本信息 */
     UINT32 Type;                        // 命令类型 (VNVME_COMMAND_TYPE)
     UINT16 CommandId;                   // 命令 ID
@@ -152,20 +152,20 @@ typedef struct _VNVME_RING_COMMAND {
     /* 时间戳 */
     UINT64 Timestamp;                   // 命令提交时间
     
-} VNVME_RING_COMMAND, *PVNVME_RING_COMMAND;
+} VNVME_SUBMISSION_RING_ENTRY, *PVNVME_SUBMISSION_RING_ENTRY;
 
-VNVME_STATIC_ASSERT(sizeof(VNVME_RING_COMMAND) == 80, ring_command_size);
+VNVME_STATIC_ASSERT(sizeof(VNVME_SUBMISSION_RING_ENTRY) == 80, submission_ring_entry_size);
 
 /**
- * @brief 命令环
+ * @brief 提交环 - 内核向用户态提交命令的环形缓冲区
  */
-typedef struct _VNVME_COMMAND_RING {
+typedef struct _VNVME_SUBMISSION_RING {
     volatile UINT32 Head;               // 消费者 (用户态) 更新
     volatile UINT32 Tail;               // 生产者 (内核) 更新
     UINT32 Size;                        // 环大小
     UINT32 Reserved;
-    VNVME_RING_COMMAND Commands[VNVME_COMMAND_RING_SIZE];
-} VNVME_COMMAND_RING, *PVNVME_COMMAND_RING;
+    VNVME_SUBMISSION_RING_ENTRY Entries[VNVME_SUBMISSION_RING_SIZE];
+} VNVME_SUBMISSION_RING, *PVNVME_SUBMISSION_RING;
 
 /*===========================================================================
  * 完成环
@@ -174,15 +174,15 @@ typedef struct _VNVME_COMMAND_RING {
 /**
  * @brief 完成环条目
  */
-typedef struct _VNVME_RING_COMPLETION {
+typedef struct _VNVME_COMPLETION_RING_ENTRY {
     UINT16 CommandId;                   // 对应的命令 ID
     UINT16 QueueId;                     // 队列 ID
     UINT32 Status;                      // NVMe 状态码
     UINT32 Result;                      // 命令特定结果 (DW0)
     UINT32 Reserved;
-} VNVME_RING_COMPLETION, *PVNVME_RING_COMPLETION;
+} VNVME_COMPLETION_RING_ENTRY, *PVNVME_COMPLETION_RING_ENTRY;
 
-VNVME_STATIC_ASSERT(sizeof(VNVME_RING_COMPLETION) == 16, ring_completion_size);
+VNVME_STATIC_ASSERT(sizeof(VNVME_COMPLETION_RING_ENTRY) == 16, completion_ring_entry_size);
 
 /**
  * @brief 完成环
@@ -192,7 +192,7 @@ typedef struct _VNVME_COMPLETION_RING {
     volatile UINT32 Tail;               // 生产者 (用户态) 更新
     UINT32 Size;                        // 环大小
     UINT32 Reserved;
-    VNVME_RING_COMPLETION Completions[VNVME_COMPLETION_RING_SIZE];
+    VNVME_COMPLETION_RING_ENTRY Entries[VNVME_COMPLETION_RING_SIZE];
 } VNVME_COMPLETION_RING, *PVNVME_COMPLETION_RING;
 
 /*===========================================================================

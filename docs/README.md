@@ -60,7 +60,7 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 │  │   │ Admin/IO  │  │ Mem/File  │  │ REST/CLI  │  │ 日志    │ ││
 │  │   └───────────┘  └───────────┘  └───────────┘  └─────────┘ ││
 │  │                          │                                  ││
-│  │   共享内存: [控制块│命令环│完成环│数据缓冲池]               ││
+│  │   共享内存: [控制块│提交环│完成环│数据缓冲池]               ││
 │  │                          │                                  ││
 │  └──────────────────────────│──────────────────────────────────┘│
 │                             │ IOCTL / 事件                       │
@@ -106,6 +106,7 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 | [ROADMAP.md](ROADMAP.md) | **开发路线图** - 阶段规划、任务清单、里程碑 |
 | [architecture-v2.md](architecture-v2.md) | **核心架构设计** - 内核/用户态分工、FDO/PDO 层 |
 | [core-mechanisms.md](core-mechanisms.md) | **核心机制详解** - 轮询、共享内存、PRP、数据路径 |
+| [CODING-STANDARDS.md](CODING-STANDARDS.md) | **编码规范** - 命名约定、开发原则、最佳实践 |
 
 ### 🔧 开发文档
 

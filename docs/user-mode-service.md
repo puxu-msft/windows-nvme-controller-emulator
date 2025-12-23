@@ -343,61 +343,61 @@ void CommandLoop(PVOID pSharedMemory, HANDLE hCommandEvent)
 
 void ProcessCommandBatch(PCOMMAND_ENGINE_CONTEXT pCtx)
 {
-    PCOMMAND_RING pCmdRing = GetCommandRing(pCtx->pControlBlock);
+    PVNVME_SUBMISSION_RING pSubRing = GetSubmissionRing(pCtx->pControlBlock);
     
     // 读取头指针
-    UINT32 head = pCmdRing->Head;
-    UINT32 tail = pCmdRing->Tail;
+    UINT32 head = pSubRing->Head;
+    UINT32 tail = pSubRing->Tail;
     
     while (head != tail) {
-        PRING_COMMAND pCmd = &pCmdRing->Commands[head];
+        PVNVME_SUBMISSION_RING_ENTRY pEntry = &pSubRing->Entries[head];
         
         // 分发命令
-        DispatchCommand(pCtx, pCmd);
+        DispatchCommand(pCtx, pEntry);
         
         // 移动头指针
-        head = (head + 1) % COMMAND_RING_SIZE;
+        head = (head + 1) % VNVME_SUBMISSION_RING_SIZE;
         pCtx->CommandsProcessed++;
     }
     
     // 更新头指针 (原子操作)
     MemoryBarrier();
-    pCmdRing->Head = head;
+    pSubRing->Head = head;
 }
 
-void DispatchCommand(PCOMMAND_ENGINE_CONTEXT pCtx, PRING_COMMAND pCmd)
+void DispatchCommand(PCOMMAND_ENGINE_CONTEXT pCtx, PVNVME_SUBMISSION_RING_ENTRY pEntry)
 {
     NVME_COMPLETION_ENTRY completion = {0};
     
-    switch (pCmd->Type) {
+    switch (pEntry->Type) {
         case CMD_TYPE_ADMIN:
-            ProcessAdminCommand(pCtx, pCmd, &completion);
+            ProcessAdminCommand(pCtx, pEntry, &completion);
             break;
             
         case CMD_TYPE_IO_READ:
-            ProcessIoRead(pCtx, pCmd, &completion);
+            ProcessIoRead(pCtx, pEntry, &completion);
             break;
             
         case CMD_TYPE_IO_WRITE:
-            ProcessIoWrite(pCtx, pCmd, &completion);
+            ProcessIoWrite(pCtx, pEntry, &completion);
             break;
             
         case CMD_TYPE_IO_FLUSH:
-            ProcessIoFlush(pCtx, pCmd, &completion);
+            ProcessIoFlush(pCtx, pEntry, &completion);
             break;
             
         case CMD_TYPE_CONTROLLER_ENABLE:
-            ProcessControllerEnable(pCtx, pCmd, &completion);
+            ProcessControllerEnable(pCtx, pEntry, &completion);
             break;
             
         default:
-            LogWarn("Unknown command type: %d", pCmd->Type);
+            LogWarn("Unknown command type: %d", pEntry->Type);
             completion.Status = NVME_STATUS_INVALID_OPCODE;
             break;
     }
     
     // 添加到完成环
-    AddCompletion(pCtx, pCmd->CommandId, pCmd->QueueId, &completion);
+    AddCompletion(pCtx, pEntry->CommandId, pEntry->QueueId, &completion);
 }
 ```
 
@@ -410,40 +410,40 @@ void DispatchCommand(PCOMMAND_ENGINE_CONTEXT pCtx, PRING_COMMAND pCmd)
 
 void ProcessAdminCommand(
     PCOMMAND_ENGINE_CONTEXT pCtx,
-    PRING_COMMAND pCmd,
+    PVNVME_SUBMISSION_RING_ENTRY pEntry,
     PNVME_COMPLETION_ENTRY pCompletion)
 {
-    switch (pCmd->Opcode) {
+    switch (pEntry->Opcode) {
         case NVME_ADMIN_IDENTIFY:
-            ProcessIdentify(pCtx, pCmd, pCompletion);
+            ProcessIdentify(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_CREATE_IO_CQ:
-            ProcessCreateIoCq(pCtx, pCmd, pCompletion);
+            ProcessCreateIoCq(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_CREATE_IO_SQ:
-            ProcessCreateIoSq(pCtx, pCmd, pCompletion);
+            ProcessCreateIoSq(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_DELETE_IO_CQ:
-            ProcessDeleteIoCq(pCtx, pCmd, pCompletion);
+            ProcessDeleteIoCq(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_DELETE_IO_SQ:
-            ProcessDeleteIoSq(pCtx, pCmd, pCompletion);
+            ProcessDeleteIoSq(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_SET_FEATURES:
-            ProcessSetFeatures(pCtx, pCmd, pCompletion);
+            ProcessSetFeatures(pCtx, pEntry, pCompletion);
             break;
             
         case NVME_ADMIN_GET_FEATURES:
-            ProcessGetFeatures(pCtx, pCmd, pCompletion);
+            ProcessGetFeatures(pCtx, pEntry, pCompletion);
             break;
             
         default:
-            LogWarn("Unsupported admin opcode: 0x%02x", pCmd->Opcode);
+            LogWarn("Unsupported admin opcode: 0x%02x", pEntry->Opcode);
             pCompletion->Status = NVME_STATUS_INVALID_OPCODE;
             break;
     }
@@ -451,14 +451,14 @@ void ProcessAdminCommand(
 
 void ProcessIdentify(
     PCOMMAND_ENGINE_CONTEXT pCtx,
-    PRING_COMMAND pCmd,
+    PVNVME_SUBMISSION_RING_ENTRY pEntry,
     PNVME_COMPLETION_ENTRY pCompletion)
 {
-    UINT8 cns = pCmd->Admin.CDW10 & 0xFF;
-    UINT32 nsid = pCmd->NSID;
+    UINT8 cns = pEntry->Admin.CDW10 & 0xFF;
+    UINT32 nsid = pEntry->NSID;
     
     // 获取数据缓冲区 (从共享内存)
-    PVOID pDataBuffer = GetDataBuffer(pCtx, pCmd->DataBufferOffset);
+    PVOID pDataBuffer = GetDataBuffer(pCtx, pEntry->DataBufferOffset);
     
     switch (cns) {
         case 0x00:  // Namespace
@@ -534,12 +534,12 @@ void BuildIdentifyController(PVOID pBuffer)
 
 void ProcessIoRead(
     PCOMMAND_ENGINE_CONTEXT pCtx,
-    PRING_COMMAND pCmd,
+    PVNVME_SUBMISSION_RING_ENTRY pEntry,
     PNVME_COMPLETION_ENTRY pCompletion)
 {
-    UINT32 nsid = pCmd->NSID;
-    UINT64 slba = pCmd->IO.StartLBA;
-    UINT32 nlb = (pCmd->IO.CDW12 & 0xFFFF) + 1;  // NLB 从 0 开始
+    UINT32 nsid = pEntry->NSID;
+    UINT64 slba = pEntry->IO.StartLBA;
+    UINT32 nlb = (pEntry->IO.CDW12 & 0xFFFF) + 1;  // NLB 从 0 开始
     
     // 检查命名空间
     PNAMESPACE pNs = GetNamespace(nsid);
@@ -560,7 +560,7 @@ void ProcessIoRead(
     UINT32 byteLength = nlb * pNs->BlockSize;
     
     // 获取数据缓冲区
-    PVOID pDataBuffer = GetDataBuffer(pCtx, pCmd->DataBufferOffset);
+    PVOID pDataBuffer = GetDataBuffer(pCtx, pEntry->DataBufferOffset);
     
     // 调用后端读取
     NTSTATUS status = g_Backend.Read(
@@ -580,12 +580,12 @@ void ProcessIoRead(
 
 void ProcessIoWrite(
     PCOMMAND_ENGINE_CONTEXT pCtx,
-    PRING_COMMAND pCmd,
+    PVNVME_SUBMISSION_RING_ENTRY pEntry,
     PNVME_COMPLETION_ENTRY pCompletion)
 {
-    UINT32 nsid = pCmd->NSID;
-    UINT64 slba = pCmd->IO.StartLBA;
-    UINT32 nlb = (pCmd->IO.CDW12 & 0xFFFF) + 1;
+    UINT32 nsid = pEntry->NSID;
+    UINT64 slba = pEntry->IO.StartLBA;
+    UINT32 nlb = (pEntry->IO.CDW12 & 0xFFFF) + 1;
     
     // 检查命名空间
     PNAMESPACE pNs = GetNamespace(nsid);
@@ -612,7 +612,7 @@ void ProcessIoWrite(
     UINT32 byteLength = nlb * pNs->BlockSize;
     
     // 获取数据缓冲区
-    PVOID pDataBuffer = GetDataBuffer(pCtx, pCmd->DataBufferOffset);
+    PVOID pDataBuffer = GetDataBuffer(pCtx, pEntry->DataBufferOffset);
     
     // 调用后端写入
     NTSTATUS status = g_Backend.Write(
@@ -894,10 +894,10 @@ void ProcessCommandBatch(PCOMMAND_ENGINE_CONTEXT pCtx)
     
     // 处理一批命令
     while (completionCount < MAX_BATCH_SIZE) {
-        PRING_COMMAND pCmd = GetNextCommand(pCtx);
-        if (!pCmd) break;
+        PVNVME_SUBMISSION_RING_ENTRY pEntry = GetNextCommand(pCtx);
+        if (!pEntry) break;
         
-        DispatchCommand(pCtx, pCmd, &completions[completionCount]);
+        DispatchCommand(pCtx, pEntry, &completions[completionCount]);
         completionCount++;
     }
     

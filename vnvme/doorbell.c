@@ -127,7 +127,7 @@ VnvmeProcessDoorbells(
     ULONG cqHead;
     PULONG doorbellReg;
     
-    if (PdoContext->Bar0 == NULL) {
+    if (PdoContext->Bar0VirtAddr == NULL) {
         return;
     }
     
@@ -144,7 +144,7 @@ VnvmeProcessDoorbells(
     queueId = 0;
     doorbellOffset = NVME_DOORBELL_OFFSET(queueId, 0); /* DSTRD = 0 */
     
-    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0 + doorbellOffset);
+    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + doorbellOffset);
     sqTail = *doorbellReg & 0xFFFF;
     
     if (sqTail != PdoContext->LastAdminSqTail) {
@@ -156,7 +156,7 @@ VnvmeProcessDoorbells(
     }
     
     /* CQ Head Doorbell */
-    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0 + doorbellOffset + 4);
+    doorbellReg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + doorbellOffset + 4);
     cqHead = *doorbellReg & 0xFFFF;
     
     if (cqHead != PdoContext->LastAdminCqHead) {

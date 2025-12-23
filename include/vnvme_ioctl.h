@@ -111,12 +111,33 @@ typedef struct _VNVME_GET_VERSION_OUTPUT {
  *---------------------------------------------------------------------------*/
 
 typedef struct _VNVME_GET_STATUS_OUTPUT {
-    UINT32 DriverStatus;                // 驱动状态
-    UINT32 UserServiceStatus;           // 用户态服务状态
+    /* 基本状态 */
+    UINT32 DriverStatus;                // 驱动状态 (VNVME_DRIVER_STATUS_*)
+    UINT32 UserServiceStatus;           // 用户态服务状态 (VNVME_USER_STATUS_*)
+    
+    /* 设备统计 */
     UINT32 ControllerCount;             // 控制器数量
     UINT32 NamespaceCount;              // 命名空间数量
+    
+    /* 共享内存状态 */
+    UINT32 SharedMemoryMapped;          // 共享内存是否已映射 (0/1)
+    UINT32 SharedMemorySize;            // 共享内存大小 (字节)
+    
+    /* 用户态连接 */
+    UINT32 UserReady;                   // 用户态是否就绪 (0/1)
+    UINT32 UserPid;                     // 用户态进程 ID
+    
+    /* 处理统计 */
     UINT64 CommandsProcessed;           // 已处理命令数
+    UINT64 CompletionsPosted;           // 已提交完成数
+    UINT64 BytesRead;                   // 读取字节数
+    UINT64 BytesWritten;                // 写入字节数
     UINT64 ErrorCount;                  // 错误数
+    
+    /* 时间信息 */
+    UINT64 UptimeMs;                    // 运行时间 (毫秒)
+    UINT64 LastHeartbeatMs;             // 上次心跳时间 (毫秒)
+    
 } VNVME_GET_STATUS_OUTPUT, *PVNVME_GET_STATUS_OUTPUT;
 
 /* 驱动状态码 */

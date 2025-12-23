@@ -31,7 +31,7 @@ VnvmeAllocateBar0(
     
     RtlZeroMemory(bar0, VNVME_BAR0_SIZE);
     
-    PdoContext->Bar0 = bar0;
+    PdoContext->Bar0VirtAddr = bar0;
     PdoContext->Bar0Size = VNVME_BAR0_SIZE;
     
     /* 初始化寄存器默认值 */
@@ -49,10 +49,10 @@ VnvmeFreeBar0(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     )
 {
-    if (PdoContext->Bar0 != NULL) {
-        TRACE_INFO("VnvmeFreeBar0: Freeing BAR0 at %p", PdoContext->Bar0);
-        VNVME_FREE_POOL(PdoContext->Bar0);
-        PdoContext->Bar0 = NULL;
+    if (PdoContext->Bar0VirtAddr != NULL) {
+        TRACE_INFO("VnvmeFreeBar0: Freeing BAR0 at %p", PdoContext->Bar0VirtAddr);
+        VNVME_FREE_POOL(PdoContext->Bar0VirtAddr);
+        PdoContext->Bar0VirtAddr = NULL;
         PdoContext->Bar0Size = 0;
     }
 }
@@ -67,11 +67,11 @@ VnvmeInitializeBar0Registers(
 {
     PNVME_CONTROLLER_REGISTERS regs;
     
-    if (PdoContext->Bar0 == NULL) {
+    if (PdoContext->Bar0VirtAddr == NULL) {
         return;
     }
     
-    regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0;
+    regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0VirtAddr;
     
     /* CAP - Controller Capabilities */
     /* 
@@ -128,12 +128,12 @@ VnvmeReadBar0Register(
 {
     PULONG reg;
     
-    if (PdoContext->Bar0 == NULL || Offset >= PdoContext->Bar0Size) {
+    if (PdoContext->Bar0VirtAddr == NULL || Offset >= PdoContext->Bar0Size) {
         TRACE_WARN("VnvmeReadBar0Register: Invalid offset 0x%X", Offset);
         return 0xFFFFFFFF;
     }
     
-    reg = (PULONG)((PUCHAR)PdoContext->Bar0 + Offset);
+    reg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + Offset);
     return *reg;
 }
 
@@ -149,12 +149,12 @@ VnvmeWriteBar0Register(
 {
     PULONG reg;
     
-    if (PdoContext->Bar0 == NULL || Offset >= PdoContext->Bar0Size) {
+    if (PdoContext->Bar0VirtAddr == NULL || Offset >= PdoContext->Bar0Size) {
         TRACE_WARN("VnvmeWriteBar0Register: Invalid offset 0x%X", Offset);
         return;
     }
     
-    reg = (PULONG)((PUCHAR)PdoContext->Bar0 + Offset);
+    reg = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + Offset);
     
     TRACE_VERBOSE("VnvmeWriteBar0Register: Offset=0x%X, Value=0x%08X", Offset, Value);
     
@@ -175,12 +175,12 @@ VnvmeReadBar0Register64(
 {
     PULONGLONG reg;
     
-    if (PdoContext->Bar0 == NULL || (Offset + 8) > PdoContext->Bar0Size) {
+    if (PdoContext->Bar0VirtAddr == NULL || (Offset + 8) > PdoContext->Bar0Size) {
         TRACE_WARN("VnvmeReadBar0Register64: Invalid offset 0x%X", Offset);
         return 0xFFFFFFFFFFFFFFFF;
     }
     
-    reg = (PULONGLONG)((PUCHAR)PdoContext->Bar0 + Offset);
+    reg = (PULONGLONG)((PUCHAR)PdoContext->Bar0VirtAddr + Offset);
     return *reg;
 }
 
@@ -196,12 +196,12 @@ VnvmeWriteBar0Register64(
 {
     PULONGLONG reg;
     
-    if (PdoContext->Bar0 == NULL || (Offset + 8) > PdoContext->Bar0Size) {
+    if (PdoContext->Bar0VirtAddr == NULL || (Offset + 8) > PdoContext->Bar0Size) {
         TRACE_WARN("VnvmeWriteBar0Register64: Invalid offset 0x%X", Offset);
         return;
     }
     
-    reg = (PULONGLONG)((PUCHAR)PdoContext->Bar0 + Offset);
+    reg = (PULONGLONG)((PUCHAR)PdoContext->Bar0VirtAddr + Offset);
     
     TRACE_VERBOSE("VnvmeWriteBar0Register64: Offset=0x%X, Value=0x%016llX", Offset, Value);
     

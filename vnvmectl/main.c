@@ -46,7 +46,7 @@ static HANDLE OpenVnvmeDevice(void)
 static int CmdVersion(void)
 {
     HANDLE hDevice;
-    VNVME_VERSION_OUTPUT version = {0};
+    VNVME_GET_VERSION_OUTPUT version = {0};
     DWORD bytesReturned;
     BOOL result;
     
@@ -60,8 +60,8 @@ static int CmdVersion(void)
     result = DeviceIoControl(
         hDevice,
         IOCTL_VNVME_GET_VERSION,
-        NULL, 0,
-        &version, sizeof(version),
+        NULL, 0U,
+        &version, (DWORD)sizeof(version),
         &bytesReturned,
         NULL
         );
@@ -74,8 +74,8 @@ static int CmdVersion(void)
         return 1;
     }
     
-    printf("VNVME Driver Version: %u.%u.%u\n",
-           version.Major, version.Minor, version.Patch);
+    printf("VNVME Driver Version: 0x%08X (API: 0x%08X, Build: %u)\n",
+           version.DriverVersion, version.ApiVersion, version.BuildNumber);
     
     return 0;
 }
@@ -83,7 +83,7 @@ static int CmdVersion(void)
 static int CmdStatus(void)
 {
     HANDLE hDevice;
-    VNVME_STATUS_OUTPUT status = {0};
+    VNVME_GET_STATUS_OUTPUT status = {0};
     DWORD bytesReturned;
     BOOL result;
     
@@ -97,8 +97,8 @@ static int CmdStatus(void)
     result = DeviceIoControl(
         hDevice,
         IOCTL_VNVME_GET_STATUS,
-        NULL, 0,
-        &status, sizeof(status),
+        NULL, 0U,
+        &status, (DWORD)sizeof(status),
         &bytesReturned,
         NULL
         );
@@ -112,13 +112,42 @@ static int CmdStatus(void)
     }
     
     printf("Driver Status:\n");
-    printf("  State: %u\n", status.DriverState);
-    printf("  Controller Count: %u\n", status.ControllerCount);
+    printf("  Driver State: %u (%s)\n", status.DriverStatus,
+           status.DriverStatus == 0 ? "Initializing" :
+           status.DriverStatus == 1 ? "Ready" :
+           status.DriverStatus == 2 ? "Running" :
+           status.DriverStatus == 3 ? "Error" :
+           status.DriverStatus == 4 ? "Stopping" : "Unknown");
+    printf("  User Service State: %u (%s)\n", status.UserServiceStatus,
+           status.UserServiceStatus == 0 ? "Not Connected" :
+           status.UserServiceStatus == 1 ? "Connected" :
+           status.UserServiceStatus == 2 ? "Ready" :
+           status.UserServiceStatus == 3 ? "Error" : "Unknown");
     printf("  User Ready: %s\n", status.UserReady ? "Yes" : "No");
-    printf("  Commands Processed: %lld\n", status.CommandsProcessed);
-    printf("  Errors: %lld\n", status.ErrorCount);
-    printf("  Shared Memory Mapped: %s\n", 
-           status.SharedMemoryMapped ? "Yes" : "No");
+    printf("  User PID: %u\n", status.UserPid);
+    printf("\n");
+    printf("Shared Memory:\n");
+    printf("  Mapped: %s\n", status.SharedMemoryMapped ? "Yes" : "No");
+    printf("  Size: %u bytes (%.2f MB)\n", status.SharedMemorySize,
+           (double)status.SharedMemorySize / (1024.0 * 1024.0));
+    printf("\n");
+    printf("Devices:\n");
+    printf("  Controller Count: %u\n", status.ControllerCount);
+    printf("  Namespace Count: %u\n", status.NamespaceCount);
+    printf("\n");
+    printf("Statistics:\n");
+    printf("  Commands Processed: %llu\n", (unsigned long long)status.CommandsProcessed);
+    printf("  Completions Posted: %llu\n", (unsigned long long)status.CompletionsPosted);
+    printf("  Bytes Read: %llu (%.2f MB)\n", (unsigned long long)status.BytesRead,
+           (double)status.BytesRead / (1024.0 * 1024.0));
+    printf("  Bytes Written: %llu (%.2f MB)\n", (unsigned long long)status.BytesWritten,
+           (double)status.BytesWritten / (1024.0 * 1024.0));
+    printf("  Errors: %llu\n", (unsigned long long)status.ErrorCount);
+    printf("\n");
+    printf("Timing:\n");
+    printf("  Uptime: %llu ms (%.2f hours)\n", (unsigned long long)status.UptimeMs,
+           (double)status.UptimeMs / (1000.0 * 60.0 * 60.0));
+    printf("  Last Heartbeat: %llu ms ago\n", (unsigned long long)status.LastHeartbeatMs);
     
     return 0;
 }
@@ -141,8 +170,8 @@ static int CmdListControllers(void)
     result = DeviceIoControl(
         hDevice,
         IOCTL_VNVME_LIST_CONTROLLERS,
-        NULL, 0,
-        &list, sizeof(list),
+        NULL, 0U,
+        &list, (DWORD)sizeof(list),
         &bytesReturned,
         NULL
         );
@@ -155,12 +184,17 @@ static int CmdListControllers(void)
         return 1;
     }
     
-    printf("Controllers (%u total):\n", list.Count);
-    for (i = 0; i < list.Count && i < 16; i++) {
-        printf("  [%u] Controller ID: %u\n", i, list.ControllerIds[i]);
+    printf("Controllers (%u total):\n", list.ControllerCount);
+    for (i = 0; i < list.ControllerCount && i < 16; i++) {
+        printf("  [%u] ID=%u, Status=%u, Model=%s, SN=%s\n", 
+               i, 
+               list.Controllers[i].ControllerId,
+               list.Controllers[i].Status,
+               list.Controllers[i].ModelNumber,
+               list.Controllers[i].SerialNumber);
     }
     
-    if (list.Count == 0) {
+    if (list.ControllerCount == 0) {
         printf("  (No controllers created)\n");
     }
     

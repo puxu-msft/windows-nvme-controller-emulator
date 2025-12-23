@@ -113,7 +113,7 @@ NTSTATUS VnvmeCreateControlDevice(
     // 创建 I/O 队列
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&ioQueueConfig,
                                            WdfIoQueueDispatchSequential);
-    ioQueueConfig.EvtIoDeviceControl = VnvmeControlDeviceIoControl;
+    ioQueueConfig.EvtIoDeviceControl = VnvmeEvtIoDeviceControl;
     
     status = WdfIoQueueCreate(controlDevice, &ioQueueConfig,
                              WDF_NO_OBJECT_ATTRIBUTES, &queue);
@@ -231,12 +231,12 @@ typedef struct _VNVME_MAP_SHARED_MEMORY_OUT {
     
     // 区域偏移 (相对于 UserAddress)
     ULONG ControlBlockOffset;       // 控制块偏移
-    ULONG CommandRingOffset;        // 命令环偏移
+    ULONG SubmissionRingOffset;     // 提交环偏移
     ULONG CompletionRingOffset;     // 完成环偏移
     ULONG DataBufferOffset;         // 数据缓冲区偏移
     
     // 区域大小
-    ULONG CommandRingSize;          // 命令环大小
+    ULONG SubmissionRingSize;       // 提交环大小
     ULONG CompletionRingSize;       // 完成环大小
     ULONG DataBufferSize;           // 数据缓冲区大小
     
@@ -298,11 +298,11 @@ typedef struct _VNVME_SHARED_CONTROL_BLOCK {
     volatile LONG64 KernelHeartbeat;  // 内核更新
     volatile LONG64 UserHeartbeat;    // 用户态更新
     
-    // 命令环 (内核写入，用户读取)
-    volatile ULONG CommandRingHead;   // 用户态读取位置
-    volatile ULONG CommandRingTail;   // 内核写入位置
-    ULONG CommandRingMask;            // Size - 1
-    ULONG CommandEntrySize;           // sizeof(VNVME_SHARED_COMMAND)
+    // 提交环 (内核写入，用户读取)
+    volatile ULONG SubmissionRingHead;   // 用户态读取位置
+    volatile ULONG SubmissionRingTail;   // 内核写入位置
+    ULONG SubmissionRingMask;            // Size - 1
+    ULONG SubmissionEntrySize;           // sizeof(VNVME_SUBMISSION_RING_ENTRY)
     
     // 完成环 (用户写入，内核读取)
     volatile ULONG CompletionRingHead; // 内核读取位置
@@ -584,7 +584,7 @@ typedef struct _VNVME_GET_STATISTICS_OUT {
 ### 分发函数
 
 ```c
-VOID VnvmeControlDeviceIoControl(
+VOID VnvmeEvtIoDeviceControl(
     _In_ WDFQUEUE Queue,
     _In_ WDFREQUEST Request,
     _In_ size_t OutputBufferLength,

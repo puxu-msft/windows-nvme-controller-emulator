@@ -106,7 +106,7 @@ stornvme.sys 初始化流程:
 │  │                                                                │  │
 │  │    共享内存视图:                                                │  │
 │  │    ┌──────────────────────────────────────────────────────────┐│  │
-│  │    │ 控制块 │ 命令环 │ 完成环 │ 数据缓冲池 │ 统计/日志        ││  │
+│  │    │ 控制块 │ 提交环 │ 完成环 │ 数据缓冲池 │ 统计/日志        ││  │
 │  │    └──────────────────────────────────────────────────────────┘│  │
 │  │                          ▲                                     │  │
 │  └──────────────────────────│─────────────────────────────────────┘  │
@@ -348,43 +348,13 @@ FDO (Functional Device Object) 层负责：
 
 #### 1.2.1 FDO 上下文结构
 
-```c
-// fdo.c, bus.c, user_comm.c, shared_memory.c 操作此结构
-typedef struct _VNVME_FDO_CONTEXT {
-    // === 标识 ===
-    BOOLEAN                 IsFdo;              // TRUE = FDO, FALSE = PDO
-    ULONG                   Signature;          // 'FDOV'
-    
-    // === WDF 对象 ===
-    WDFDEVICE               WdfDevice;          // FDO 设备对象
-    WDFCHILDLIST            ChildList;          // PDO 子设备列表
-    
-    // === 控制设备 ===
-    WDFDEVICE               ControlDevice;      // \\.\VNVMEControl
-    WDFQUEUE                ControlQueue;       // 控制设备 IOCTL 队列
-    
-    // === 用户态通信 ===
-    BOOLEAN                 UserModeReady;      // vnvme-server 已连接
-    LARGE_INTEGER           LastHeartbeat;      // 最后心跳时间
-    KEVENT                  CommandReadyEvent;  // 通知用户态有新命令
-    HANDLE                  UserEventHandle;    // 用户态事件句柄
-    
-    // === 共享内存 (与所有 PDO 共享) ===
-    PVOID                   SharedMemoryKernel; // 内核虚拟地址
-    PVOID                   SharedMemoryUser;   // 用户态映射地址
-    PHYSICAL_ADDRESS        SharedMemoryPhys;   // 物理地址
-    SIZE_T                  SharedMemorySize;   // 64MB
-    PMDL                    SharedMemoryMdl;    // MDL for 用户态映射
-    
-    // === 子设备管理 ===
-    ULONG                   ControllerCount;    // 当前控制器数量
-    ULONG                   MaxControllers;     // 最大控制器数量
-    KSPIN_LOCK              ChildListLock;
-    
-} VNVME_FDO_CONTEXT, *PVNVME_FDO_CONTEXT;
+> **实现**: [vnvme.h - VNVME_FDO_CONTEXT](../vnvme/vnvme.h#L100-L150)
 
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
-```
+主要成员:
+- `WdfDevice` / `ChildList` - WDF 设备和子设备列表
+- `ControlDevice` / `ControlQueue` - 控制设备 `\\.\VNVMEControl`
+- `SharedMemory*` - 共享内存指针 (64MB)
+- `ControllerCount` / `MaxControllers` - 子设备管理
 
 #### 1.2.2 总线管理 (bus.c)
 
@@ -422,8 +392,10 @@ NTSTATUS VnvmeEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     // 创建子设备列表
     status = WdfChildListCreate(device, ...);
     
-    // 触发子设备枚举 - 创建虚拟 NVMe 控制器 PDO
-    status = VnvmeCreateControllerPdo(fdoCtx, 0);
+    // [可选] 驱动加载时自动创建一个默认控制器
+    // 注意: 这里直接调用低层函数，因为不是 IOCTL 路径
+    // 如果希望完全由用户态通过 IOCTL 控制，可以删除这段
+    status = VnvmeCreateControllerPdo(device, 0, NULL);
     
     return status;
 }
@@ -441,142 +413,39 @@ PDO (Physical Device Object) 层负责：
 
 #### 1.3.1 PDO 上下文结构
 
-```c
-// pdo.c, pcie_config.c, bar0.c, doorbell.c, queue.c, prp.c 操作此结构
-typedef struct _VNVME_PDO_CONTEXT {
-    // === 标识 ===
-    BOOLEAN                 IsFdo;              // FALSE = 这是 PDO
-    ULONG                   Signature;          // 'PDOV'
-    ULONG                   ControllerIndex;    // 控制器索引 (0, 1, 2...)
-    
-    // === 父 FDO 引用 ===
-    PVNVME_FDO_CONTEXT      ParentFdo;          // 访问共享内存
-    
-    // === 设备对象 ===
-    PDEVICE_OBJECT          PhysicalDeviceObject;
-    PDEVICE_OBJECT          AttachedDevice;     // stornvme 附加在此
-    
-    // === BAR0 内存 ===
-    PVOID                   Bar0VirtAddr;       // 内核虚拟地址
-    PHYSICAL_ADDRESS        Bar0PhysAddr;       // 物理地址 (报告给 stornvme)
-    ULONG                   Bar0Size;           // 64KB
-    
-    // === NVMe 寄存器 (指向 BAR0 内部) ===
-    volatile PNVME_REGISTERS  Registers;        // 寄存器基地址
-    volatile PULONG           Doorbells;        // Doorbell 基地址
-    
-    // === 控制器状态 ===
-    VNVME_CONTROLLER_STATE  State;              // Disabled/Enabled/Ready
-    ULONG                   CachedCC;           // CC 寄存器缓存 (检测变化)
-    
-    // === Admin Queue ===
-    VNVME_QUEUE             AdminSQ;
-    VNVME_QUEUE             AdminCQ;
-    USHORT                  AdminSQTailCached;  // 检测新命令
-    USHORT                  AdminCQHeadCached;
-    
-    // === I/O Queues ===
-    VNVME_QUEUE             IoSQ[VNVME_MAX_IO_QUEUES];
-    VNVME_QUEUE             IoCQ[VNVME_MAX_IO_QUEUES];
-    USHORT                  IoQueueCount;       // 当前 I/O 队列数
-    USHORT                  MaxIoQueues;        // 最大 I/O 队列数
-    
-    // === Doorbell 轮询 ===
-    WDFTIMER                PollTimer;
-    ULONG                   PollIntervalUs;     // 当前轮询间隔 (自适应)
-    BOOLEAN                 PollingActive;
-    
-    // === 命名空间 ===
-    VNVME_NAMESPACE         Namespaces[VNVME_MAX_NAMESPACES];
-    ULONG                   NamespaceCount;
-    
-    // === 性能统计 ===
-    ULONG64                 CommandsProcessed;
-    ULONG64                 BytesRead;
-    ULONG64                 BytesWritten;
-    
-} VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
+> **实现**: [vnvme.h - VNVME_PDO_CONTEXT](../vnvme/vnvme.h#L180-L250)
 
-WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_PDO_CONTEXT, VnvmeGetPdoContext)
-```
+主要成员:
+- `Bar0VirtAddr` / `Bar0PhysAddr` - BAR0 内存 (64KB)
+- `Registers` / `Doorbells` - 指向 BAR0 内部区域
+- `State` / `CachedCC` - 控制器状态
+- `AdminSQ` / `AdminCQ` / `IoSQ[]` / `IoCQ[]` - 队列
+- `PollingTimer` / `PollIntervalUs` - 轮询定时器
 
 #### 1.3.2 BAR0 内存分配 (bar0.c)
 
-```c
-// BAR0 布局 (64KB)
-#define VNVME_BAR0_SIZE             0x10000
+> **实现**: [bar0.c - VnvmeAllocateBar0](../vnvme/bar0.c#L14-L42)
 
-#define VNVME_BAR0_REGS_OFFSET      0x0000   // 0x0000-0x0FFF: NVMe 寄存器
-#define VNVME_BAR0_REGS_SIZE        0x1000
-
-#define VNVME_BAR0_DOORBELL_OFFSET  0x1000   // 0x1000-0x1FFF: Doorbell
-#define VNVME_BAR0_DOORBELL_SIZE    0x1000
-
-#define VNVME_BAR0_MSIX_TABLE_OFF   0x2000   // 0x2000-0x23FF: MSI-X Table
-#define VNVME_BAR0_MSIX_PBA_OFF     0x2400   // 0x2400-0x2407: MSI-X PBA
-
-NTSTATUS VnvmeAllocateBar0(PVNVME_PDO_CONTEXT PdoCtx)
-{
-    // 分配连续物理内存
-    PHYSICAL_ADDRESS lowAddr = {0};
-    PHYSICAL_ADDRESS highAddr = {.QuadPart = -1};
-    PHYSICAL_ADDRESS boundary = {0};
-    
-    Ctx->Bar0VirtAddr = MmAllocateContiguousMemorySpecifyCache(
-        VNVME_BAR0_SIZE,
-        lowAddr, highAddr, boundary,
-        MmNonCached);
-    
-    if (!Ctx->Bar0VirtAddr) {
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    
-    Ctx->Bar0PhysAddr = MmGetPhysicalAddress(Ctx->Bar0VirtAddr);
-    Ctx->Bar0Size = VNVME_BAR0_SIZE;
-    
-    // 初始化 NVMe 寄存器
-    VnvmeInitRegisters(Ctx);
-    
-    return STATUS_SUCCESS;
-}
-```
+BAR0 布局 (64KB):
+| 区域 | 偏移 | 大小 | 用途 |
+|------|------|------|------|
+| 寄存器 | 0x0000 | 4KB | NVMe 控制器寄存器 |
+| Doorbell | 0x1000 | 4KB | SQ/CQ Tail/Head Doorbell |
+| MSI-X Table | 0x2000 | 1KB | 中断向量表 |
+| MSI-X PBA | 0x2400 | 8B | Pending Bit Array |
 
 #### 1.3.3 静态寄存器初始化 (bar0.c)
 
-stornvme 读取时直接获得值，无需拦截：
+> **实现**: [bar0.c - VnvmeInitializeBar0Registers](../vnvme/bar0.c#L63-L112)
 
-```c
-VOID VnvmeInitRegisters(PVNVME_PDO_CONTEXT PdoCtx)
-{
-    PVOID regs = PdoCtx->Bar0VirtAddr;
-    
-    // CAP (偏移 0x00, 64-bit, 只读)
-    // 这些值 stornvme 会直接读取
-    PNVME_CAP cap = (PNVME_CAP)regs;
-    cap->MQES = 4095;           // 最大队列条目 4096
-    cap->CQR = 1;               // 需要连续队列
-    cap->AMS = 0;               // 仅 Round Robin
-    cap->TO = 40;               // 超时 20 秒
-    cap->DSTRD = 0;             // Doorbell 步长 4 字节
-    cap->NSSRS = 0;             // 不支持子系统复位
-    cap->CSS = 1;               // NVM Command Set
-    cap->MPSMIN = 0;            // 最小页 4KB
-    cap->MPSMAX = 0;            // 最大页 4KB
-    
-    // VS (偏移 0x08, 32-bit, 只读)
-    PNVME_VS vs = (PNVME_VS)((PUCHAR)regs + 0x08);
-    vs->MJR = 1;
-    vs->MNR = 4;
-    vs->TER = 0;
-    
-    // 其他寄存器初始化为 0
-    // CC, CSTS, AQA, ASQ, ACQ 由 stornvme 写入，我们轮询检测
-    
-    // 设置寄存器指针
-    PdoCtx->Registers = (PNVME_REGISTERS)regs;
-    PdoCtx->Doorbells = (PULONG)((PUCHAR)regs + VNVME_BAR0_DOORBELL_OFFSET);
-}
-```
+stornvme 读取时直接获得值，无需拦截。初始化的关键寄存器:
+
+| 寄存器 | 偏移 | 关键字段 | 说明 |
+|--------|------|----------|------|
+| CAP | 0x00 | MQES=4095, CQR=1, CSS=1 | 控制器能力 |
+| VS | 0x08 | MJR=1, MNR=4 | 版本 1.4 |
+| CC | 0x14 | 初始为 0 | stornvme 写入 |
+| CSTS | 0x1C | 初始为 0 | 轮询检测 |
 
 #### 1.3.4 Doorbell 轮询引擎 (doorbell.c)
 
@@ -810,32 +679,32 @@ VOID VnvmeProcessPendingCommands(
     PVNVME_SHARED_MEMORY Shared,
     PVNVME_BACKEND Backend)
 {
-    PVNVME_COMMAND_RING cmdRing = &Shared->CommandRing;
+    PVNVME_SUBMISSION_RING subRing = &Shared->SubmissionRing;
     
-    while (cmdRing->Head != cmdRing->Tail) {
-        PVNVME_SHARED_COMMAND cmd = &cmdRing->Commands[cmdRing->Head];
+    while (subRing->Head != subRing->Tail) {
+        PVNVME_SUBMISSION_RING_ENTRY entry = &subRing->Entries[subRing->Head];
         NVME_COMPLETION completion = {0};
         
         // 根据 Opcode 处理
-        switch (cmd->Command.CDW0.OPC) {
+        switch (entry->Opcode) {
         case NVME_ADMIN_OPC_IDENTIFY:
-            VnvmeHandleIdentify(Shared, cmd, &completion);
+            VnvmeHandleIdentify(Shared, entry, &completion);
             break;
             
         case NVME_ADMIN_OPC_CREATE_IO_CQ:
-            VnvmeHandleCreateIoCQ(Shared, cmd, &completion);
+            VnvmeHandleCreateIoCQ(Shared, entry, &completion);
             break;
             
         case NVME_ADMIN_OPC_CREATE_IO_SQ:
-            VnvmeHandleCreateIoSQ(Shared, cmd, &completion);
+            VnvmeHandleCreateIoSQ(Shared, entry, &completion);
             break;
             
         case NVME_IO_OPC_READ:
-            VnvmeHandleRead(Shared, cmd, Backend, &completion);
+            VnvmeHandleRead(Shared, entry, Backend, &completion);
             break;
             
         case NVME_IO_OPC_WRITE:
-            VnvmeHandleWrite(Shared, cmd, Backend, &completion);
+            VnvmeHandleWrite(Shared, entry, Backend, &completion);
             break;
             
         case NVME_IO_OPC_FLUSH:
@@ -849,10 +718,10 @@ VOID VnvmeProcessPendingCommands(
         }
         
         // 提交完成
-        VnvmeSubmitCompletion(Shared, cmd->QueueId, &completion);
+        VnvmeSubmitCompletion(Shared, entry->QueueId, &completion);
         
         // 前进 Head
-        cmdRing->Head = (cmdRing->Head + 1) % cmdRing->Size;
+        subRing->Head = (subRing->Head + 1) % subRing->Size;
     }
 }
 ```
@@ -948,7 +817,7 @@ NTSTATUS VnvmeMemoryBackendRead(
 │              │  • Events handles                                │   │
 │              │  • Statistics                                    │   │
 │  0x00001000  ├──────────────────────────────────────────────────┤   │
-│              │  命令环 (1MB)                                     │   │
+│              │  提交环 (1MB)                                     │   │
 │              │  • Ring size: 4096 entries                       │   │
 │              │  • Entry size: 256 bytes                         │   │
 │              │  • Head/Tail pointers                            │   │
@@ -980,9 +849,9 @@ typedef struct _VNVME_SHARED_CONTROL {
     HANDLE CompletionReadyEvent;
     HANDLE ShutdownEvent;
     
-    // 命令环配置
-    ULONG CommandRingOffset;
-    ULONG CommandRingSize;
+    // 提交环配置
+    ULONG SubmissionRingOffset;
+    ULONG SubmissionRingSize;
     
     // 完成环配置
     ULONG CompletionRingOffset;

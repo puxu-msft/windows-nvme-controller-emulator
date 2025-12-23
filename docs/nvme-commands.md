@@ -2,6 +2,18 @@
 
 本文档详细说明 NVMe Admin 命令和 I/O 命令的实现。
 
+> ⚠️ **代码风格说明**
+> 
+> 本文档为设计规范，代码示例展示 NVMe 命令处理的逻辑和流程。
+> 函数名如 `VnvmeReadFromPrp`、`VnvmeSetCompletion` 为**概念命名**，
+> 实际实现请参考 [vnvme/vnvme.h](../vnvme/vnvme.h) 中的函数声明：
+> 
+> | 概念函数 | 实际函数 |
+> |----------|----------|
+> | `VnvmeReadFromPrp` | `VnvmeParsePrpList` + `VnvmeReadFromHostMemory` |
+> | `VnvmeWriteToPrp` | `VnvmeParsePrpList` + `VnvmeWriteToHostMemory` |
+> | `VnvmeSetCompletion` | `VnvmePostCompletion` |
+
 ## 命令格式
 
 ### Submission Queue Entry (SQE)

@@ -2,6 +2,13 @@
 
 本文档定义虚拟 NVMe 控制器仿真器的核心数据结构。
 
+> **设计规范 vs 实际代码**
+> 
+> 本文档为**设计规范**，描述完整的目标结构。
+> 实际代码 [vnvme/vnvme.h](../vnvme/vnvme.h) 中部分成员尚未实现（标记为 Phase 2/3）。
+> 
+> **以 vnvme.h 为权威**，本文档作为设计参考。
+
 ## v2 架构概述
 
 vnvme.sys 内部分为两层，每层有独立的上下文结构：
@@ -84,7 +91,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
 //
 #define VNVME_SHARED_MEMORY_SIZE        (64 * 1024 * 1024)  // 64MB
 #define VNVME_CONTROL_BLOCK_SIZE        (4 * 1024)          // 4KB
-#define VNVME_COMMAND_RING_SIZE         (1 * 1024 * 1024)   // 1MB
+#define VNVME_SUBMISSION_RING_SIZE      (1 * 1024 * 1024)   // 1MB
 #define VNVME_COMPLETION_RING_SIZE      (256 * 1024)        // 256KB
 #define VNVME_DATA_BUFFER_SIZE          (62 * 1024 * 1024)  // ~62MB
 
@@ -105,12 +112,12 @@ typedef struct _VNVME_SHARED_CONTROL_BLOCK {
     volatile ULONG64        KernelHeartbeat;    // 内核心跳计数
     volatile ULONG64        UserHeartbeat;      // 用户态心跳计数
     
-    // === 命令环形缓冲区指针 ===
-    volatile ULONG          CommandHead;        // 内核写入位置
-    volatile ULONG          CommandTail;        // 用户态读取位置
-    ULONG                   CommandRingOffset;  // 命令环偏移 (从共享内存开头)
-    ULONG                   CommandRingSize;    // 命令环大小
-    ULONG                   CommandEntrySize;   // 每条命令大小
+    // === 提交环形缓冲区指针 ===
+    volatile ULONG          SubmissionHead;     // 内核写入位置
+    volatile ULONG          SubmissionTail;     // 用户态读取位置
+    ULONG                   SubmissionRingOffset;  // 提交环偏移 (从共享内存开头)
+    ULONG                   SubmissionRingSize;    // 提交环大小
+    ULONG                   SubmissionEntrySize;   // 每条提交条目大小
     
     // === 完成环形缓冲区指针 ===
     volatile ULONG          CompletionHead;     // 用户态写入位置

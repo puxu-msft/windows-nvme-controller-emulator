@@ -2,6 +2,12 @@
 
 本文档详细说明混合架构中的核心机制实现。
 
+> ⚠️ **代码风格说明**
+> 
+> 本文档为设计规范，代码示例展示机制原理和实现思路。
+> - 函数签名为概念设计，实际实现请参考 [vnvme/vnvme.h](../vnvme/vnvme.h)
+> - 以 vnvme/*.c 源文件为权威
+
 ---
 
 ## 前置要求
@@ -84,7 +90,7 @@
 // 共享内存
 #define VNVME_SHARED_MAGIC          0x454D564E  // "VNME"
 #define VNVME_SHARED_VERSION        1
-#define VNVME_COMMAND_RING_SIZE     (1 << 20)   // 1MB
+#define VNVME_SUBMISSION_RING_SIZE  (1 << 20)   // 1MB
 #define VNVME_COMPLETION_RING_SIZE  (256 << 10) // 256KB
 #define VNVME_DATA_BUFFER_SIZE      (62 << 20)  // 62MB
 #define VNVME_DATA_BUFFER_BLOCK_SIZE 4096       // 4KB 块
@@ -315,8 +321,8 @@ NTSTATUS VnvmeAllocateSharedMemory(
     ctrl->State = VNVME_SHARED_STATE_INITIALIZING;
     
     // 设置各区域偏移
-    ctrl->CommandRingOffset = VNVME_COMMAND_RING_OFFSET;
-    ctrl->CommandRingSize = VNVME_COMMAND_RING_SIZE;
+    ctrl->SubmissionRingOffset = VNVME_SUBMISSION_RING_OFFSET;
+    ctrl->SubmissionRingSize = VNVME_SUBMISSION_RING_SIZE;
     ctrl->CompletionRingOffset = VNVME_COMPLETION_RING_OFFSET;
     ctrl->CompletionRingSize = VNVME_COMPLETION_RING_SIZE;
     ctrl->DataBufferOffset = VNVME_DATA_BUFFER_OFFSET;
@@ -657,7 +663,7 @@ NTSTATUS VnvmeCopyToPrp(
 │  │ 4. 轮询定时器检测 Doorbell 变化                                 │     │
 │  │ 5. 从 SQ 读取命令                                               │     │
 │  │ 6. 解析 PRP，复制 Write 数据到共享缓冲区                        │     │
-│  │ 7. 将命令放入命令环                                             │     │
+│  │ 7. 将命令放入提交环                                             │     │
 │  │ 8. 设置 CommandReadyEvent                                       │     │
 │  └────────────────────────────────────────────────────────────────┘     │
 │                                    │                                     │
@@ -667,7 +673,7 @@ NTSTATUS VnvmeCopyToPrp(
 │  vnvme-server.exe (用户态)         │                                     │
 │  ┌────────────────────────────────────────────────────────────────┐     │
 │  │ 9. WaitForSingleObject(CommandReadyEvent)                       │     │
-│  │ 10. 从命令环读取命令                                            │     │
+│  │ 10. 从提交环读取命令                                            │     │
 │  │ 11. 处理命令 (读写后端存储)                                     │     │
 │  │ 12. 构建完成条目                                                │     │
 │  │ 13. 放入完成环                                                  │     │
@@ -748,7 +754,7 @@ VOID VnvmeProcessSQCommands(
             }
         }
         
-        // 提交到命令环
+        // 提交到提交环
         VnvmeCommitCommandSlot(Ctx, sharedCmd);
         
         // 更新 SQ Head

@@ -7,9 +7,9 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * Admin 队列管理
- *===========================================================================*/
+//===========================================================================
+// Admin 队列管理
+//===========================================================================
 
 /**
  * @brief 初始化 Admin 队列
@@ -33,25 +33,25 @@ VnvmeInitializeAdminQueues(
     
     regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0VirtAddr;
     
-    /* 读取 Admin Queue Attributes */
+    // 读取 Admin Queue Attributes
     aqa = regs->AQA.AsUint32;
-    asqs = (aqa & 0xFFF) + 1;        /* Admin Submission Queue Size */
-    acqs = ((aqa >> 16) & 0xFFF) + 1; /* Admin Completion Queue Size */
+    asqs = (aqa & 0xFFF) + 1;        // Admin Submission Queue Size
+    acqs = ((aqa >> 16) & 0xFFF) + 1; // Admin Completion Queue Size
     
-    /* 读取队列基地址 */
+    // 读取队列基地址
     asq = regs->ASQ;
     acq = regs->ACQ;
     
     TRACE_INFO("VnvmeInitializeAdminQueues: ASQ=0x%016llX, ACQ=0x%016llX", asq, acq);
     TRACE_INFO("VnvmeInitializeAdminQueues: ASQS=%u, ACQS=%u", asqs, acqs);
     
-    /* 保存队列信息 */
+    // 保存队列信息
     PdoContext->AdminSqBase = asq;
     PdoContext->AdminSqSize = asqs;
     PdoContext->AdminCqBase = acq;
     PdoContext->AdminCqSize = acqs;
     
-    /* 重置队列状态 */
+    // 重置队列状态
     PdoContext->LastAdminSqTail = 0;
     PdoContext->LastAdminCqHead = 0;
     PdoContext->AdminCqPhase = 1;
@@ -59,9 +59,9 @@ VnvmeInitializeAdminQueues(
     return STATUS_SUCCESS;
 }
 
-/*===========================================================================
- * I/O 队列管理
- *===========================================================================*/
+//===========================================================================
+// I/O 队列管理
+//===========================================================================
 
 /**
  * @brief 创建 I/O Submission Queue
@@ -84,7 +84,7 @@ VnvmeCreateIoSubmissionQueue(
     TRACE_INFO("VnvmeCreateIoSubmissionQueue: QID=%u, Size=%u, CQ=%u",
                QueueId, QueueSize, CqId);
     
-    /* TODO: Phase 5 - 实现 I/O SQ 创建 */
+    // TODO: Phase 5 - 实现 I/O SQ 创建
     
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -110,7 +110,7 @@ VnvmeCreateIoCompletionQueue(
     TRACE_INFO("VnvmeCreateIoCompletionQueue: QID=%u, Size=%u, IRQ=%u",
                QueueId, QueueSize, IrqVector);
     
-    /* TODO: Phase 5 - 实现 I/O CQ 创建 */
+    // TODO: Phase 5 - 实现 I/O CQ 创建
     
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -129,7 +129,7 @@ VnvmeDeleteIoSubmissionQueue(
     
     TRACE_INFO("VnvmeDeleteIoSubmissionQueue: QID=%u", QueueId);
     
-    /* TODO: Phase 5 - 实现 I/O SQ 删除 */
+    // TODO: Phase 5 - 实现 I/O SQ 删除
     
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -148,14 +148,14 @@ VnvmeDeleteIoCompletionQueue(
     
     TRACE_INFO("VnvmeDeleteIoCompletionQueue: QID=%u", QueueId);
     
-    /* TODO: Phase 5 - 实现 I/O CQ 删除 */
+    // TODO: Phase 5 - 实现 I/O CQ 删除
     
     return STATUS_NOT_IMPLEMENTED;
 }
 
-/*===========================================================================
- * 队列操作
- *===========================================================================*/
+//===========================================================================
+// 队列操作
+//===========================================================================
 
 /**
  * @brief 从 SQ 获取下一个命令
@@ -171,7 +171,7 @@ VnvmeFetchCommand(
     UNREFERENCED_PARAMETER(QueueId);
     UNREFERENCED_PARAMETER(Command);
     
-    /* TODO: Phase 4 - 实现命令获取 */
+    // TODO: Phase 4 - 实现命令获取
     
     return STATUS_NOT_IMPLEMENTED;
 }
@@ -190,7 +190,7 @@ VnvmePostCompletion(
     UNREFERENCED_PARAMETER(QueueId);
     UNREFERENCED_PARAMETER(Completion);
     
-    /* TODO: Phase 4 - 实现完成项提交 */
+    // TODO: Phase 4 - 实现完成项提交
     
     return STATUS_NOT_IMPLEMENTED;
 }

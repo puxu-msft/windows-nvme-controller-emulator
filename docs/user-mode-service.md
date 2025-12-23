@@ -299,8 +299,37 @@ BOOL SubmitCompletions(HANDLE hDevice, UINT32 count)
 
 ### 4. 命令引擎 (command_engine.c)
 
+> **v2 零复制架构**
+> 
+> 用户态直接访问原始 NVMe 命令，无需通过中间结构：
+> 
+> ```c
+> #include "nvme_spec.h"          // NVME_COMMAND, NVME_COMPLETION
+> #include "vnvme_common.h"       // 控制块、队列描述符
+> 
+> // 获取 Admin SQ 指针
+> PNVME_COMMAND adminSQ = (PNVME_COMMAND)VnvmeGetAdminSQ(pSharedMemory);
+> 
+> // 直接读取原始 NVMe 命令
+> PNVME_COMMAND cmd = &adminSQ[head];
+> printf("Opcode: 0x%02X, NSID: %u, CID: %u\n",
+>        cmd->Opcode, cmd->NSID, cmd->CID);
+> 
+> // 获取 Admin CQ 指针并写入完成项
+> PNVME_COMPLETION adminCQ = (PNVME_COMPLETION)VnvmeGetAdminCQ(pSharedMemory);
+> adminCQ[cq_tail].CID = cmd->CID;
+> adminCQ[cq_tail].SQID = 0;       // Admin Queue
+> adminCQ[cq_tail].StatusField = NVME_STATUS_SUCCESS;
+> adminCQ[cq_tail].PhaseTag = phase;
+> ```
+> 
+> 主要变化：
+> - `VNVME_SUBMISSION_RING_ENTRY` (80字节) → `NVME_COMMAND` (64字节)
+> - 无命令复制开销，直接操作 NVMe 规范定义的结构
+> - 通过 `VNVME_NOTIFY_RING` 获取 Doorbell 变更通知
+
 ```c
-// command_engine.c - 主命令处理循环
+// command_engine.c - 主命令处理循环 (v2 零复制架构)
 
 typedef struct _COMMAND_ENGINE_CONTEXT {
     PSHARED_MEMORY_CONTROL_BLOCK pControlBlock;

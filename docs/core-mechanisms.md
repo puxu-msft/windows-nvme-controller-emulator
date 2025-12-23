@@ -277,6 +277,25 @@ VOID VnvmeBatchReadDoorbells(PVNVME_CONTROLLER_CONTEXT Ctx)
 
 ## 2. 共享内存机制
 
+> **v2 架构: 零复制设计**
+> 
+> v2 架构采用零复制设计，NVMe 队列直接分配在共享内存中：
+> 
+> **关键变化**:
+> - NVMe SQ/CQ 内存分配在共享内存中的固定偏移位置
+> - 内核将 SQ/CQ 物理地址报告给 stornvme (通过 ASQ/ACQ 寄存器)
+> - stornvme 直接写入 SQ，用户态直接读取原始 `NVME_COMMAND`
+> - 用户态直接写入 CQ (`NVME_COMPLETION`)，stornvme 直接读取
+> - **无命令复制开销**
+> 
+> **数据流**:
+> ```
+> stornvme → SQ (共享内存) → 用户态直接读取 NVME_COMMAND
+> 用户态 → CQ (共享内存) → stornvme 直接读取 NVME_COMPLETION
+> ```
+> 
+> 详细结构定义见 [vnvme_common.h](../include/vnvme_common.h)
+
 ### 内存分配
 
 ```c

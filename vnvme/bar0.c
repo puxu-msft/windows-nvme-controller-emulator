@@ -7,9 +7,9 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * BAR0 分配与初始化
- *===========================================================================*/
+//===========================================================================
+// BAR0 分配与初始化
+//===========================================================================
 
 /**
  * @brief 分配 BAR0 内存
@@ -27,12 +27,12 @@ VnvmeAllocateBar0(
     PHYSICAL_ADDRESS boundary = {0};
     PVOID bar0;
     
-    highAddr.QuadPart = (ULONGLONG)-1;  /* 使用所有可用物理地址 */
+    highAddr.QuadPart = (ULONGLONG)-1;  // 使用所有可用物理地址
     
     TRACE_INFO("VnvmeAllocateBar0: Allocating %u bytes (contiguous, non-cached)", 
                VNVME_BAR0_SIZE);
     
-    /* 分配物理连续、非缓存内存 */
+    // 分配物理连续、非缓存内存
     bar0 = MmAllocateContiguousMemorySpecifyCache(
         VNVME_BAR0_SIZE,
         lowAddr,
@@ -52,7 +52,7 @@ VnvmeAllocateBar0(
     PdoContext->Bar0PhysAddr = MmGetPhysicalAddress(bar0);
     PdoContext->Bar0Size = VNVME_BAR0_SIZE;
     
-    /* 初始化寄存器默认值 */
+    // 初始化寄存器默认值
     VnvmeInitializeBar0Registers(PdoContext);
     
     TRACE_INFO("VnvmeAllocateBar0: Allocated at VA=%p, PA=0x%llX", 
@@ -99,52 +99,50 @@ VnvmeInitializeBar0Registers(
     
     regs = (PNVME_CONTROLLER_REGISTERS)PdoContext->Bar0VirtAddr;
     
-    /* CAP - Controller Capabilities (64-bit, offset 0x00)
-     * 
-     * Bit fields:
-     *   [15:0]  MQES   = 0xFFF (4096 entries max)
-     *   [16]    CQR    = 1 (Contiguous Queues Required)
-     *   [18:17] AMS    = 0 (Round Robin only)
-     *   [23:19] Reserved = 0
-     *   [31:24] TO     = 40 (Timeout: 40 * 500ms = 20 seconds)
-     *   [35:32] DSTRD  = 0 (Doorbell Stride: 2^(2+0) = 4 bytes)
-     *   [36]    NSSRS  = 0 (NVM Subsystem Reset Not Supported)
-     *   [44:37] CSS    = 1 (NVM Command Set)
-     *   [48]    BPS    = 0
-     *   [51:48] MPSMIN = 0 (4KB pages min)
-     *   [55:52] MPSMAX = 0 (4KB pages max)
-     *   [63:56] Reserved = 0
-     * 
-     * 打包: 0x0028_0000_0001_0FFF
-     *       TO=40 在 bits[31:24], CSS=1 在 bit[37]
-     */
+    // CAP - Controller Capabilities (64-bit, offset 0x00)
+    //
+    // Bit fields:
+    //   [15:0]  MQES   = 0xFFF (4096 entries max)
+    //   [16]    CQR    = 1 (Contiguous Queues Required)
+    //   [18:17] AMS    = 0 (Round Robin only)
+    //   [23:19] Reserved = 0
+    //   [31:24] TO     = 40 (Timeout: 40 * 500ms = 20 seconds)
+    //   [35:32] DSTRD  = 0 (Doorbell Stride: 2^(2+0) = 4 bytes)
+    //   [36]    NSSRS  = 0 (NVM Subsystem Reset Not Supported)
+    //   [44:37] CSS    = 1 (NVM Command Set)
+    //   [48]    BPS    = 0
+    //   [51:48] MPSMIN = 0 (4KB pages min)
+    //   [55:52] MPSMAX = 0 (4KB pages max)
+    //   [63:56] Reserved = 0
+    //
+    // 打包: 0x0028_0000_0001_0FFF
+    //       TO=40 在 bits[31:24], CSS=1 在 bit[37]
     regs->CAP.AsUint64 = 0x0028000000010FFF;
     
-    /* VS - Version (32-bit, offset 0x08)
-     * Major = 1, Minor = 4, Tertiary = 0  =>  NVMe 1.4
-     */
+    // VS - Version (32-bit, offset 0x08)
+    // Major = 1, Minor = 4, Tertiary = 0  =>  NVMe 1.4
     regs->VS.AsUint32 = 0x00010400;
     
-    /* INTMS/INTMC - Interrupt Mask Set/Clear (offset 0x0C/0x10) */
+    // INTMS/INTMC - Interrupt Mask Set/Clear (offset 0x0C/0x10)
     regs->INTMS = 0;
     regs->INTMC = 0;
     
-    /* CC - Controller Configuration (offset 0x14, disabled) */
+    // CC - Controller Configuration (offset 0x14, disabled)
     regs->CC.AsUint32 = 0;
     
-    /* CSTS - Controller Status (offset 0x1C, not ready) */
+    // CSTS - Controller Status (offset 0x1C, not ready)
     regs->CSTS.AsUint32 = 0;
     
-    /* AQA - Admin Queue Attributes (offset 0x24) */
+    // AQA - Admin Queue Attributes (offset 0x24)
     regs->AQA.AsUint32 = 0;
     
-    /* ASQ - Admin Submission Queue Base Address (offset 0x28) */
+    // ASQ - Admin Submission Queue Base Address (offset 0x28)
     regs->ASQ = 0;
     
-    /* ACQ - Admin Completion Queue Base Address (offset 0x30) */
+    // ACQ - Admin Completion Queue Base Address (offset 0x30)
     regs->ACQ = 0;
     
-    /* 设置寄存器指针供其他模块使用 */
+    // 设置寄存器指针供其他模块使用
     PdoContext->Registers = regs;
     PdoContext->Doorbells = (PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + 0x1000);
     PdoContext->CachedCC = 0;
@@ -162,9 +160,9 @@ VnvmeInitializeBar0Registers(
     TRACE_INFO("  Doorbells at offset 0x1000, VA=%p", PdoContext->Doorbells);
 }
 
-/*===========================================================================
- * BAR0 寄存器访问
- *===========================================================================*/
+//===========================================================================
+// BAR0 寄存器访问
+//===========================================================================
 
 /**
  * @brief 读取 BAR0 寄存器
@@ -207,8 +205,8 @@ VnvmeWriteBar0Register(
     
     TRACE_VERBOSE("VnvmeWriteBar0Register: Offset=0x%X, Value=0x%08X", Offset, Value);
     
-    /* TODO: Phase 3 - 处理特殊寄存器写入 */
-    /* CC 寄存器写入需要处理使能/禁用逻辑 */
+    // TODO: Phase 3 - 处理特殊寄存器写入
+    // CC 寄存器写入需要处理使能/禁用逻辑
     
     *reg = Value;
 }

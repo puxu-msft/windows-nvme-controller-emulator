@@ -26,7 +26,7 @@
 #define VNVME_MAX_NAMESPACES        16              // 每个控制器最大命名空间数
 #define VNVME_BAR0_SIZE             (64 * 1024)     // 64 KB
 #define VNVME_PCIE_CONFIG_SIZE      4096            // 4 KB PCIe配置空间
-#define VNVME_MAX_IO_QUEUES         64              // 最大 I/O 队列数 (不含 Admin)
+// VNVME_MAX_IO_QUEUES 已在 vnvme_common.h 中定义
 #define VNVME_POLLING_INTERVAL_MS   1               // 轮询间隔 (毫秒)
 
 // 签名常量
@@ -519,6 +519,55 @@ VnvmePdoQueryDeviceText(
     _In_ DEVICE_TEXT_TYPE TextType,
     _In_ LCID LocaleId,
     _Out_ PWSTR* DeviceText
+    );
+
+NTSTATUS
+VnvmePdoQueryCapabilities(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _Inout_ PDEVICE_CAPABILITIES Capabilities
+    );
+
+NTSTATUS
+VnvmePdoQueryBusInformation(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _Out_ PPNP_BUS_INFORMATION* BusInformation
+    );
+
+NTSTATUS
+VnvmePdoQueryResourceRequirements(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _Out_ PIO_RESOURCE_REQUIREMENTS_LIST* ResourceRequirements
+    );
+
+NTSTATUS
+VnvmePdoQueryResources(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _Out_ PCM_RESOURCE_LIST* Resources
+    );
+
+NTSTATUS
+VnvmePdoQueryInterface(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ LPCGUID InterfaceType,
+    _In_ USHORT Size,
+    _In_ USHORT Version,
+    _In_opt_ PVOID InterfaceSpecificData,
+    _Inout_ PINTERFACE Interface
+    );
+
+//===========================================================================
+// 函数声明 - utils.c
+//===========================================================================
+
+PWSTR
+VnvmeAllocateString(
+    _In_ PCWSTR SourceString
+    );
+
+PWSTR
+VnvmeAllocateMultiString(
+    _In_ PCWSTR String1,
+    _In_opt_ PCWSTR String2
     );
 
 //===========================================================================

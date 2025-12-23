@@ -7,12 +7,15 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * 轮询定时器管理
- *===========================================================================*/
+//===========================================================================
+// 轮询定时器管理
+//===========================================================================
 
 /**
  * @brief 初始化轮询定时器
+ * 
+ * 创建周期性定时器用于轮询 Doorbell 和 CC 寄存器变化。
+ * 定时器间隔由 VNVME_POLLING_INTERVAL_MS 定义 (默认 1ms)。
  */
 NTSTATUS
 VnvmeInitializePollingTimer(
@@ -25,13 +28,7 @@ VnvmeInitializePollingTimer(
     
     TRACE_INFO("VnvmeInitializePollingTimer: Creating polling timer");
     
-    /* TODO: Phase 4 - 实现定时器 */
-    /*
-     * 配置定时器：
-     * - 周期：50-100 微秒
-     * - 回调：VnvmeEvtPollingTimer
-     */
-    
+    // 配置周期性定时器
     WDF_TIMER_CONFIG_INIT_PERIODIC(
         &timerConfig,
         VnvmeEvtPollingTimer,
@@ -91,9 +88,9 @@ VnvmeStopPollingTimer(
     }
 }
 
-/*===========================================================================
- * 轮询回调
- *===========================================================================*/
+//===========================================================================
+// 轮询回调
+//===========================================================================
 
 /**
  * @brief 轮询定时器回调
@@ -109,7 +106,7 @@ VnvmeEvtPollingTimer(
     device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
     pdoContext = VnvmeGetPdoContext(device);
     
-    /* 检查 Doorbell 变化 */
+    // 检查 Doorbell 变化
     VnvmeProcessDoorbells(pdoContext);
 }
 
@@ -132,25 +129,26 @@ VnvmeProcessDoorbells(
         return;
     }
     
-    /* 1. 检查 CC 寄存器变化 (控制器启用/禁用) */
+    // 1. 检查 CC 寄存器变化 (控制器启用/禁用)
     currentCC = PdoContext->Registers->CC.AsUint32;
     if (currentCC != PdoContext->CachedCC) {
         TRACE_INFO("VnvmeProcessDoorbells: CC changed 0x%08X -> 0x%08X",
                    PdoContext->CachedCC, currentCC);
         
-        /* 检测 CC.EN 位变化 */
+        // 检测 CC.EN 位变化
         if ((currentCC & 0x1) && !(PdoContext->CachedCC & 0x1)) {
-            /* CC.EN: 0 -> 1, 控制器启用请求 */
+            // CC.EN: 0 -> 1, 控制器启用请求
             TRACE_INFO("VnvmeProcessDoorbells: CC.EN set, enabling controller");
             
-            /* TODO: Phase 4 - 读取 AQA/ASQ/ACQ 并设置 Admin 队列 */
+            // 读取 AQA/ASQ/ACQ 寄存器设置 Admin 队列
+            VnvmeInitializeAdminQueues(PdoContext);
             
-            /* 设置 CSTS.RDY = 1 表示控制器就绪 */
+            // 设置 CSTS.RDY = 1 表示控制器就绪
             PdoContext->Registers->CSTS.AsUint32 = 0x1;
             TRACE_INFO("VnvmeProcessDoorbells: CSTS.RDY set (CSTS=0x%08X)",
                        PdoContext->Registers->CSTS.AsUint32);
         } else if (!(currentCC & 0x1) && (PdoContext->CachedCC & 0x1)) {
-            /* CC.EN: 1 -> 0, 控制器禁用请求 */
+            // CC.EN: 1 -> 0, 控制器禁用请求
             TRACE_INFO("VnvmeProcessDoorbells: CC.EN cleared, disabling controller");
             PdoContext->Registers->CSTS.AsUint32 = 0x0;
         }
@@ -159,49 +157,47 @@ VnvmeProcessDoorbells(
         hadWork = TRUE;
     }
     
-    /* 2. 如果控制器未就绪 (CC.EN=0 或 CSTS.RDY=0)，不处理 Doorbell */
+    // 2. 如果控制器未就绪 (CC.EN=0 或 CSTS.RDY=0)，不处理 Doorbell
     if (!(PdoContext->Registers->CC.EN && PdoContext->Registers->CSTS.RDY)) {
         return;
     }
     
-    /* 3. 处理 Admin 队列 (Queue ID = 0) */
-    /* Doorbell 布局: SQ0 Tail (0x1000), CQ0 Head (0x1004), SQ1 Tail (0x1008), ... */
-    sqTail = PdoContext->Doorbells[0] & 0xFFFF;  /* Admin SQ Tail */
+    // 3. 处理 Admin 队列 (Queue ID = 0)
+    // Doorbell 布局: SQ0 Tail (0x1000), CQ0 Head (0x1004), SQ1 Tail (0x1008), ...
+    sqTail = PdoContext->Doorbells[0] & 0xFFFF;  // Admin SQ Tail
     
     if (sqTail != PdoContext->LastAdminSqTail) {
-        TRACE_INFO("VnvmeProcessDoorbells: Admin SQ tail %u -> %u",
+        TRACE_INFO("VnvmeProcessDoorbells: Admin SQ tail %lu -> %lu",
                    PdoContext->LastAdminSqTail, sqTail);
         
-        /* TODO: Phase 4 - 调用 VnvmeProcessAdminCommands() */
+        // TODO Phase 4: 通知用户态处理 Admin 命令
+        // VnvmeProcessAdminCommands(PdoContext, sqTail);
         
         PdoContext->LastAdminSqTail = sqTail;
         hadWork = TRUE;
     }
     
-    /* Admin CQ Head Doorbell */
-    cqHead = PdoContext->Doorbells[1] & 0xFFFF;  /* Admin CQ Head */
+    // Admin CQ Head Doorbell
+    cqHead = PdoContext->Doorbells[1] & 0xFFFF;  // Admin CQ Head
     
     if (cqHead != PdoContext->LastAdminCqHead) {
-        TRACE_VERBOSE("VnvmeProcessDoorbells: Admin CQ head %u -> %u",
+        TRACE_VERBOSE("VnvmeProcessDoorbells: Admin CQ head %lu -> %lu",
                       PdoContext->LastAdminCqHead, cqHead);
         PdoContext->LastAdminCqHead = cqHead;
     }
     
-    /* TODO: Phase 5 - 处理 I/O 队列的 Doorbell */
-    /*
-     * for (i = 0; i < IoQueueCount; i++) {
-     *     sqTail = Doorbells[2 + i * 2];      // I/O SQ Tail
-     *     cqHead = Doorbells[2 + i * 2 + 1];  // I/O CQ Head
-     *     ...
-     * }
-     */
+    // TODO Phase 5: 处理 I/O 队列的 Doorbell
+    // for (i = 0; i < IoQueueCount; i++) {
+    //     sqTail = Doorbells[2 + i * 2];      // I/O SQ Tail
+    //     cqHead = Doorbells[2 + i * 2 + 1];  // I/O CQ Head
+    //     ...
+    // }
     
     UNREFERENCED_PARAMETER(hadWork);
-    /* TODO: Phase 4 - 自适应轮询间隔
-     * if (hadWork) {
-     *     PollingIntervalUs = max(PollingIntervalUs / 2, 10);
-     * } else {
-     *     PollingIntervalUs = min(PollingIntervalUs * 2, 1000);
-     * }
-     */
+    // TODO Phase 4: 自适应轮询间隔
+    // if (hadWork) {
+    //     PollingIntervalUs = max(PollingIntervalUs / 2, 10);
+    // } else {
+    //     PollingIntervalUs = min(PollingIntervalUs * 2, 1000);
+    // }
 }

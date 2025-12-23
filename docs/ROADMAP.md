@@ -136,48 +136,67 @@ vnvmectl version
 - 使 stornvme.sys 加载到 PDO
 
 ### 里程碑
-- [ ] PDO 出现在设备管理器
-- [ ] stornvme.sys 成功附加到 PDO
-- [ ] BAR0 内存分配成功，寄存器已初始化
+- [ ] PDO 出现在设备管理器 (需验证)
+- [ ] stornvme.sys 成功附加到 PDO (需验证)
+- [x] BAR0 内存分配成功，寄存器已初始化
+- [x] PCIe 配置空间实现，BUS_INTERFACE_STANDARD 就绪
+- [x] PnP 查询函数全部实现 (Capabilities, BusInfo, Resources)
 
 ### 详细任务
 
 #### 2.1 PDO 创建 (bus.c)
-- [~] 实现 `VnvmeCreateVirtualController()` - 高层 API，IOCTL 调用入口 (框架已有，TODO)
-- [ ] 实现 `VnvmeCreateControllerPdo()` - 低层实现，实际创建 PDO
-- [ ] 设置 PDO 硬件 ID: `PCI\VEN_1B36&DEV_0010...`
-- [ ] 设置 PDO 设备描述和位置
+- [x] 实现 `VnvmeCreateVirtualController()` - 高层 API，IOCTL 调用入口
+- [x] 实现 `VnvmeCreateControllerPdo()` - 低层实现，实际 PDO 创建
+- [x] 实现 `VnvmeDeleteVirtualController()` - 高层删除 API
+- [x] 实现 `VnvmeDeleteControllerPdo()` - 低层删除实现
+- [x] 实现 `VnvmeFindController()` - 查找控制器
+- [x] 设置 PDO 硬件 ID: `PCI\VEN_1B36&DEV_0010&REV_01`
+- [x] 设置 PDO 设备描述和位置
 - [x] 定义 `VNVME_PDO_CONTEXT` 结构
-- [ ] 设置 PDO 与 FDO 的父子关系
+- [x] 设置 PDO 与 FDO 的父子关系 (LIST_ENTRY)
 
 #### 2.2 PDO PnP 处理 (pdo.c)
 - [x] 创建 pdo.c 文件框架
-- [~] 实现 `VnvmePdoQueryDeviceId()` (框架已有，TODO)
-- [~] 实现 `VnvmePdoQueryDeviceText()` (框架已有，TODO)
-- [ ] 处理 `IRP_MN_QUERY_CAPABILITIES` - 设备能力
-- [ ] 处理 `IRP_MN_QUERY_BUS_INFORMATION` - 总线类型 PCIe
+- [x] 实现 `VnvmePdoQueryDeviceId()` - 设备 ID 查询
+- [x] 实现 `VnvmePdoQueryDeviceText()` - 设备描述查询
+- [x] 实现 `VnvmePdoEvtDevicePrepareHardware()` - 硬件准备 (处理 IRP_MN_START_DEVICE)
+- [x] 实现 `VnvmePdoEvtDeviceReleaseHardware()` - 硬件释放 (处理 IRP_MN_STOP_DEVICE)
+- [x] 实现 `VnvmePdoEvtDeviceD0Entry/D0Exit()` - 电源状态
+- [x] 实现 `VnvmePdoQueryCapabilities()` - 设备能力
+- [x] 实现 `VnvmePdoQueryBusInformation()` - 总线类型 PCIe
 
 #### 2.3 资源报告 (pdo.c)
-- [ ] 处理 `IRP_MN_QUERY_RESOURCES` - 报告 BAR0 内存资源
-- [ ] 处理 `IRP_MN_QUERY_RESOURCE_REQUIREMENTS` - 资源需求
-- [~] 处理 `IRP_MN_START_DEVICE` (框架已有，TODO)
-- [~] 处理 `IRP_MN_STOP_DEVICE` (框架已有，TODO)
+- [x] 实现 `VnvmePdoQueryResources()` - 报告 BAR0 内存资源
+- [x] 实现 `VnvmePdoQueryResourceRequirements()` - 资源需求
 
 #### 2.4 BAR0 内存 (bar0.c)
 - [x] 实现 `VnvmeAllocateBar0()` - 分配 64KB 连续物理内存
+- [x] 实现 `VnvmeFreeBar0()` - 释放 BAR0 内存
 - [x] 实现 `VnvmeInitializeBar0Registers()` - 初始化 NVMe 寄存器
 - [x] 设置 CAP 寄存器 (能力)
 - [x] 设置 VS 寄存器 (版本 1.4)
 - [x] 初始化 CSTS 为 0 (等待 CC.EN)
 
 #### 2.5 PCIe 配置空间 (pcie_config.c)
-- [ ] 实现 `VnvmePdoQueryInterface()` - BUS_INTERFACE_STANDARD
+- [x] 实现 `VnvmePdoQueryInterface()` - BUS_INTERFACE_STANDARD
+- [x] 实现 `VnvmeAllocatePcieConfig()` - 分配配置空间
+- [x] 实现 `VnvmeFreePcieConfig()` - 释放配置空间
+- [x] 实现 `VnvmeInitializePcieConfig()` - 初始化配置空间
 - [x] 实现 `VnvmeReadPcieConfig()` - 读取配置空间
-- [~] 实现 `VnvmeWritePcieConfig()` - 写入配置空间 (框架已有，TODO)
+- [x] 实现 `VnvmeWritePcieConfig()` - 写入配置空间
 - [x] 填充 256 字节配置头
-- [~] 填充 PCIe 扩展能力 (PM, MSI-X) (框架已有，TODO)
+- [ ] 填充 PCIe 扩展能力 (PM, MSI-X) - Phase 3
 
-#### 2.6 子设备 INF
+#### 2.6 Doorbell 轮询 (doorbell.c)
+- [x] 实现 `VnvmeInitializePollingTimer()` - 初始化定时器
+- [x] 实现 `VnvmeStartPollingTimer()` - 启动定时器
+- [x] 实现 `VnvmeStopPollingTimer()` - 停止定时器
+- [x] 实现 `VnvmeEvtPollingTimer()` - 定时器回调
+- [x] 实现 `VnvmeProcessDoorbells()` - 处理 Doorbell 变化
+- [x] CC 寄存器变化检测 (CC.EN 0→1, 1→0)
+- [x] 调用 `VnvmeInitializeAdminQueues()` 当 CC.EN 设置
+
+#### 2.7 子设备 INF
 - [ ] 验证 `templates/vnvme_child.inf` 与 PDO ID 匹配
 - [ ] 安装子设备 INF
 - [ ] 验证 stornvme.sys 加载

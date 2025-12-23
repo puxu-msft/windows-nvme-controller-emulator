@@ -7,9 +7,9 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * 内部函数声明
- *===========================================================================*/
+//===========================================================================
+// 内部函数声明
+//===========================================================================
 
 static NTSTATUS
 VnvmeHandleGetVersion(
@@ -46,9 +46,9 @@ VnvmeHandleHeartbeat(
     _Out_ size_t* BytesReturned
     );
 
-/*===========================================================================
- * 控制设备创建/删除
- *===========================================================================*/
+//===========================================================================
+// 控制设备创建/删除
+//===========================================================================
 
 /**
  * @brief 创建控制设备
@@ -69,12 +69,12 @@ VnvmeCreateControlDevice(
     DECLARE_CONST_UNICODE_STRING(deviceName, L"\\Device\\VNVMEControl");
     DECLARE_CONST_UNICODE_STRING(symbolicLink, L"\\DosDevices\\VNVMEControl");
     
-    /* 需要管理员权限的 SDDL */
+    // 需要管理员权限的 SDDL
     DECLARE_CONST_UNICODE_STRING(sddl, L"D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     
     TRACE_INFO("VnvmeCreateControlDevice: Creating control device");
     
-    /* 分配设备初始化结构 */
+    // 分配设备初始化结构
     deviceInit = WdfControlDeviceInitAllocate(
         WdfDeviceGetDriver(Device),
         &sddl
@@ -85,7 +85,7 @@ VnvmeCreateControlDevice(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    /* 设置设备名称 */
+    // 设置设备名称
     status = WdfDeviceInitAssignName(deviceInit, &deviceName);
     if (!NT_SUCCESS(status)) {
         TRACE_ERROR("VnvmeCreateControlDevice: WdfDeviceInitAssignName failed, status=0x%08X", status);
@@ -93,21 +93,21 @@ VnvmeCreateControlDevice(
         return status;
     }
     
-    /* 设置设备类型 */
+    // 设置设备类型
     WdfDeviceInitSetDeviceType(deviceInit, FILE_DEVICE_UNKNOWN);
     WdfDeviceInitSetExclusive(deviceInit, FALSE);
     
-    /* 创建设备 */
+    // 创建设备
     WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
     
     status = WdfDeviceCreate(&deviceInit, &attributes, &controlDevice);
     if (!NT_SUCCESS(status)) {
         TRACE_ERROR("VnvmeCreateControlDevice: WdfDeviceCreate failed, status=0x%08X", status);
-        /* deviceInit 在失败时已被 WdfDeviceCreate 释放 */
+        // deviceInit 在失败时已被 WdfDeviceCreate 释放
         return status;
     }
     
-    /* 创建符号链接 */
+    // 创建符号链接
     status = WdfDeviceCreateSymbolicLink(controlDevice, &symbolicLink);
     if (!NT_SUCCESS(status)) {
         TRACE_ERROR("VnvmeCreateControlDevice: WdfDeviceCreateSymbolicLink failed, status=0x%08X", status);
@@ -115,7 +115,7 @@ VnvmeCreateControlDevice(
         return status;
     }
     
-    /* 创建默认 I/O 队列 */
+    // 创建默认 I/O 队列
     WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&queueConfig, WdfIoQueueDispatchSequential);
     queueConfig.EvtIoDeviceControl = VnvmeEvtIoDeviceControl;
     
@@ -132,7 +132,7 @@ VnvmeCreateControlDevice(
         return status;
     }
     
-    /* 完成控制设备初始化 */
+    // 完成控制设备初始化
     WdfControlFinishInitializing(controlDevice);
     
     fdoContext->ControlDevice = controlDevice;
@@ -156,9 +156,9 @@ VnvmeDeleteControlDevice(
     }
 }
 
-/*===========================================================================
- * IOCTL 分发
- *===========================================================================*/
+//===========================================================================
+// IOCTL 分发
+//===========================================================================
 
 /**
  * @brief IOCTL 请求处理
@@ -210,9 +210,9 @@ VnvmeEvtIoDeviceControl(
     WdfRequestCompleteWithInformation(Request, status, bytesReturned);
 }
 
-/*===========================================================================
- * IOCTL 处理函数
- *===========================================================================*/
+//===========================================================================
+// IOCTL 处理函数
+//===========================================================================
 
 /**
  * @brief 处理 IOCTL_VNVME_GET_VERSION
@@ -296,7 +296,7 @@ VnvmeHandleGetStatus(
     output->UserServiceStatus = fdoContext->UserReady ? 
         VNVME_USER_STATUS_READY : VNVME_USER_STATUS_NOT_CONNECTED;
     output->ControllerCount = fdoContext->ChildDeviceCount;
-    output->NamespaceCount = 0;  /* TODO: 计算命名空间数 */
+    output->NamespaceCount = 0;  // TODO: 计算命名空间数
     output->ShmMapped = (fdoContext->ShmUserVirtAddr != NULL) ? 1 : 0;
     output->ShmSize = (UINT32)fdoContext->ShmSize;
     output->CommandsProcessed = fdoContext->CommandsProcessed;
@@ -342,12 +342,12 @@ VnvmeHandleMapShm(
         return status;
     }
     
-    /* 如果已经映射，先取消映射 */
+    // 如果已经映射，先取消映射
     if (fdoContext->ShmUserVirtAddr != NULL) {
         VnvmeUnmapShmFromUser(fdoContext);
     }
     
-    /* 映射到用户空间 */
+    // 映射到用户空间
     status = VnvmeMapShmToUser(fdoContext, &userAddress);
     if (!NT_SUCCESS(status)) {
         TRACE_ERROR("VnvmeHandleMapShm: VnvmeMapShmToUser failed, status=0x%08X", status);
@@ -357,7 +357,7 @@ VnvmeHandleMapShm(
     output->UserAddress = userAddress;
     output->ActualSize = (UINT32)fdoContext->ShmSize;
     output->Reserved = 0;
-    output->CommandEventHandle = NULL;  /* TODO: 创建用户可见的事件句柄 */
+    output->CommandEventHandle = NULL;  // TODO: 创建用户可见的事件句柄
     
     *BytesReturned = sizeof(VNVME_MAP_SHARED_MEMORY_OUTPUT);
     
@@ -398,7 +398,7 @@ VnvmeHandleUserReady(
         return status;
     }
     
-    /* 验证版本兼容性 */
+    // 验证版本兼容性
     if ((input->UserVersion >> 16) != (VNVME_VERSION >> 16)) {
         TRACE_ERROR("VnvmeHandleUserReady: Version mismatch, user=0x%08X, driver=0x%08X",
                     input->UserVersion, VNVME_VERSION);
@@ -409,7 +409,7 @@ VnvmeHandleUserReady(
     fdoContext->UserReady = TRUE;
     KeQuerySystemTime(&fdoContext->LastHeartbeat);
     
-    /* 通知等待者 */
+    // 通知等待者
     KeSetEvent(&fdoContext->UserReadyEvent, IO_NO_INCREMENT, FALSE);
     
     TRACE_INFO("VnvmeHandleUserReady: User service ready, PID=%u", input->UserPid);
@@ -465,12 +465,12 @@ VnvmeHandleHeartbeat(
         return status;
     }
     
-    /* 更新心跳时间 */
+    // 更新心跳时间
     KeQuerySystemTime(&fdoContext->LastHeartbeat);
     
-    /* 填充响应 */
+    // 填充响应
     output->KernelTimestamp = fdoContext->LastHeartbeat.QuadPart;
-    output->PendingCommands = 0;  /* TODO: 计算待处理命令数 */
+    output->PendingCommands = 0;  // TODO: 计算待处理命令数
     output->Reserved = 0;
     
     *BytesReturned = sizeof(VNVME_HEARTBEAT_OUTPUT);

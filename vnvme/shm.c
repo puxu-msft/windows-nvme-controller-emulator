@@ -7,12 +7,21 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * 共享内存分配
- *===========================================================================*/
+//===========================================================================
+// 共享内存分配
+//===========================================================================
 
 /**
- * @brief 分配共享内存
+ * @brief 分配共享内存 (v2 零复制架构)
+ * 
+ * 共享内存布局:
+ *   - Control Block (4KB)
+ *   - Notify Ring (4KB)
+ *   - Admin SQ (4KB) - 原始 NVME_COMMAND, stornvme 直接写入
+ *   - Admin CQ (4KB) - 原始 NVME_COMPLETION, stornvme 直接读取
+ *   - I/O Queue Descriptors (4KB)
+ *   - I/O Queues (可变)
+ *   - Data Buffer (剩余空间)
  */
 NTSTATUS
 VnvmeAllocateShm(
@@ -25,10 +34,11 @@ VnvmeAllocateShm(
     PHYSICAL_ADDRESS boundaryAddress = {0};
     SIZE_T size = VNVME_SHARED_MEMORY_SIZE;
     PVNVME_SHARED_MEMORY_CONTROL_BLOCK controlBlock;
+    PVNVME_NOTIFY_RING notifyRing;
     
-    TRACE_INFO("VnvmeAllocateShm: Allocating %llu bytes", (ULONGLONG)size);
+    TRACE_INFO("VnvmeAllocateShm: Allocating %llu bytes (v2 zero-copy)", (ULONGLONG)size);
     
-    /* 分配连续物理内存 */
+    // 分配连续物理内存
     virtAddr = MmAllocateContiguousMemorySpecifyCache(
         size,
         lowAddress,
@@ -42,44 +52,92 @@ VnvmeAllocateShm(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    /* 清零 */
+    // 清零
     RtlZeroMemory(virtAddr, size);
     
-    /* 保存指针 */
+    // 保存指针
     FdoContext->ShmKernelVirtAddr = virtAddr;
     FdoContext->ShmPhysAddr = MmGetPhysicalAddress(virtAddr);
     FdoContext->ShmSize = size;
     
-    /* 初始化控制块 */
+    //==========================================================================
+    // 初始化控制块 (v2)
+    //==========================================================================
     controlBlock = (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)virtAddr;
     controlBlock->Magic = VNVME_SHARED_MEMORY_MAGIC;
     controlBlock->Version = VNVME_SHARED_MEMORY_VERSION;
     controlBlock->TotalSize = (UINT32)size;
     controlBlock->ControlBlockSize = VNVME_CONTROL_BLOCK_SIZE;
+    controlBlock->Flags = 0;
     
-    /* 计算环偏移 */
-    controlBlock->SubmissionRingOffset = VNVME_CONTROL_BLOCK_SIZE;
-    controlBlock->SubmissionRingSize = VNVME_SUBMISSION_RING_SIZE;
-    controlBlock->CompletionRingOffset = controlBlock->SubmissionRingOffset + 
-        sizeof(VNVME_SUBMISSION_RING);
-    controlBlock->CompletionRingSize = VNVME_COMPLETION_RING_SIZE;
+    //==========================================================================
+    // 初始化 Admin 队列描述符
+    //==========================================================================
+    // Admin SQ 描述符
+    controlBlock->AdminSQ.Offset = VNVME_OFFSET_ADMIN_SQ;
+    controlBlock->AdminSQ.EntrySize = NVME_SQ_ENTRY_SIZE;
+    controlBlock->AdminSQ.Capacity = VNVME_ADMIN_QUEUE_DEPTH;
+    controlBlock->AdminSQ.Valid = 0; // 等待 CC.EN=1 时激活
+    controlBlock->AdminSQ.Head = 0;
+    controlBlock->AdminSQ.Tail = 0;
+    controlBlock->AdminSQ.Phase = 0;
     
-    /* 计算数据缓冲区偏移 */
-    controlBlock->DataBufferOffset = controlBlock->CompletionRingOffset + 
-        sizeof(VNVME_COMPLETION_RING);
-    controlBlock->DataBufferSize = (UINT32)(size - controlBlock->DataBufferOffset);
+    // Admin CQ 描述符
+    controlBlock->AdminCQ.Offset = VNVME_OFFSET_ADMIN_CQ;
+    controlBlock->AdminCQ.EntrySize = NVME_CQ_ENTRY_SIZE;
+    controlBlock->AdminCQ.Capacity = VNVME_ADMIN_QUEUE_DEPTH;
+    controlBlock->AdminCQ.Valid = 0;
+    controlBlock->AdminCQ.Head = 0;
+    controlBlock->AdminCQ.Tail = 0;
+    controlBlock->AdminCQ.Phase = 1; // CQ 初始相位为 1
     
-    /* 初始化状态 */
+    //==========================================================================
+    // I/O 队列配置
+    //==========================================================================
+    controlBlock->IoQueueCount = 0;
+    controlBlock->MaxIoQueues = VNVME_MAX_IO_QUEUES;
+    controlBlock->IoQueueDescriptorOffset = VNVME_OFFSET_IO_QUEUE_DESC;
+    
+    //==========================================================================
+    // 通知环
+    //==========================================================================
+    controlBlock->NotifyRingOffset = VNVME_OFFSET_NOTIFY_RING;
+    controlBlock->NotifyRingSize = sizeof(VNVME_NOTIFY_RING);
+    
+    notifyRing = (PVNVME_NOTIFY_RING)((PUCHAR)virtAddr + VNVME_OFFSET_NOTIFY_RING);
+    notifyRing->Head = 0;
+    notifyRing->Tail = 0;
+    notifyRing->Size = VNVME_NOTIFY_RING_SIZE;
+    
+    //==========================================================================
+    // 数据缓冲区
+    //==========================================================================
+    controlBlock->DataBufferOffset = VNVME_OFFSET_DATA_BUFFER;
+    controlBlock->DataBufferSize = (UINT32)(size - VNVME_OFFSET_DATA_BUFFER);
+    
+    //==========================================================================
+    // 状态
+    //==========================================================================
     controlBlock->KernelReady = 1;
     controlBlock->UserReady = 0;
     controlBlock->ErrorCode = 0;
+    controlBlock->ControllerState = VNVME_CTRL_STATE_DISABLED;
     
-    TRACE_INFO("VnvmeAllocateShm: Allocated at VirtAddr=%p, PhysAddr=0x%llX",
+    // 统计初始化
+    controlBlock->CommandsProcessed = 0;
+    controlBlock->CompletionsPosted = 0;
+    controlBlock->BytesRead = 0;
+    controlBlock->BytesWritten = 0;
+    
+    TRACE_INFO("VnvmeAllocateShm: v2 zero-copy layout initialized");
+    TRACE_INFO("  VirtAddr=%p, PhysAddr=0x%llX",
                virtAddr, FdoContext->ShmPhysAddr.QuadPart);
-    TRACE_INFO("  SubmissionRing: offset=0x%X, size=%u",
-               controlBlock->SubmissionRingOffset, controlBlock->SubmissionRingSize);
-    TRACE_INFO("  CompletionRing: offset=0x%X, size=%u",
-               controlBlock->CompletionRingOffset, controlBlock->CompletionRingSize);
+    TRACE_INFO("  Admin SQ: offset=0x%X, capacity=%u",
+               controlBlock->AdminSQ.Offset, controlBlock->AdminSQ.Capacity);
+    TRACE_INFO("  Admin CQ: offset=0x%X, capacity=%u",
+               controlBlock->AdminCQ.Offset, controlBlock->AdminCQ.Capacity);
+    TRACE_INFO("  NotifyRing: offset=0x%X, size=%u",
+               controlBlock->NotifyRingOffset, controlBlock->NotifyRingSize);
     TRACE_INFO("  DataBuffer: offset=0x%X, size=%u",
                controlBlock->DataBufferOffset, controlBlock->DataBufferSize);
     
@@ -94,16 +152,16 @@ VnvmeFreeShm(
     _In_ PVNVME_FDO_CONTEXT FdoContext
     )
 {
-    /* 先取消用户态映射 */
+    // 先取消用户态映射
     VnvmeUnmapShmFromUser(FdoContext);
     
-    /* 释放 MDL */
+    // 释放 MDL
     if (FdoContext->ShmMdl != NULL) {
         IoFreeMdl(FdoContext->ShmMdl);
         FdoContext->ShmMdl = NULL;
     }
     
-    /* 释放内存 */
+    // 释放内存
     if (FdoContext->ShmKernelVirtAddr != NULL) {
         TRACE_INFO("VnvmeFreeShm: Freeing shared memory at %p",
                    FdoContext->ShmKernelVirtAddr);
@@ -113,9 +171,9 @@ VnvmeFreeShm(
     }
 }
 
-/*===========================================================================
- * 用户态映射
- *===========================================================================*/
+//===========================================================================
+// 用户态映射
+//===========================================================================
 
 /**
  * @brief 将共享内存映射到用户空间
@@ -136,9 +194,9 @@ VnvmeMapShmToUser(
         return STATUS_INVALID_DEVICE_STATE;
     }
     
-    /* 如果已有 MDL，复用它 */
+    // 如果已有 MDL，复用它
     if (FdoContext->ShmMdl == NULL) {
-        /* 创建 MDL */
+        // 创建 MDL
         mdl = IoAllocateMdl(
             FdoContext->ShmKernelVirtAddr,
             (ULONG)FdoContext->ShmSize,
@@ -152,7 +210,7 @@ VnvmeMapShmToUser(
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         
-        /* 锁定页面 */
+        // 锁定页面
         MmBuildMdlForNonPagedPool(mdl);
         
         FdoContext->ShmMdl = mdl;
@@ -160,7 +218,7 @@ VnvmeMapShmToUser(
         mdl = FdoContext->ShmMdl;
     }
     
-    /* 映射到用户空间 */
+    // 映射到用户空间
     __try {
         userVirtAddr = MmMapLockedPagesSpecifyCache(
             mdl,

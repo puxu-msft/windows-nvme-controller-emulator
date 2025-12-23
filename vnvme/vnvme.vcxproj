@@ -23,6 +23,7 @@
     <ProjectGuid>{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}</ProjectGuid>
     <RootNamespace>vnvme</RootNamespace>
     <ProjectName>vnvme</ProjectName>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
@@ -119,6 +120,7 @@
     <ClCompile Include="doorbell.c" />
     <ClCompile Include="queue.c" />
     <ClCompile Include="prp.c" />
+    <ClCompile Include="utils.c" />
   </ItemGroup>
   
   <ItemGroup>

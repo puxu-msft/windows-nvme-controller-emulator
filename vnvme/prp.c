@@ -7,9 +7,9 @@
 
 #include "vnvme.h"
 
-/*===========================================================================
- * PRP 解析
- *===========================================================================*/
+//===========================================================================
+// PRP 解析
+//===========================================================================
 
 /**
  * @brief 解析 PRP 列表获取物理地址
@@ -37,21 +37,21 @@ VnvmeParsePrpList(
         return STATUS_SUCCESS;
     }
     
-    /* 计算第一页偏移和字节数 */
+    // 计算第一页偏移和字节数
     firstPageOffset = (ULONG)(Prp1 & (pageSize - 1));
     firstPageBytes = pageSize - firstPageOffset;
     
     if (firstPageBytes >= DataLength) {
-        /* 数据完全在第一页内 */
+        // 数据完全在第一页内
         numPages = 1;
     } else {
-        /* 需要多页 */
+        // 需要多页
         numPages = 1 + ((DataLength - firstPageBytes + pageSize - 1) / pageSize);
     }
     
     TRACE_VERBOSE("VnvmeParsePrpList: DataLength=%u, NumPages=%u", DataLength, numPages);
     
-    /* 分配 PRP 条目数组 */
+    // 分配 PRP 条目数组
     entries = (PVNVME_PRP_ENTRY)VNVME_ALLOC_POOL(
         NonPagedPoolNx, 
         numPages * sizeof(VNVME_PRP_ENTRY)
@@ -64,31 +64,31 @@ VnvmeParsePrpList(
     
     RtlZeroMemory(entries, numPages * sizeof(VNVME_PRP_ENTRY));
     
-    /* 第一个条目：PRP1 */
+    // 第一个条目：PRP1
     entries[entryIndex].PhysicalAddress = Prp1 & ~((ULONGLONG)pageSize - 1);
     entries[entryIndex].Offset = firstPageOffset;
     entries[entryIndex].Length = (firstPageBytes >= DataLength) ? DataLength : firstPageBytes;
     entryIndex++;
     
     if (numPages == 1) {
-        /* 单页，完成 */
+        // 单页，完成
         *PrpEntries = entries;
         *EntryCount = entryIndex;
         return STATUS_SUCCESS;
     }
     
     if (numPages == 2) {
-        /* 双页，PRP2 直接是第二页地址 */
+        // 双页，PRP2 直接是第二页地址
         entries[entryIndex].PhysicalAddress = Prp2 & ~((ULONGLONG)pageSize - 1);
         entries[entryIndex].Offset = 0;
         entries[entryIndex].Length = DataLength - firstPageBytes;
         entryIndex++;
     } else {
-        /* 多页，PRP2 是 PRP 列表地址 */
-        /* TODO: Phase 4 - 读取 PRP 列表 */
+        // 多页，PRP2 是 PRP 列表地址
+        // TODO: Phase 4 - 读取 PRP 列表
         TRACE_WARN("VnvmeParsePrpList: PRP list parsing not implemented for %u pages", numPages);
         
-        /* 临时处理：只使用前两页 */
+        // 临时处理：只使用前两页
         entries[entryIndex].PhysicalAddress = Prp2 & ~((ULONGLONG)pageSize - 1);
         entries[entryIndex].Offset = 0;
         entries[entryIndex].Length = DataLength - firstPageBytes;
@@ -117,9 +117,9 @@ VnvmeFreePrpEntries(
     }
 }
 
-/*===========================================================================
- * 数据传输
- *===========================================================================*/
+//===========================================================================
+// 数据传输
+//===========================================================================
 
 /**
  * @brief 从主机内存读取数据
@@ -138,17 +138,17 @@ VnvmeReadFromHostMemory(
     
     TRACE_VERBOSE("VnvmeReadFromHostMemory: PA=0x%016llX, Len=%u", PhysicalAddress, Length);
     
-    /* 映射物理地址 */
+    // 映射物理地址
     mappedAddr = MmMapIoSpace(physAddr, Length, MmCached);
     if (mappedAddr == NULL) {
         TRACE_ERROR("VnvmeReadFromHostMemory: MmMapIoSpace failed");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    /* 复制数据 */
+    // 复制数据
     RtlCopyMemory(Buffer, mappedAddr, Length);
     
-    /* 取消映射 */
+    // 取消映射
     MmUnmapIoSpace(mappedAddr, Length);
     
     return STATUS_SUCCESS;
@@ -171,17 +171,17 @@ VnvmeWriteToHostMemory(
     
     TRACE_VERBOSE("VnvmeWriteToHostMemory: PA=0x%016llX, Len=%u", PhysicalAddress, Length);
     
-    /* 映射物理地址 */
+    // 映射物理地址
     mappedAddr = MmMapIoSpace(physAddr, Length, MmCached);
     if (mappedAddr == NULL) {
         TRACE_ERROR("VnvmeWriteToHostMemory: MmMapIoSpace failed");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     
-    /* 复制数据 */
+    // 复制数据
     RtlCopyMemory(mappedAddr, Buffer, Length);
     
-    /* 取消映射 */
+    // 取消映射
     MmUnmapIoSpace(mappedAddr, Length);
     
     return STATUS_SUCCESS;

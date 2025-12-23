@@ -48,152 +48,191 @@ typedef uint64_t UINT64;
 
 #define VNVME_SHARED_MEMORY_SIZE        (64 * 1024 * 1024)  // 64 MB
 #define VNVME_CONTROL_BLOCK_SIZE        4096                 // 4 KB
-#define VNVME_SUBMISSION_RING_SIZE      1024                 // 提交条目数
-#define VNVME_COMPLETION_RING_SIZE      1024                 // 完成条目数
 #define VNVME_DATA_BUFFER_SIZE          (60 * 1024 * 1024)   // ~60 MB
 
+// NVMe 队列配置
+#define VNVME_ADMIN_QUEUE_DEPTH         64                   // Admin 队列深度
+#define VNVME_IO_QUEUE_DEPTH            256                  // I/O 队列深度
+#define VNVME_MAX_IO_QUEUES             16                   // 最大 I/O 队列数
+
+// NVMe 条目大小 (NVMe 规范)
+#define NVME_SQ_ENTRY_SIZE              64                   // Submission Queue Entry
+#define NVME_CQ_ENTRY_SIZE              16                   // Completion Queue Entry
+
 #define VNVME_SHARED_MEMORY_MAGIC       0x454D564E          // "NVME"
-#define VNVME_SHARED_MEMORY_VERSION     1
+#define VNVME_SHARED_MEMORY_VERSION     2                    // v2: 零复制架构
 
 /*===========================================================================
- * 共享内存控制块
+ * 队列描述符 - 描述 SQ/CQ 在共享内存中的位置
+ *===========================================================================*/
+
+/**
+ * @brief 队列描述符
+ * 
+ * 描述一个 NVMe 队列 (SQ 或 CQ) 在共享内存中的位置和状态。
+ * 用户态通过此描述符定位队列并访问原始 NVMe 条目。
+ */
+typedef struct _VNVME_QUEUE_DESCRIPTOR {
+    UINT32 Offset;                      // 队列在共享内存中的偏移
+    UINT32 EntrySize;                   // 条目大小 (SQ=64, CQ=16)
+    UINT32 Capacity;                    // 队列容量 (条目数)
+    UINT32 Valid;                       // 队列是否有效
+    volatile UINT32 Head;               // 消费者索引
+    volatile UINT32 Tail;               // 生产者索引
+    volatile UINT32 Phase;              // CQ 相位位 (仅 CQ)
+    UINT32 Reserved;
+} VNVME_QUEUE_DESCRIPTOR, *PVNVME_QUEUE_DESCRIPTOR;
+
+VNVME_STATIC_ASSERT(sizeof(VNVME_QUEUE_DESCRIPTOR) == 32, queue_descriptor_size);
+
+/*===========================================================================
+ * 通知环 - 轻量级 Head/Tail 同步
+ *===========================================================================*/
+
+/**
+ * @brief 通知条目 - 通知用户态有新命令或完成项
+ */
+typedef struct _VNVME_NOTIFY_ENTRY {
+    UINT16 QueueId;                     // 队列 ID (0 = Admin)
+    UINT16 Type;                        // 0 = SQ 有新命令, 1 = CQ 已更新
+    UINT32 Index;                       // Doorbell 写入的索引值
+} VNVME_NOTIFY_ENTRY, *PVNVME_NOTIFY_ENTRY;
+
+VNVME_STATIC_ASSERT(sizeof(VNVME_NOTIFY_ENTRY) == 8, notify_entry_size);
+
+#define VNVME_NOTIFY_RING_SIZE          256
+
+/**
+ * @brief 通知环 - 内核通知用户态 Doorbell 变化
+ */
+typedef struct _VNVME_NOTIFY_RING {
+    volatile UINT32 Head;               // 消费者 (用户态)
+    volatile UINT32 Tail;               // 生产者 (内核)
+    UINT32 Size;
+    UINT32 Reserved;
+    VNVME_NOTIFY_ENTRY Entries[VNVME_NOTIFY_RING_SIZE];
+} VNVME_NOTIFY_RING, *PVNVME_NOTIFY_RING;
+
+/*===========================================================================
+ * 共享内存控制块 (v2 - 零复制架构)
  *===========================================================================*/
 
 /**
  * @brief 共享内存控制块 - 位于共享内存起始位置
+ * 
+ * 零复制架构：
+ * - NVMe SQ/CQ 直接分配在共享内存中
+ * - stornvme 通过物理地址写入 SQ
+ * - 用户态通过虚拟地址直接读取原始 NVME_COMMAND
+ * - 无需复制命令数据
  */
 typedef struct _VNVME_SHARED_MEMORY_CONTROL_BLOCK {
-    /* 魔数和版本 (0x00-0x0F) */
+    /* 头部 (0x00-0x1F) */
     UINT32 Magic;                       // 0x00: 魔数 VNVME_SHARED_MEMORY_MAGIC
-    UINT32 Version;                     // 0x04: 版本号
+    UINT32 Version;                     // 0x04: 版本号 (2 = 零复制)
     UINT32 TotalSize;                   // 0x08: 共享内存总大小
     UINT32 ControlBlockSize;            // 0x0C: 控制块大小
+    UINT32 Flags;                       // 0x10: 标志
+    UINT32 Reserved1;                   // 0x14
+    UINT64 Reserved2;                   // 0x18
     
-    /* 环偏移 (0x10-0x1F) */
-    UINT32 SubmissionRingOffset;        // 0x10: 提交环偏移
-    UINT32 SubmissionRingSize;          // 0x14: 提交环条目数
-    UINT32 CompletionRingOffset;        // 0x18: 完成环偏移
-    UINT32 CompletionRingSize;          // 0x1C: 完成环条目数
+    /* Admin 队列描述符 (0x20-0x5F) */
+    VNVME_QUEUE_DESCRIPTOR AdminSQ;     // 0x20: Admin Submission Queue
+    VNVME_QUEUE_DESCRIPTOR AdminCQ;     // 0x40: Admin Completion Queue
     
-    /* 数据缓冲区 (0x20-0x2F) */
-    UINT32 DataBufferOffset;            // 0x20: 数据缓冲区偏移
-    UINT32 DataBufferSize;              // 0x24: 数据缓冲区大小
-    UINT32 Reserved1[2];
+    /* I/O 队列信息 (0x60-0x6F) */
+    UINT32 IoQueueCount;                // 0x60: 当前活动 I/O 队列数
+    UINT32 MaxIoQueues;                 // 0x64: 最大 I/O 队列数
+    UINT32 IoQueueDescriptorOffset;     // 0x68: I/O 队列描述符数组偏移
+    UINT32 Reserved3;                   // 0x6C
     
-    /* 状态 (0x30-0x3F) */
-    volatile UINT32 KernelReady;        // 0x30: 内核就绪标志
-    volatile UINT32 UserReady;          // 0x34: 用户态就绪标志
-    volatile UINT32 ErrorCode;          // 0x38: 错误码
-    UINT32 Reserved2;
+    /* 通知环 (0x70-0x7F) */
+    UINT32 NotifyRingOffset;            // 0x70: 通知环偏移
+    UINT32 NotifyRingSize;              // 0x74: 通知环大小
+    UINT64 Reserved4;                   // 0x78
     
-    /* 统计 (0x40-0x5F) */
-    volatile UINT64 CommandsProcessed;  // 0x40: 已处理命令数
-    volatile UINT64 CompletionsPosted;  // 0x48: 已提交完成数
-    volatile UINT64 BytesRead;          // 0x50: 读取字节数
-    volatile UINT64 BytesWritten;       // 0x58: 写入字节数
+    /* 数据缓冲区 (0x80-0x8F) */
+    UINT32 DataBufferOffset;            // 0x80: 数据缓冲区偏移
+    UINT32 DataBufferSize;              // 0x84: 数据缓冲区大小
+    UINT64 Reserved5;                   // 0x88
+    
+    /* 状态 (0x90-0x9F) */
+    volatile UINT32 KernelReady;        // 0x90: 内核就绪标志
+    volatile UINT32 UserReady;          // 0x94: 用户态就绪标志
+    volatile UINT32 ErrorCode;          // 0x98: 错误码
+    volatile UINT32 ControllerState;    // 0x9C: 控制器状态
+    
+    /* 统计 (0xA0-0xBF) */
+    volatile UINT64 CommandsProcessed;  // 0xA0: 已处理命令数
+    volatile UINT64 CompletionsPosted;  // 0xA8: 已提交完成数
+    volatile UINT64 BytesRead;          // 0xB0: 读取字节数
+    volatile UINT64 BytesWritten;       // 0xB8: 写入字节数
     
     /* 保留 */
-    UINT8 Reserved[4096 - 0x60];
+    UINT8 Reserved[4096 - 0xC0];
     
 } VNVME_SHARED_MEMORY_CONTROL_BLOCK, *PVNVME_SHARED_MEMORY_CONTROL_BLOCK;
 
 VNVME_STATIC_ASSERT(sizeof(VNVME_SHARED_MEMORY_CONTROL_BLOCK) == 4096, control_block_size);
 
 /*===========================================================================
- * 提交环 (Submission Ring) - 内核向用户态提交命令
+ * 控制器状态
  *===========================================================================*/
 
+typedef enum _VNVME_CONTROLLER_STATE {
+    VNVME_CTRL_STATE_DISABLED   = 0,    // CC.EN=0, CSTS.RDY=0
+    VNVME_CTRL_STATE_ENABLING   = 1,    // CC.EN=1, CSTS.RDY=0
+    VNVME_CTRL_STATE_READY      = 2,    // CC.EN=1, CSTS.RDY=1
+    VNVME_CTRL_STATE_DISABLING  = 3,    // CC.EN=0, CSTS.RDY=1
+    VNVME_CTRL_STATE_FAILED     = 4,    // CSTS.CFS=1
+} VNVME_CONTROLLER_STATE;
+
+/*===========================================================================
+ * 旧结构保留 (兼容性/迁移用, 标记为 deprecated)
+ *===========================================================================*/
+
+#ifdef VNVME_INCLUDE_DEPRECATED
+
 /**
- * @brief 命令类型
+ * @deprecated 使用零复制架构，用户态直接访问 NVME_COMMAND
  */
 typedef enum _VNVME_COMMAND_TYPE {
-    VNVME_CMD_ADMIN             = 0,    // Admin 命令
-    VNVME_CMD_IO_READ           = 1,    // I/O 读
-    VNVME_CMD_IO_WRITE          = 2,    // I/O 写
-    VNVME_CMD_IO_FLUSH          = 3,    // I/O 刷新
-    VNVME_CMD_CONTROLLER_ENABLE = 4,    // 控制器启用
-    VNVME_CMD_CONTROLLER_RESET  = 5,    // 控制器重置
-    VNVME_CMD_CREATE_QUEUE      = 6,    // 创建队列
-    VNVME_CMD_DELETE_QUEUE      = 7,    // 删除队列
+    VNVME_CMD_ADMIN             = 0,
+    VNVME_CMD_IO_READ           = 1,
+    VNVME_CMD_IO_WRITE          = 2,
+    VNVME_CMD_IO_FLUSH          = 3,
+    VNVME_CMD_CONTROLLER_ENABLE = 4,
+    VNVME_CMD_CONTROLLER_RESET  = 5,
+    VNVME_CMD_CREATE_QUEUE      = 6,
+    VNVME_CMD_DELETE_QUEUE      = 7,
 } VNVME_COMMAND_TYPE;
 
 /**
- * @brief 提交环条目 - 内核提交给用户态处理的命令
+ * @deprecated 用户态直接访问原始 NVME_COMMAND (64字节)
  */
-typedef struct _VNVME_SUBMISSION_RING_ENTRY {
-    /* 基本信息 */
-    UINT32 Type;                        // 命令类型 (VNVME_COMMAND_TYPE)
-    UINT16 CommandId;                   // 命令 ID
-    UINT16 QueueId;                     // 队列 ID (0 = Admin)
-    
-    /* NVMe 命令相关 */
-    UINT8  Opcode;                      // NVMe opcode
-    UINT8  Flags;                       // 标志
+typedef struct _VNVME_SUBMISSION_RING_ENTRY_DEPRECATED {
+    UINT32 Type;
+    UINT16 CommandId;
+    UINT16 QueueId;
+    UINT8  Opcode;
+    UINT8  Flags;
     UINT16 Reserved1;
-    UINT32 NSID;                        // 命名空间 ID
-    
-    /* 数据位置 */
-    UINT32 DataBufferOffset;            // 数据在共享内存中的偏移
-    UINT32 DataLength;                  // 数据长度
-    
-    /* I/O 参数 */
-    UINT64 StartLBA;                    // 起始 LBA
-    UINT32 CDW10;                       // 命令双字 10
-    UINT32 CDW11;                       // 命令双字 11
-    UINT32 CDW12;                       // 命令双字 12
-    UINT32 CDW13;                       // 命令双字 13
-    UINT32 CDW14;                       // 命令双字 14
-    UINT32 CDW15;                       // 命令双字 15
-    
-    /* PRP 信息 (内核填充) */
-    UINT64 PRP1;                        // PRP1 (物理地址)
-    UINT64 PRP2;                        // PRP2 (物理地址或 PRP List)
-    
-    /* 时间戳 */
-    UINT64 Timestamp;                   // 命令提交时间
-    
-} VNVME_SUBMISSION_RING_ENTRY, *PVNVME_SUBMISSION_RING_ENTRY;
+    UINT32 NSID;
+    UINT32 DataBufferOffset;
+    UINT32 DataLength;
+    UINT64 StartLBA;
+    UINT32 CDW10;
+    UINT32 CDW11;
+    UINT32 CDW12;
+    UINT32 CDW13;
+    UINT32 CDW14;
+    UINT32 CDW15;
+    UINT64 PRP1;
+    UINT64 PRP2;
+    UINT64 Timestamp;
+} VNVME_SUBMISSION_RING_ENTRY_DEPRECATED;
 
-VNVME_STATIC_ASSERT(sizeof(VNVME_SUBMISSION_RING_ENTRY) == 80, submission_ring_entry_size);
-
-/**
- * @brief 提交环 - 内核向用户态提交命令的环形缓冲区
- */
-typedef struct _VNVME_SUBMISSION_RING {
-    volatile UINT32 Head;               // 消费者 (用户态) 更新
-    volatile UINT32 Tail;               // 生产者 (内核) 更新
-    UINT32 Size;                        // 环大小
-    UINT32 Reserved;
-    VNVME_SUBMISSION_RING_ENTRY Entries[VNVME_SUBMISSION_RING_SIZE];
-} VNVME_SUBMISSION_RING, *PVNVME_SUBMISSION_RING;
-
-/*===========================================================================
- * 完成环
- *===========================================================================*/
-
-/**
- * @brief 完成环条目
- */
-typedef struct _VNVME_COMPLETION_RING_ENTRY {
-    UINT16 CommandId;                   // 对应的命令 ID
-    UINT16 QueueId;                     // 队列 ID
-    UINT32 Status;                      // NVMe 状态码
-    UINT32 Result;                      // 命令特定结果 (DW0)
-    UINT32 Reserved;
-} VNVME_COMPLETION_RING_ENTRY, *PVNVME_COMPLETION_RING_ENTRY;
-
-VNVME_STATIC_ASSERT(sizeof(VNVME_COMPLETION_RING_ENTRY) == 16, completion_ring_entry_size);
-
-/**
- * @brief 完成环
- */
-typedef struct _VNVME_COMPLETION_RING {
-    volatile UINT32 Head;               // 消费者 (内核) 更新
-    volatile UINT32 Tail;               // 生产者 (用户态) 更新
-    UINT32 Size;                        // 环大小
-    UINT32 Reserved;
-    VNVME_COMPLETION_RING_ENTRY Entries[VNVME_COMPLETION_RING_SIZE];
-} VNVME_COMPLETION_RING, *PVNVME_COMPLETION_RING;
+#endif // VNVME_INCLUDE_DEPRECATED
 
 /*===========================================================================
  * NVMe 状态码
@@ -253,6 +292,130 @@ typedef struct _VNVME_NAMESPACE_CONFIG {
 #define VNVME_NS_FLAG_ENABLED           0x0001
 #define VNVME_NS_FLAG_READONLY          0x0002
 #define VNVME_NS_FLAG_SPARSE            0x0004
+
+/*===========================================================================
+ * 共享内存布局计算宏
+ *===========================================================================*/
+
+/**
+ * 共享内存布局 (零复制架构):
+ * 
+ * +------------------+ 0x00000000
+ * | Control Block    | 4KB (VNVME_SHARED_MEMORY_CONTROL_BLOCK)
+ * +------------------+ 0x00001000
+ * | Notify Ring      | 4KB (VNVME_NOTIFY_RING, 对齐)
+ * +------------------+ 0x00002000
+ * | Admin SQ         | 64×64B = 4KB
+ * +------------------+ 0x00003000
+ * | Admin CQ         | 64×16B = 1KB (对齐到 4KB)
+ * +------------------+ 0x00004000
+ * | I/O Queue Desc   | 16×2×32B = 1KB (SQ+CQ 描述符)
+ * +------------------+ 0x00005000
+ * | I/O SQ[0]        | 256×64B = 16KB
+ * +------------------+ 0x00009000
+ * | I/O CQ[0]        | 256×16B = 4KB
+ * +------------------+ 0x0000A000
+ * | I/O SQ[1]        | 16KB
+ * +------------------+ ...
+ * | Data Buffer      | 剩余空间 (~60MB)
+ * +------------------+ 0x04000000 (64MB)
+ */
+
+// 对齐到 4KB 页边界
+#define VNVME_ALIGN_PAGE(x)             (((x) + 4095) & ~4095ULL)
+
+// Admin 队列大小
+#define VNVME_ADMIN_SQ_SIZE             VNVME_ALIGN_PAGE(VNVME_ADMIN_QUEUE_DEPTH * NVME_SQ_ENTRY_SIZE)
+#define VNVME_ADMIN_CQ_SIZE             VNVME_ALIGN_PAGE(VNVME_ADMIN_QUEUE_DEPTH * NVME_CQ_ENTRY_SIZE)
+
+// I/O 队列大小
+#define VNVME_IO_SQ_SIZE                VNVME_ALIGN_PAGE(VNVME_IO_QUEUE_DEPTH * NVME_SQ_ENTRY_SIZE)
+#define VNVME_IO_CQ_SIZE                VNVME_ALIGN_PAGE(VNVME_IO_QUEUE_DEPTH * NVME_CQ_ENTRY_SIZE)
+
+// 共享内存区域偏移
+#define VNVME_OFFSET_CONTROL_BLOCK      0
+#define VNVME_OFFSET_NOTIFY_RING        VNVME_CONTROL_BLOCK_SIZE
+#define VNVME_OFFSET_ADMIN_SQ           (VNVME_OFFSET_NOTIFY_RING + VNVME_ALIGN_PAGE(sizeof(VNVME_NOTIFY_RING)))
+#define VNVME_OFFSET_ADMIN_CQ           (VNVME_OFFSET_ADMIN_SQ + VNVME_ADMIN_SQ_SIZE)
+#define VNVME_OFFSET_IO_QUEUE_DESC      (VNVME_OFFSET_ADMIN_CQ + VNVME_ADMIN_CQ_SIZE)
+
+// I/O 队列描述符数组大小 (每个队列需要 SQ + CQ 两个描述符)
+#define VNVME_IO_QUEUE_DESC_SIZE        VNVME_ALIGN_PAGE(VNVME_MAX_IO_QUEUES * 2 * sizeof(VNVME_QUEUE_DESCRIPTOR))
+
+// I/O 队列区域起始偏移
+#define VNVME_OFFSET_IO_QUEUES          (VNVME_OFFSET_IO_QUEUE_DESC + VNVME_IO_QUEUE_DESC_SIZE)
+
+// 单个 I/O 队列对大小 (SQ + CQ)
+#define VNVME_IO_QUEUE_PAIR_SIZE        (VNVME_IO_SQ_SIZE + VNVME_IO_CQ_SIZE)
+
+// 计算第 N 个 I/O SQ 的偏移
+#define VNVME_IO_SQ_OFFSET(n)           (VNVME_OFFSET_IO_QUEUES + (n) * VNVME_IO_QUEUE_PAIR_SIZE)
+
+// 计算第 N 个 I/O CQ 的偏移
+#define VNVME_IO_CQ_OFFSET(n)           (VNVME_IO_SQ_OFFSET(n) + VNVME_IO_SQ_SIZE)
+
+// 数据缓冲区偏移 (所有队列之后)
+#define VNVME_OFFSET_DATA_BUFFER        (VNVME_OFFSET_IO_QUEUES + VNVME_MAX_IO_QUEUES * VNVME_IO_QUEUE_PAIR_SIZE)
+
+/*===========================================================================
+ * 辅助内联函数
+ *===========================================================================*/
+
+/**
+ * @brief 获取 Admin SQ 指针
+ */
+static inline void* VnvmeGetAdminSQ(void* SharedMemory)
+{
+    return (UINT8*)SharedMemory + VNVME_OFFSET_ADMIN_SQ;
+}
+
+/**
+ * @brief 获取 Admin CQ 指针
+ */
+static inline void* VnvmeGetAdminCQ(void* SharedMemory)
+{
+    return (UINT8*)SharedMemory + VNVME_OFFSET_ADMIN_CQ;
+}
+
+/**
+ * @brief 获取 I/O SQ 指针
+ */
+static inline void* VnvmeGetIoSQ(void* SharedMemory, UINT32 QueueIndex)
+{
+    return (UINT8*)SharedMemory + VNVME_IO_SQ_OFFSET(QueueIndex);
+}
+
+/**
+ * @brief 获取 I/O CQ 指针
+ */
+static inline void* VnvmeGetIoCQ(void* SharedMemory, UINT32 QueueIndex)
+{
+    return (UINT8*)SharedMemory + VNVME_IO_CQ_OFFSET(QueueIndex);
+}
+
+/**
+ * @brief 获取控制块指针
+ */
+static inline PVNVME_SHARED_MEMORY_CONTROL_BLOCK VnvmeGetControlBlock(void* SharedMemory)
+{
+    return (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)SharedMemory;
+}
+
+/**
+ * @brief 获取通知环指针
+ */
+static inline PVNVME_NOTIFY_RING VnvmeGetNotifyRing(void* SharedMemory)
+{
+    return (PVNVME_NOTIFY_RING)((UINT8*)SharedMemory + VNVME_OFFSET_NOTIFY_RING);
+}
+
+/**
+ * @brief 获取数据缓冲区指针
+ */
+static inline void* VnvmeGetDataBuffer(void* SharedMemory)
+{
+    return (UINT8*)SharedMemory + VNVME_OFFSET_DATA_BUFFER;
+}
 
 #pragma pack(pop)
 

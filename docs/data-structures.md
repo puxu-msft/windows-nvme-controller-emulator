@@ -54,18 +54,71 @@ FDO (Functional Device Object) 上下文定义在 [vnvme/vnvme.h](../vnvme/vnvme
 > - `LIST_ENTRY` 更简单直接，适合 PDO 由 IOCTL 控制创建/删除的场景
 > - vnvme 控制器数量少 (≤16)，不需要框架的重量级枚举机制
 
-### 共享内存布局
+### 共享内存布局 (v2 零复制架构)
 
 共享内存相关结构体定义在 [include/vnvme_common.h](../include/vnvme_common.h)：
+
+> **v2 架构变更**
+> 
+> 零复制架构消除了命令复制开销：
+> - **v1**: 内核将 NVMe 命令复制到 `VNVME_SUBMISSION_RING_ENTRY`（80字节），用户态处理后写 `VNVME_COMPLETION_RING_ENTRY`
+> - **v2**: NVMe SQ/CQ 直接分配在共享内存中，用户态直接访问原始 `NVME_COMMAND`（64字节）
 
 | 结构体/常量 | 说明 |
 |------------|------|
 | `VNVME_SHARED_MEMORY_SIZE` | 共享内存总大小 (64MB) |
-| `VNVME_SHARED_MEMORY_CONTROL_BLOCK` | 控制块结构 (4KB) |
-| `VNVME_SUBMISSION_RING_ENTRY` | 提交环条目 (80 字节) |
-| `VNVME_COMPLETION_RING_ENTRY` | 完成环条目 (16 字节) |
+| `VNVME_SHARED_MEMORY_CONTROL_BLOCK` | 控制块结构 (4KB, v2) |
+| `VNVME_QUEUE_DESCRIPTOR` | 队列描述符 (32 字节) |
+| `VNVME_NOTIFY_RING` | 通知环 (Doorbell 变更通知) |
 | `VNVME_CONTROLLER_CONFIG` | 控制器配置 |
 | `VNVME_NAMESPACE_CONFIG` | 命名空间配置 |
+
+#### 内存布局图
+
+```
++------------------+ 0x00000000
+| Control Block    | 4KB (VNVME_SHARED_MEMORY_CONTROL_BLOCK)
++------------------+ 0x00001000
+| Notify Ring      | 4KB (VNVME_NOTIFY_RING, 对齐)
++------------------+ 0x00002000
+| Admin SQ         | 64×64B = 4KB (原始 NVME_COMMAND)
++------------------+ 0x00003000
+| Admin CQ         | 64×16B = 1KB (原始 NVME_COMPLETION)
++------------------+ 0x00004000
+| I/O Queue Desc   | 16×2×32B = 1KB (队列描述符数组)
++------------------+ 0x00005000
+| I/O SQ[0]        | 256×64B = 16KB
++------------------+ 0x00009000
+| I/O CQ[0]        | 256×16B = 4KB
++------------------+ 0x0000A000
+| I/O SQ[1], CQ[1] | ...
++------------------+ ...
+| Data Buffer      | ~60MB (I/O 数据缓冲区)
++------------------+ 0x04000000 (64MB)
+```
+
+#### 零复制数据流
+
+```
+stornvme.sys                   vnvme.sys (内核)                 用户态
+     │                              │                              │
+     │  写入 Admin SQ               │                              │
+     ├─────────────────────────────▶│                              │
+     │  (ASQ 物理地址指向共享内存)   │                              │
+     │                              │  Doorbell 写入              │
+     │                              ├─────────────────────────────▶│
+     │                              │  (通知环条目)                 │
+     │                              │                              │
+     │                              │                              │ 直接读取
+     │                              │                              │ NVME_COMMAND
+     │                              │                              │ (无复制!)
+     │                              │                              │
+     │                              │  完成项写入 CQ               │
+     │                              │◀─────────────────────────────┤
+     │                              │                              │
+     │  读取 CQ 完成项              │                              │
+     │◀─────────────────────────────┤                              │
+```
 
 ---
 

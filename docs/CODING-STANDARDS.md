@@ -381,8 +381,117 @@ fprintf(stderr, "Error occurred\n");
 
 ---
 
+## 8. 代码风格决策
+
+本节记录项目开发过程中的关键风格决策和设计选择。
+
+### 8.1 注释风格
+
+**决策**: 统一使用 `//` 而非 `/* */`
+
+```c
+// ✅ 使用 C++ 风格行注释
+// 标识
+BOOLEAN IsFdo;                      // TRUE = FDO, FALSE = PDO
+
+// ✅ 分隔符也使用行注释
+//===========================================================================
+// 函数声明 - vnvme.c
+//===========================================================================
+
+// ❌ 避免块注释
+/* 标识 */
+BOOLEAN IsFdo;                      /* TRUE = FDO, FALSE = PDO */
+```
+
+**例外**: 文件头 Doxygen 注释可使用 `/** */`。
+
+### 8.2 Phase 2/3 预留字段
+
+**决策**: 不直接删除未实现字段，以注释形式保留
+
+```c
+typedef struct _VNVME_NAMESPACE {
+    // 标识
+    ULONG NsId;                         // 命名空间 ID (1-based, 0=未使用)
+    BOOLEAN Active;                     // 是否激活
+    // BOOLEAN ReadOnly;                // TODO Phase 2: 只读标志
+    // BOOLEAN ThinProvisioned;         // TODO Phase 2: 精简配置
+    
+    // TODO Phase 2: 唯一标识
+    // GUID Guid;
+    // UCHAR Nguid[16];                 // Namespace Globally Unique Identifier
+    // UCHAR Eui64[8];                  // IEEE Extended Unique Identifier
+    
+    // 容量
+    ULONG BlockSize;                    // 逻辑块大小 (512 或 4096)
+    ULONGLONG TotalBlocks;              // 总逻辑块数
+    ULONGLONG TotalBytes;               // 总字节数
+    
+    // TODO Phase 2: 后端偏移
+    // ULONGLONG BackendOffset;         // 在后端存储中的偏移
+    
+    // TODO Phase 3: 统计
+    // volatile LONG64 ReadCommands;    // 读命令计数
+} VNVME_NAMESPACE, *PVNVME_NAMESPACE;
+```
+
+**原则**:
+- 保留原文档中有价值的注释说明
+- 使用 `TODO Phase N:` 前缀标记
+- 便于后续阶段快速取消注释启用
+
+### 8.3 类型大小选择
+
+**决策**: 优先匹配 NVMe 规范定义的类型大小
+
+| 字段 | NVMe 规范 | 代码类型 | 说明 |
+|------|-----------|----------|------|
+| Queue ID | 16-bit | `USHORT` | SQID/CQID 在规范中是 16-bit |
+| IoQueueCount | - | `USHORT` | 最大 64，16-bit 足够 |
+| MaxIoQueues | CAP.MQES (16-bit) | `USHORT` | 与规范一致 |
+| NamespaceCount | - | `USHORT` | 最大 16，16-bit 足够 |
+| ControllerId | - | `ULONG` | 内部索引，无规范限制 |
+
+### 8.4 常量命名精确性
+
+**决策**: 常量名应准确描述其用途
+
+| 旧名称 | 新名称 | 原因 |
+|--------|--------|------|
+| `VNVME_MAX_QUEUES` | `VNVME_MAX_IO_QUEUES` | 仅用于 I/O 队列数组，不含 Admin |
+| `SharedMemory*` | `Shm*` | 缩短名称，统一前缀 |
+
+### 8.5 LIST_ENTRY vs WDFCHILDLIST
+
+**决策**: 使用 `LIST_ENTRY` 管理子设备列表
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| `WDFCHILDLIST` | 框架支持热插拔、自动枚举 | 需要标识描述符、多个回调、复杂 |
+| `LIST_ENTRY` ✅ | 简单直接、完全控制 | 需手动维护 |
+
+**原因**:
+- vnvme 控制器由 IOCTL 创建/删除，非真实总线枚举
+- 控制器数量少 (≤16)，不需要框架的重量级机制
+- 驱动完全控制 PDO 生命周期
+
+### 8.6 WDF vs WDM 字段
+
+**决策**: 使用 KMDF，不保留 WDM 风格的底层字段
+
+| WDM 字段 | WDF 替代 | 说明 |
+|----------|----------|------|
+| `PDEVICE_OBJECT PhysicalDeviceObject` | `WdfDeviceWdmGetPhysicalDevice(Device)` | 按需获取 |
+| `PDEVICE_OBJECT AttachedDevice` | 框架自动管理 | Filter DO 附加由 WDF 处理 |
+| `BOOLEAN Present` | WDF PnP 状态机 | 框架跟踪设备存在 |
+| `BOOLEAN ReportedMissing` | WDF PnP 状态机 | 枚举器回调返回状态 |
+
+---
+
 ## 更新历史
 
 | 日期 | 版本 | 说明 |
 |------|------|------|
+| 2025-12-23 | 1.1 | 添加代码风格决策章节 (注释风格、Phase预留、类型选择等) |
 | 2025-12-23 | 1.0 | 初始版本，基于 Phase 1 开发经验 |

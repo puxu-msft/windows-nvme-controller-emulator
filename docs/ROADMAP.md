@@ -240,17 +240,22 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 #### 3.2 用户态映射 (ctrl_dev.c)
 - [x] 实现 `IOCTL_VNVME_MAP_SHARED_MEMORY` - 映射到用户空间
 - [x] 实现 `IOCTL_VNVME_USER_READY` - 用户态就绪通知
-- [~] 实现 `IOCTL_VNVME_GET_COMMAND_EVENT` - 获取事件句柄 (框架已有，TODO)
+- [~] 实现 `IOCTL_VNVME_GET_COMMAND_EVENT` - 获取事件句柄 (轮询模式，TODO: 事件机制)
 - [x] 实现 `IOCTL_VNVME_HEARTBEAT` - 心跳
-- [ ] 实现 `IOCTL_VNVME_SUBMIT_COMPLETIONS` - 提交完成
+- [x] 实现 `IOCTL_VNVME_SUBMIT_COMPLETIONS` - 提交完成
+- [x] 实现 `IOCTL_VNVME_CREATE_CONTROLLER` - 创建控制器
+- [x] 实现 `IOCTL_VNVME_DELETE_CONTROLLER` - 删除控制器
+- [x] 实现 `IOCTL_VNVME_LIST_CONTROLLERS` - 列出控制器
 
 #### 3.3 vnvme-server 框架 (main.c)
 - [x] 创建 vnvme-server 项目骨架
-- [ ] 实现命令行参数解析
+- [x] 实现命令行参数解析 (--backend, --file, --size, --debug)
 - [ ] 实现配置文件加载
-- [ ] 打开控制设备 `\\.\VNVMEControl`
-- [ ] 映射共享内存
-- [ ] 发送 USER_READY 通知
+- [x] 打开控制设备 `\\.\VNVMEControl`
+- [x] 映射共享内存
+- [x] 发送 USER_READY 通知
+- [x] 实现主循环和心跳机制
+- [ ] 实现实际命令处理 (ProcessCommands)
 
 #### 3.4 命令循环 (command_engine.c)
 - [ ] 实现主事件循环

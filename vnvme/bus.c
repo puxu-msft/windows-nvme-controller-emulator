@@ -160,6 +160,14 @@ VnvmeCreateControllerPdo(
     pnpPowerCallbacks.EvtDeviceD0Exit = VnvmePdoEvtDeviceD0Exit;
     WdfDeviceInitSetPnpPowerEventCallbacks(deviceInit, &pnpPowerCallbacks);
     
+    // 7.5 配置 PDO 特定回调
+    // 注意: KMDF PDO 资源查询通过 WdfPdoInitSetEventCallbacks 配置
+    // 对于虚拟设备，我们不需要向 PnP 管理器请求资源
+    // BAR0 内存在 PrepareHardware 中自行分配
+    // 但是，我们需要向子驱动（stornvme）报告资源
+    // 这通过 EvtDeviceResourcesQuery 和 EvtDeviceResourceRequirementsQuery 完成
+    // TODO Phase 3: 如果 stornvme 需要，可以添加这些回调
+    
     // 8. 创建 PDO 设备对象
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VNVME_PDO_CONTEXT);
     

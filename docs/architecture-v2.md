@@ -649,12 +649,12 @@ int main(int argc, char** argv)
     }
     
     // 3. 映射共享内存
-    VNVME_MAP_SHARED_MEMORY_REQUEST req;
-    VNVME_MAP_SHARED_MEMORY_RESPONSE resp;
-    DeviceIoControl(deviceHandle, IOCTL_VNVME_MAP_SHARED_MEMORY,
+    VNVME_MAP_SHM_REQUEST req;
+    VNVME_MAP_SHM_RESPONSE resp;
+    DeviceIoControl(deviceHandle, IOCTL_VNVME_MAP_SHM,
                     &req, sizeof(req), &resp, sizeof(resp), NULL, NULL);
     
-    PVNVME_SHARED_MEMORY shared = (PVNVME_SHARED_MEMORY)resp.UserAddress;
+    PVNVME_SHM shared = (PVNVME_SHM)resp.UserAddress;
     
     // 4. 初始化后端
     PVNVME_BACKEND backend = VnvmeCreateBackend(&config);
@@ -693,7 +693,7 @@ int main(int argc, char** argv)
 
 ```c
 VOID VnvmeProcessPendingCommands(
-    PVNVME_SHARED_MEMORY Shared,
+    PVNVME_SHM Shared,
     PVNVME_BACKEND Backend)
 {
     PVNVME_SUBMISSION_RING subRing = &Shared->SubmissionRing;

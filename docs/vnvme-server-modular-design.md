@@ -31,9 +31,9 @@ vnvme-server/
 │   └── heartbeat.h / heartbeat.c   # ⬜ 心跳管理 (从 driver_comm 分离)
 │
 ├── protocol/                       # NVMe 协议处理
-│   ├── command_engine.h / command_engine.c   # ⬜ 命令引擎 (分发+调度)
-│   ├── admin_commands.h / admin_commands.c   # ⬜ Admin 命令
-│   ├── io_commands.h / io_commands.c         # ⬜ I/O 命令
+│   ├── command_engine.h / command_engine.c   # ✅ 命令引擎 (分发+调度) (562+253行)
+│   ├── admin_commands.h / admin_commands.c   # ✅ Admin 命令 (911+301行)
+│   ├── io_commands.h / io_commands.c         # ✅ I/O 命令 (632+255行)
 │   └── nvme_types.h                # ⬜ NVMe 协议类型 (复用 include/nvme_spec.h)
 │
 ├── backend/                        # 存储后端层
@@ -52,8 +52,8 @@ vnvme-server/
 │   ├── controller.h / controller.c # ⬜ 控制器状态机
 │   └── features.h / features.c     # ⬜ Feature 管理
 │
-├── main.c                          # 程序入口 (精简)
-├── main_v2.c                       # ✅ 模块化入口 (待启用)
+├── main.c                          # ✅ 程序入口 (655行)
+├── main_v2.c                       # ✅ 模块化入口 (233行, 待启用)
 ├── vnvme_server.h                  # ✅ 公共头文件
 │
 └── tests/                          # 单元测试

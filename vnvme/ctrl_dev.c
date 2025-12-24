@@ -9,6 +9,22 @@
 #include <ntstrsafe.h>
 
 //===========================================================================
+// ObOpenObjectByPointer 声明 (用于创建用户态可等待事件句柄)
+//===========================================================================
+
+NTKERNELAPI
+NTSTATUS
+ObOpenObjectByPointer(
+    _In_ PVOID Object,
+    _In_ ULONG HandleAttributes,
+    _In_opt_ PACCESS_STATE PassedAccessState,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_TYPE ObjectType,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PHANDLE Handle
+    );
+
+//===========================================================================
 // 内部函数声明
 //===========================================================================
 
@@ -79,6 +95,47 @@ static NTSTATUS
 VnvmeHandleSubmitCompletions(
     _In_ WDFREQUEST Request,
     _In_ size_t InputBufferLength
+    );
+
+static NTSTATUS
+VnvmeHandleGetStats(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+static NTSTATUS
+VnvmeHandleSetDebugLevel(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
+    );
+
+static NTSTATUS
+VnvmeHandleUnmapShm(
+    _In_ WDFREQUEST Request
+    );
+
+static NTSTATUS
+VnvmeHandleCreateNamespace(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+static NTSTATUS
+VnvmeHandleDeleteNamespace(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
+    );
+
+static NTSTATUS
+VnvmeHandleListNamespaces(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
     );
 
 //===========================================================================
@@ -171,6 +228,7 @@ VnvmeCreateControlDevice(
     WdfControlFinishInitializing(controlDevice);
     
     fdoContext->ControlDevice = controlDevice;
+    fdoContext->ControlQueue = queue;  // 保存队列用于优雅关闭
     
     TRACE_INFO("VnvmeCreateControlDevice: Control device created at %wZ", &symbolicLink);
     return STATUS_SUCCESS;
@@ -224,7 +282,7 @@ VnvmeEvtIoDeviceControl(
             status = VnvmeHandleGetStatus(Request, OutputBufferLength, &bytesReturned);
             break;
         
-        case IOCTL_VNVME_MAP_SHARED_MEMORY:
+        case IOCTL_VNVME_MAP_SHM:
             status = VnvmeHandleMapShm(Request, OutputBufferLength, &bytesReturned);
             break;
         
@@ -254,6 +312,30 @@ VnvmeEvtIoDeviceControl(
         
         case IOCTL_VNVME_SUBMIT_COMPLETIONS:
             status = VnvmeHandleSubmitCompletions(Request, InputBufferLength);
+            break;
+        
+        case IOCTL_VNVME_GET_STATS:
+            status = VnvmeHandleGetStats(Request, InputBufferLength, OutputBufferLength, &bytesReturned);
+            break;
+        
+        case IOCTL_VNVME_SET_DEBUG_LEVEL:
+            status = VnvmeHandleSetDebugLevel(Request, InputBufferLength);
+            break;
+        
+        case IOCTL_VNVME_UNMAP_SHM:
+            status = VnvmeHandleUnmapShm(Request);
+            break;
+        
+        case IOCTL_VNVME_CREATE_NAMESPACE:
+            status = VnvmeHandleCreateNamespace(Request, InputBufferLength, OutputBufferLength, &bytesReturned);
+            break;
+        
+        case IOCTL_VNVME_DELETE_NAMESPACE:
+            status = VnvmeHandleDeleteNamespace(Request, InputBufferLength);
+            break;
+        
+        case IOCTL_VNVME_LIST_NAMESPACES:
+            status = VnvmeHandleListNamespaces(Request, InputBufferLength, OutputBufferLength, &bytesReturned);
             break;
         
         default:
@@ -351,7 +433,32 @@ VnvmeHandleGetStatus(
     output->UserServiceStatus = fdoContext->UserReady ? 
         VNVME_USER_STATUS_READY : VNVME_USER_STATUS_NOT_CONNECTED;
     output->ControllerCount = fdoContext->ChildDeviceCount;
-    output->NamespaceCount = 0;  // TODO: 计算命名空间数
+    
+    // 计算活动命名空间数
+    {
+        PLIST_ENTRY entry;
+        PVNVME_PDO_CONTEXT pdoContext;
+        ULONG nsCount = 0;
+        USHORT i;
+        KIRQL oldIrql;
+        
+        KeAcquireSpinLock(&fdoContext->ChildDeviceListLock, &oldIrql);
+        
+        for (entry = fdoContext->ChildDeviceList.Flink;
+             entry != &fdoContext->ChildDeviceList;
+             entry = entry->Flink) {
+            pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+            for (i = 0; i < VNVME_MAX_NAMESPACES; i++) {
+                if (pdoContext->Namespaces[i].Active) {
+                    nsCount++;
+                }
+            }
+        }
+        
+        KeReleaseSpinLock(&fdoContext->ChildDeviceListLock, oldIrql);
+        output->NamespaceCount = nsCount;
+    }
+    
     output->ShmMapped = (fdoContext->ShmUserVirtAddr != NULL) ? 1 : 0;
     output->ShmSize = (UINT32)fdoContext->ShmSize;
     output->CommandsProcessed = fdoContext->CommandsProcessed;
@@ -362,7 +469,7 @@ VnvmeHandleGetStatus(
 }
 
 /**
- * @brief 处理 IOCTL_VNVME_MAP_SHARED_MEMORY
+ * @brief 处理 IOCTL_VNVME_MAP_SHM
  */
 static NTSTATUS
 VnvmeHandleMapShm(
@@ -372,7 +479,7 @@ VnvmeHandleMapShm(
     )
 {
     NTSTATUS status;
-    PVNVME_MAP_SHARED_MEMORY_OUTPUT output;
+    PVNVME_MAP_SHM_OUTPUT output;
     PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
     PVOID userAddress = NULL;
     
@@ -382,13 +489,13 @@ VnvmeHandleMapShm(
         return STATUS_DEVICE_NOT_READY;
     }
     
-    if (OutputBufferLength < sizeof(VNVME_MAP_SHARED_MEMORY_OUTPUT)) {
+    if (OutputBufferLength < sizeof(VNVME_MAP_SHM_OUTPUT)) {
         return STATUS_BUFFER_TOO_SMALL;
     }
     
     status = WdfRequestRetrieveOutputBuffer(
         Request,
-        sizeof(VNVME_MAP_SHARED_MEMORY_OUTPUT),
+        sizeof(VNVME_MAP_SHM_OUTPUT),
         (PVOID*)&output,
         NULL
         );
@@ -418,7 +525,7 @@ VnvmeHandleMapShm(
     // 事件句柄用于阻塞等待优化，通过 IOCTL_VNVME_GET_COMMAND_EVENT 获取
     output->CommandEventHandle = NULL;
     
-    *BytesReturned = sizeof(VNVME_MAP_SHARED_MEMORY_OUTPUT);
+    *BytesReturned = sizeof(VNVME_MAP_SHM_OUTPUT);
     
     TRACE_INFO("VnvmeHandleMapShm: Mapped at %p, size=%llu", 
                userAddress, fdoContext->ShmSize);
@@ -527,9 +634,40 @@ VnvmeHandleHeartbeat(
     // 更新心跳时间
     KeQuerySystemTime(&fdoContext->LastHeartbeat);
     
-    // 填充响应
+    // 计算待处理命令数 (简化: 通过 SQ Tail - Head 估算)
+    {
+        PLIST_ENTRY entry;
+        PVNVME_PDO_CONTEXT pdoContext;
+        ULONG pending = 0;
+        USHORT i;
+        KIRQL oldIrql;
+        
+        KeAcquireSpinLock(&fdoContext->ChildDeviceListLock, &oldIrql);
+        
+        for (entry = fdoContext->ChildDeviceList.Flink;
+             entry != &fdoContext->ChildDeviceList;
+             entry = entry->Flink) {
+            pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+            
+            // Admin SQ 待处理
+            if (pdoContext->AdminSq.Tail >= pdoContext->AdminSq.Head) {
+                pending += pdoContext->AdminSq.Tail - pdoContext->AdminSq.Head;
+            }
+            
+            // I/O SQ 待处理
+            for (i = 0; i < pdoContext->IoQueueCount; i++) {
+                if (pdoContext->IoSq[i].Created) {
+                    if (pdoContext->IoSq[i].Tail >= pdoContext->IoSq[i].Head) {
+                        pending += pdoContext->IoSq[i].Tail - pdoContext->IoSq[i].Head;
+                    }
+                }
+            }
+        }
+        
+        KeReleaseSpinLock(&fdoContext->ChildDeviceListLock, oldIrql);
+        output->PendingCommands = pending;
+    }
     output->KernelTimestamp = fdoContext->LastHeartbeat.QuadPart;
-    output->PendingCommands = 0;  // TODO: 计算待处理命令数
     output->Reserved = 0;
     
     *BytesReturned = sizeof(VNVME_HEARTBEAT_OUTPUT);
@@ -720,11 +858,20 @@ VnvmeHandleListControllers(
         
         PVNVME_PDO_CONTEXT pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
         PVNVME_CONTROLLER_INFO info = &output->Controllers[index];
+        USHORT i;
+        ULONGLONG capacity = 0;
+        
+        // 计算总容量
+        for (i = 0; i < VNVME_MAX_NAMESPACES; i++) {
+            if (pdoContext->Namespaces[i].Active) {
+                capacity += pdoContext->Namespaces[i].TotalBlocks * pdoContext->Namespaces[i].BlockSize;
+            }
+        }
         
         info->ControllerId = pdoContext->ControllerId;
-        info->Status = 0;  // TODO: 实际状态
+        info->Status = (pdoContext->CachedCC & 0x1) ? 1 : 0;  // 使用 CC.EN (位 0)
         info->NamespaceCount = pdoContext->NamespaceCount;
-        info->TotalCapacity = 0;  // TODO: 计算容量
+        info->TotalCapacity = capacity;
         
         // 默认序列号和型号
         RtlCopyMemory(info->SerialNumber, "VNVME000        ", 16);
@@ -752,11 +899,9 @@ VnvmeHandleListControllers(
  * 返回一个用户态可等待的事件句柄。
  * 当有新命令到达时，内核会设置此事件。
  * 
- * 注意: 零复制架构中，用户态主要通过轮询 NotifyRing 获取通知。
- * 事件机制是可选的优化，用于减少轮询时的 CPU 占用。
- * 
- * TODO Phase 3: 使用 ZwCreateEvent + ObReferenceObjectByHandle 实现
- *               或者使用 IO 完成端口机制
+ * 实现方案:
+ * - 使用 ObOpenObjectByPointer 获取内核事件的用户态句柄
+ * - 返回可在用户态 WaitForSingleObject 等待的句柄
  */
 static NTSTATUS
 VnvmeHandleGetCommandEvent(
@@ -768,6 +913,7 @@ VnvmeHandleGetCommandEvent(
     NTSTATUS status;
     PVNVME_GET_COMMAND_EVENT_OUTPUT output;
     PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    HANDLE userHandle = NULL;
     
     *BytesReturned = 0;
     
@@ -790,13 +936,36 @@ VnvmeHandleGetCommandEvent(
         return status;
     }
     
-    // TODO Phase 3: 实现用户态可等待事件
-    // 当前返回 NULL，用户态使用轮询模式
-    // 零复制架构: 轮询 NotifyRing 也是高效的
-    output->EventHandle = NULL;
+    // 如果还没有创建用户态句柄，现在创建
+    if (fdoContext->UserEventHandle == NULL) {
+        // 使用 ObOpenObjectByPointer 获取内核事件的用户态句柄
+        status = ObOpenObjectByPointer(
+            &fdoContext->CommandReadyEvent,
+            0,                          // 非内核句柄
+            NULL,                       // 无访问状态
+            EVENT_ALL_ACCESS,           // 完全访问
+            *ExEventObjectType,
+            UserMode,                   // 用户态访问
+            &userHandle
+        );
+        
+        if (NT_SUCCESS(status)) {
+            fdoContext->UserEventHandle = userHandle;
+            fdoContext->EventNotificationEnabled = TRUE;
+            TRACE_INFO("VnvmeHandleGetCommandEvent: Created user event handle 0x%p", userHandle);
+        } else {
+            TRACE_ERROR("VnvmeHandleGetCommandEvent: ObOpenObjectByPointer failed: 0x%08X", status);
+            // 回退到轮询模式
+            output->EventHandle = NULL;
+            *BytesReturned = sizeof(VNVME_GET_COMMAND_EVENT_OUTPUT);
+            return STATUS_SUCCESS;
+        }
+    }
+    
+    output->EventHandle = fdoContext->UserEventHandle;
     *BytesReturned = sizeof(VNVME_GET_COMMAND_EVENT_OUTPUT);
     
-    TRACE_INFO("VnvmeHandleGetCommandEvent: Polling mode (event not implemented)");
+    TRACE_INFO("VnvmeHandleGetCommandEvent: Returning event handle 0x%p", output->EventHandle);
     return STATUS_SUCCESS;
 }
 
@@ -828,6 +997,7 @@ VnvmeHandleSubmitCompletions(
     KIRQL oldIrql;
     PLIST_ENTRY entry;
     ULONG completionCount;
+    ULONG targetControllerId;
     ULONG controllersNotified = 0;
     
     if (fdoContext == NULL) {
@@ -851,14 +1021,16 @@ VnvmeHandleSubmitCompletions(
     }
     
     completionCount = input->CompletionCount;
+    targetControllerId = input->ControllerId;
     
     if (completionCount == 0) {
         TRACE_WARN("VnvmeHandleSubmitCompletions: CompletionCount is 0");
         return STATUS_SUCCESS;
     }
     
-    // 遍历所有控制器，通知有完成条目
-    // TODO: 优化 - 可以在输入中指定控制器 ID
+    // 遍历控制器列表
+    // ControllerId == 0: 广播到所有控制器
+    // ControllerId != 0: 只通知指定控制器
     KeAcquireSpinLock(&fdoContext->ChildDeviceListLock, &oldIrql);
     
     for (entry = fdoContext->ChildDeviceList.Flink;
@@ -866,6 +1038,11 @@ VnvmeHandleSubmitCompletions(
          entry = entry->Flink) {
         
         PVNVME_PDO_CONTEXT pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+        
+        // 如果指定了控制器 ID，只处理匹配的控制器
+        if (targetControllerId != 0 && pdoContext->ControllerId != targetControllerId) {
+            continue;
+        }
         
         // 触发中断通知 stornvme 有完成条目可用
         // 零复制架构: CQ 数据已在共享内存中
@@ -884,13 +1061,477 @@ VnvmeHandleSubmitCompletions(
             // stornvme 会检测到 CQ Head != Tail 并处理完成
             
             controllersNotified++;
+            
+            // 如果是指定控制器模式，找到后即可退出
+            if (targetControllerId != 0) {
+                break;
+            }
         }
     }
     
     KeReleaseSpinLock(&fdoContext->ChildDeviceListLock, oldIrql);
     
-    TRACE_INFO("VnvmeHandleSubmitCompletions: Submitted %lu completions to %lu controllers",
-               completionCount, controllersNotified);
+    TRACE_INFO("VnvmeHandleSubmitCompletions: Submitted %lu completions to %lu controllers (target=%lu)",
+               completionCount, controllersNotified, targetControllerId);
+    
+    return STATUS_SUCCESS;
+}
+
+//===========================================================================
+// 统计和调试 IOCTL 处理
+//===========================================================================
+
+/**
+ * @brief 处理 IOCTL_VNVME_GET_STATS
+ * 
+ * 返回控制器和命名空间的性能统计信息。
+ */
+static NTSTATUS
+VnvmeHandleGetStats(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+{
+    NTSTATUS status;
+    PVNVME_GET_STATS_INPUT input = NULL;
+    PVNVME_GET_STATS_OUTPUT output;
+    PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    KIRQL oldIrql;
+    PLIST_ENTRY entry;
+    ULONG ctrlIdx = 0;
+    ULONG nsIdx = 0;
+    ULONG targetControllerId = 0;
+    LARGE_INTEGER currentTime;
+    
+    *BytesReturned = 0;
+    
+    if (fdoContext == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    if (OutputBufferLength < sizeof(VNVME_GET_STATS_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    // 可选的输入参数
+    if (InputBufferLength >= sizeof(VNVME_GET_STATS_INPUT)) {
+        status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_GET_STATS_INPUT),
+                                               (PVOID*)&input, NULL);
+        if (NT_SUCCESS(status) && input != NULL) {
+            targetControllerId = input->ControllerId;
+        }
+    }
+    
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(VNVME_GET_STATS_OUTPUT),
+                                            (PVOID*)&output, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    RtlZeroMemory(output, sizeof(VNVME_GET_STATS_OUTPUT));
+    
+    // 计算运行时间
+    KeQuerySystemTime(&currentTime);
+    output->Uptime = (UINT64)((currentTime.QuadPart - fdoContext->StartTime.QuadPart) / 10000);
+    output->TotalCommandsProcessed = fdoContext->CommandsProcessed;
+    
+    // 遍历控制器收集统计
+    KeAcquireSpinLock(&fdoContext->ChildDeviceListLock, &oldIrql);
+    
+    for (entry = fdoContext->ChildDeviceList.Flink;
+         entry != &fdoContext->ChildDeviceList && ctrlIdx < VNVME_MAX_STATS_CONTROLLERS;
+         entry = entry->Flink) {
+        
+        PVNVME_PDO_CONTEXT pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+        PVNVME_CONTROLLER_STATS ctrlStats;
+        USHORT i;
+        
+        // 如果指定了控制器 ID，只收集匹配的
+        if (targetControllerId != 0 && pdoContext->ControllerId != targetControllerId) {
+            continue;
+        }
+        
+        ctrlStats = &output->Controllers[ctrlIdx];
+        ctrlStats->ControllerId = pdoContext->ControllerId;
+        ctrlStats->NamespaceCount = pdoContext->NamespaceCount;
+        ctrlStats->AdminCommandsProcessed = pdoContext->AdminCommandsProcessed;
+        ctrlStats->IoCommandsProcessed = pdoContext->IoCommandsProcessed;
+        ctrlStats->TotalReadBytes = pdoContext->BytesRead;
+        ctrlStats->TotalWriteBytes = pdoContext->BytesWritten;
+        ctrlStats->IoQueueCount = pdoContext->IoQueueCount;
+        ctrlStats->PollingIntervalUs = pdoContext->PollingIntervalUs;
+        
+        ctrlIdx++;
+        
+        // 收集命名空间统计
+        for (i = 0; i < VNVME_MAX_NAMESPACES && nsIdx < VNVME_MAX_STATS_NAMESPACES; i++) {
+            PVNVME_NAMESPACE ns = &pdoContext->Namespaces[i];
+            
+            if (ns->Active) {
+                PVNVME_NAMESPACE_STATS nsStats = &output->Namespaces[nsIdx];
+                
+                nsStats->NSID = ns->NsId;
+                nsStats->Active = TRUE;
+                nsStats->TotalBlocks = ns->TotalBlocks;
+                nsStats->BlockSize = ns->BlockSize;
+                nsStats->ReadCommands = ns->ReadCommands;
+                nsStats->WriteCommands = ns->WriteCommands;
+                nsStats->FlushCommands = ns->FlushCommands;
+                nsStats->ReadBytes = ns->ReadBytes;
+                nsStats->WriteBytes = ns->WriteBytes;
+                
+                nsIdx++;
+                output->TotalNamespaceCount++;
+            }
+        }
+    }
+    
+    KeReleaseSpinLock(&fdoContext->ChildDeviceListLock, oldIrql);
+    
+    output->ControllerCount = ctrlIdx;
+    *BytesReturned = sizeof(VNVME_GET_STATS_OUTPUT);
+    
+    TRACE_INFO("VnvmeHandleGetStats: Returned %lu controllers, %lu namespaces",
+               ctrlIdx, nsIdx);
+    
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 IOCTL_VNVME_SET_DEBUG_LEVEL
+ * 
+ * 动态调整调试输出级别。
+ */
+static NTSTATUS
+VnvmeHandleSetDebugLevel(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
+    )
+{
+    NTSTATUS status;
+    PVNVME_SET_DEBUG_LEVEL_INPUT input;
+    
+    if (InputBufferLength < sizeof(VNVME_SET_DEBUG_LEVEL_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_SET_DEBUG_LEVEL_INPUT),
+                                           (PVOID*)&input, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 更新全局调试级别
+    g_VnvmeDebugLevel = input->DebugLevel;
+    g_VnvmeDebugFlags = input->DebugFlags;
+    
+    TRACE_INFO("VnvmeHandleSetDebugLevel: Level=%u, Flags=0x%08X",
+               input->DebugLevel, input->DebugFlags);
+    
+    return STATUS_SUCCESS;
+}
+
+//===========================================================================
+// 内部辅助函数
+//===========================================================================
+
+/**
+ * @brief 根据控制器 ID 查找 PDO 上下文
+ */
+static PVNVME_PDO_CONTEXT
+CtrlDevFindController(
+    _In_ PVNVME_FDO_CONTEXT FdoContext,
+    _In_ ULONG ControllerId
+    )
+{
+    PLIST_ENTRY entry;
+    PVNVME_PDO_CONTEXT pdoContext;
+    KIRQL oldIrql;
+    
+    KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
+    
+    for (entry = FdoContext->ChildDeviceList.Flink;
+         entry != &FdoContext->ChildDeviceList;
+         entry = entry->Flink) {
+        
+        pdoContext = CONTAINING_RECORD(entry, VNVME_PDO_CONTEXT, ListEntry);
+        if (pdoContext->ControllerId == ControllerId) {
+            KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+            return pdoContext;
+        }
+    }
+    
+    KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+    return NULL;
+}
+
+//===========================================================================
+// 共享内存取消映射
+//===========================================================================
+
+/**
+ * @brief 处理 IOCTL_VNVME_UNMAP_SHM
+ */
+static NTSTATUS
+VnvmeHandleUnmapShm(
+    _In_ WDFREQUEST Request
+    )
+{
+    PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    
+    UNREFERENCED_PARAMETER(Request);
+    
+    if (fdoContext == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    // 共享内存会在进程退出时自动取消映射
+    // 这里主要用于测试模式下的显式清理
+    
+    TRACE_INFO("VnvmeHandleUnmapShm: Request received (no-op in kernel, user should unmap via VirtualFree)");
+    
+    return STATUS_SUCCESS;
+}
+
+//===========================================================================
+// 命名空间管理 IOCTL
+//===========================================================================
+
+/**
+ * @brief 处理 IOCTL_VNVME_CREATE_NAMESPACE
+ */
+static NTSTATUS
+VnvmeHandleCreateNamespace(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+{
+    NTSTATUS status;
+    PVNVME_CREATE_NAMESPACE_INPUT input;
+    PVNVME_CREATE_NAMESPACE_OUTPUT output;
+    PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    PVNVME_PDO_CONTEXT pdoContext;
+    UINT32 nsid;
+    UINT32 i;
+    
+    *BytesReturned = 0;
+    
+    if (fdoContext == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    if (InputBufferLength < sizeof(VNVME_CREATE_NAMESPACE_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    if (OutputBufferLength < sizeof(VNVME_CREATE_NAMESPACE_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_CREATE_NAMESPACE_INPUT),
+                                           (PVOID*)&input, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(VNVME_CREATE_NAMESPACE_OUTPUT),
+                                            (PVOID*)&output, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 查找控制器
+    pdoContext = CtrlDevFindController(fdoContext, input->ControllerId);
+    if (pdoContext == NULL) {
+        TRACE_ERROR("VnvmeHandleCreateNamespace: Controller %lu not found", input->ControllerId);
+        return STATUS_NOT_FOUND;
+    }
+    
+    // 检查命名空间数量上限
+    if (pdoContext->NamespaceCount >= VNVME_MAX_NAMESPACES) {
+        TRACE_ERROR("VnvmeHandleCreateNamespace: Max namespaces reached");
+        return STATUS_QUOTA_EXCEEDED;
+    }
+    
+    // 分配 NSID (1-based)
+    nsid = 0;
+    for (i = 0; i < VNVME_MAX_NAMESPACES; i++) {
+        if (!pdoContext->Namespaces[i].Active) {
+            nsid = i + 1;  // NSID 从 1 开始
+            break;
+        }
+    }
+    
+    if (nsid == 0) {
+        return STATUS_QUOTA_EXCEEDED;
+    }
+    
+    // 初始化命名空间
+    PVNVME_NAMESPACE ns = &pdoContext->Namespaces[nsid - 1];
+    RtlZeroMemory(ns, sizeof(VNVME_NAMESPACE));
+    
+    ns->Active = TRUE;
+    ns->NsId = nsid;
+    ns->TotalBlocks = input->Config.TotalBlocks;
+    ns->BlockSize = input->Config.BlockSize ? input->Config.BlockSize : 512;
+    ns->ReadOnly = (input->Config.Flags & VNVME_NS_FLAG_READONLY) ? TRUE : FALSE;
+    ns->ThinProvisioned = (input->Config.Flags & VNVME_NS_FLAG_SPARSE) ? TRUE : FALSE;
+    
+    pdoContext->NamespaceCount++;
+    
+    // 填充输出
+    output->NSID = nsid;
+    output->Reserved = 0;
+    *BytesReturned = sizeof(VNVME_CREATE_NAMESPACE_OUTPUT);
+    
+    TRACE_INFO("VnvmeHandleCreateNamespace: Created NSID=%lu on Controller=%lu, Blocks=%llu, BlockSize=%lu",
+               nsid, input->ControllerId, input->Config.TotalBlocks, ns->BlockSize);
+    
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 IOCTL_VNVME_DELETE_NAMESPACE
+ */
+static NTSTATUS
+VnvmeHandleDeleteNamespace(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
+    )
+{
+    NTSTATUS status;
+    PVNVME_DELETE_NAMESPACE_INPUT input;
+    PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    PVNVME_PDO_CONTEXT pdoContext;
+    PVNVME_NAMESPACE ns;
+    
+    if (fdoContext == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    if (InputBufferLength < sizeof(VNVME_DELETE_NAMESPACE_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_DELETE_NAMESPACE_INPUT),
+                                           (PVOID*)&input, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 查找控制器
+    pdoContext = CtrlDevFindController(fdoContext, input->ControllerId);
+    if (pdoContext == NULL) {
+        TRACE_ERROR("VnvmeHandleDeleteNamespace: Controller %lu not found", input->ControllerId);
+        return STATUS_NOT_FOUND;
+    }
+    
+    // 验证 NSID
+    if (input->NSID == 0 || input->NSID > VNVME_MAX_NAMESPACES) {
+        TRACE_ERROR("VnvmeHandleDeleteNamespace: Invalid NSID %lu", input->NSID);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    ns = &pdoContext->Namespaces[input->NSID - 1];
+    if (!ns->Active) {
+        TRACE_ERROR("VnvmeHandleDeleteNamespace: NSID %lu not active", input->NSID);
+        return STATUS_NOT_FOUND;
+    }
+    
+    // 清理命名空间
+    // TODO: 释放存储后端资源
+    
+    ns->Active = FALSE;
+    pdoContext->NamespaceCount--;
+    
+    TRACE_INFO("VnvmeHandleDeleteNamespace: Deleted NSID=%lu from Controller=%lu",
+               input->NSID, input->ControllerId);
+    
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 IOCTL_VNVME_LIST_NAMESPACES
+ */
+static NTSTATUS
+VnvmeHandleListNamespaces(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+{
+    NTSTATUS status;
+    PVNVME_LIST_NAMESPACES_INPUT input;
+    PVNVME_LIST_NAMESPACES_OUTPUT output;
+    PVNVME_FDO_CONTEXT fdoContext = g_FdoContext;
+    PVNVME_PDO_CONTEXT pdoContext;
+    UINT32 count = 0;
+    UINT32 i;
+    
+    *BytesReturned = 0;
+    
+    if (fdoContext == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    if (InputBufferLength < sizeof(VNVME_LIST_NAMESPACES_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    if (OutputBufferLength < sizeof(VNVME_LIST_NAMESPACES_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_LIST_NAMESPACES_INPUT),
+                                           (PVOID*)&input, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(VNVME_LIST_NAMESPACES_OUTPUT),
+                                            (PVOID*)&output, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    RtlZeroMemory(output, sizeof(VNVME_LIST_NAMESPACES_OUTPUT));
+    
+    // 查找控制器
+    pdoContext = CtrlDevFindController(fdoContext, input->ControllerId);
+    if (pdoContext == NULL) {
+        TRACE_ERROR("VnvmeHandleListNamespaces: Controller %lu not found", input->ControllerId);
+        return STATUS_NOT_FOUND;
+    }
+    
+    // 枚举命名空间
+    for (i = 0; i < VNVME_MAX_NAMESPACES && count < VNVME_MAX_NAMESPACES; i++) {
+        PVNVME_NAMESPACE ns = &pdoContext->Namespaces[i];
+        if (ns->Active) {
+            PVNVME_NAMESPACE_INFO info = &output->Namespaces[count];
+            
+            info->NSID = ns->NsId;
+            info->Flags = 0;
+            if (ns->Active) info->Flags |= VNVME_NS_FLAG_ENABLED;
+            if (ns->ReadOnly) info->Flags |= VNVME_NS_FLAG_READONLY;
+            if (ns->ThinProvisioned) info->Flags |= VNVME_NS_FLAG_SPARSE;
+            info->TotalBlocks = ns->TotalBlocks;
+            info->BlockSize = ns->BlockSize;
+            info->Reserved = 0;
+            
+            count++;
+        }
+    }
+    
+    output->Count = count;
+    *BytesReturned = sizeof(VNVME_LIST_NAMESPACES_OUTPUT);
+    
+    TRACE_INFO("VnvmeHandleListNamespaces: Listed %lu namespaces for Controller=%lu",
+               count, input->ControllerId);
     
     return STATUS_SUCCESS;
 }

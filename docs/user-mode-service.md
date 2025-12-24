@@ -60,57 +60,64 @@ vnvme-server.exe --config vnvme.conf   # 必须运行！
 
 ## 实现状态
 
-> **✅ 已实现**: 用户态服务核心功能 (v1 - 紧凑版)
+> **✅ 已实现**: 用户态服务完整功能，模块化重构完成
 > 
-> 当前实现 (3 文件, ~2000 行):
-> - `main.c` - 程序入口、IOCTL 通信、主循环、心跳、配置
-> - `command_processor.c` - NVMe 命令处理器 (Admin + I/O)
-> - `backend.c` - 存储后端 (内存 + 文件)
+> **v1 紧凑版** (3 主文件, ~2,071 行):
+> - `main.c` - 程序入口、IOCTL 通信、主循环 (655行)
+> - `command_processor.c` - NVMe 命令处理器 (985行)
+> - `backend.c` - 存储后端 (431行)
 >
-> **🔄 模块化重构中** (v2): 基础设施模块已完成，待集成启用。
+> **v2 模块化版本** (22 文件, ~7,900 行): ✅ **已完成**
+> - 完整模块分离: config, logger, driver_comm, backend_*, command_engine
+> - Admin/IO 命令已分离: admin_commands.c (911行), io_commands.c (632行)
+> - 新增命令引擎: command_engine.c (562行)
 
 ## 项目结构
 
-### 当前实现 (v1 - 紧凑版, 正在使用)
+### 当前实现 (v1 - 紧凑版)
 
 ```
 vnvme-server/
-├── main.c                  # 入口、配置、驱动通信、主循环 (621行)
-├── command_processor.c     # NVMe 命令处理 Admin + I/O (943行)
-├── backend.c               # 存储后端 内存 + 文件 (403行)
+├── main.c                  # 入口、配置、驱动通信、主循环 (655行)
+├── command_processor.c     # NVMe 命令处理 Admin + I/O (985行)
+├── backend.c               # 存储后端 内存 + 文件 (431行)
 └── vnvme.conf.example      # 示例配置文件
 ```
 
-### 模块化版本 (v2 - 已创建, 待启用)
+### 模块化版本 (v2 - ✅ 已完成)
 
 ```
 vnvme-server/
-├── types.h                 # ✅ 基础类型定义 (避免循环依赖)
-├── vnvme_server.h          # ✅ 公共头文件、共享类型
-├── logger.h                # ✅ 日志接口
-├── logger.c                # ✅ 日志系统实现 (~300行)
-├── config.h                # ✅ 配置结构定义
-├── config.c                # ✅ 配置解析 (~430行)
-├── driver_comm.h           # ✅ 驱动通信接口
-├── driver_comm.c           # ✅ 驱动通信实现 (~370行)
-├── backend.h               # ✅ 后端接口定义
-├── backend_common.c        # ✅ 后端分发器 (~200行)
-├── backend_memory.c        # ✅ 内存后端 (~210行)
-├── backend_file.c          # ✅ 文件后端 (~320行)
-├── main_v2.c               # ✅ 模块化入口 (待测试)
 │
-├── main.c                  # v1 入口 (当前使用)
-├── command_processor.c     # v1 命令处理 (两版本共用)
-└── backend.c               # v1 后端 (当前使用)
-```
-
-### 待完成模块
-
-```
-vnvme-server/
-├── admin_commands.c        # TODO: 从 command_processor.c 分离
-├── io_commands.c           # TODO: 从 command_processor.c 分离
-└── command_processor.h     # TODO: 命令处理接口
+├── 核心基础设施
+│   ├── types.h             # ✅ 基础类型定义 (84行)
+│   ├── vnvme_server.h      # ✅ 公共头文件 (195行)
+│   ├── logger.h/.c         # ✅ 日志系统 (133+295行)
+│   └── config.h/.c         # ✅ 配置解析 (122+421行)
+│
+├── 驱动通信层
+│   └── driver_comm.h/.c    # ✅ 驱动连接、共享内存 (148+369行)
+│
+├── 命令处理层
+│   ├── command_engine.h/.c # ✅ 命令引擎 (253+562行)
+│   ├── admin_commands.h/.c # ✅ Admin 命令 (301+911行)
+│   └── io_commands.h/.c    # ✅ I/O 命令 (255+632行)
+│
+├── 存储后端层
+│   ├── backend.h           # ✅ 后端接口 (127行)
+│   ├── backend_common.c    # ✅ 后端分发器 (230行)
+│   ├── backend_memory.c    # ✅ 内存后端 (209行)
+│   └── backend_file.c      # ✅ 文件后端 (314行)
+│
+├── 入口
+│   ├── main.c              # v1 入口 (655行, 当前使用)
+│   └── main_v2.c           # ✅ 模块化入口 (233行, 待启用)
+│
+├── 兼容层 (v1)
+│   ├── command_processor.c # v1 命令处理 (985行)
+│   └── backend.c           # v1 后端 (431行)
+│
+└── vnvme.conf.example      # 示例配置文件
 ```
 
 ### 模块职责
@@ -120,10 +127,12 @@ vnvme-server/
 | main.c | 程序入口、生命周期管理 | 所有模块 |
 | config.c | 配置文件解析、命令行解析 | logger |
 | driver_comm.c | 驱动连接、共享内存、心跳 | logger |
-| command_processor.c | 命令分发、NotifyRing 处理 | admin/io_commands, logger |
+| command_engine.c | 命令引擎、调度框架 | admin/io_commands, logger |
+| command_processor.c | 命令分发、NotifyRing 处理 (v1) | logger |
 | admin_commands.c | Admin 命令实现 | backend, logger |
 | io_commands.c | I/O 命令实现 | backend, logger |
 | backend.c | 后端抽象、后端选择 | backend_memory/file, logger |
+| backend_common.c | 后端工厂、分发 | backend_memory/file |
 | backend_memory.c | 内存后端实现 | logger |
 | backend_file.c | 文件后端实现 | logger |
 | logger.c | 日志输出、级别控制 | 无 |
@@ -379,13 +388,13 @@ BOOL MapSharedMemory(
     PVOID* ppSharedMemory,
     HANDLE* phCommandEvent)
 {
-    VNVME_MAP_SHARED_MEMORY_INPUT input = {0};
-    VNVME_MAP_SHARED_MEMORY_OUTPUT output = {0};
+    VNVME_MAP_SHM_INPUT input = {0};
+    VNVME_MAP_SHM_OUTPUT output = {0};
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
         hDevice,
-        IOCTL_VNVME_MAP_SHARED_MEMORY,
+        IOCTL_VNVME_MAP_SHM,
         &input, sizeof(input),
         &output, sizeof(output),
         &bytesReturned,
@@ -468,7 +477,7 @@ BOOL SubmitCompletions(HANDLE hDevice, UINT32 count)
 // command_engine.c - 主命令处理循环 (v2 零复制架构)
 
 typedef struct _COMMAND_ENGINE_CONTEXT {
-    PSHARED_MEMORY_CONTROL_BLOCK pControlBlock;
+    PSHM_CONTROL_BLOCK pControlBlock;
     HANDLE hCommandEvent;
     BOOL Running;
     
@@ -480,7 +489,7 @@ typedef struct _COMMAND_ENGINE_CONTEXT {
 void CommandLoop(PVOID pSharedMemory, HANDLE hCommandEvent)
 {
     COMMAND_ENGINE_CONTEXT ctx = {0};
-    ctx.pControlBlock = (PSHARED_MEMORY_CONTROL_BLOCK)pSharedMemory;
+    ctx.pControlBlock = (PSHM_CONTROL_BLOCK)pSharedMemory;
     ctx.hCommandEvent = hCommandEvent;
     ctx.Running = TRUE;
     
@@ -996,7 +1005,7 @@ typedef enum _VNVME_ERROR {
     // 初始化错误 (100-199)
     VNVME_ERROR_DRIVER_NOT_FOUND = 100,
     VNVME_ERROR_DRIVER_VERSION_MISMATCH = 101,
-    VNVME_ERROR_SHARED_MEMORY_MAP_FAILED = 102,
+    VNVME_ERROR_SHM_MAP_FAILED = 102,
     VNVME_ERROR_BACKEND_INIT_FAILED = 103,
     
     // 运行时错误 (200-299)
@@ -1123,5 +1132,5 @@ bp vnvme_server!ProcessAdminCommand
 bp vnvme_server!ProcessIoRead
 
 # 查看共享内存
-dt vnvme_server!SHARED_MEMORY_CONTROL_BLOCK <address>
+dt vnvme_server!SHM_CONTROL_BLOCK <address>
 ```

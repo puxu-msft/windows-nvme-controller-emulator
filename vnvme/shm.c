@@ -32,8 +32,8 @@ VnvmeAllocateShm(
     PHYSICAL_ADDRESS lowAddress = {0};
     PHYSICAL_ADDRESS highAddress = {.QuadPart = 0xFFFFFFFFFFFFFFFF};
     PHYSICAL_ADDRESS boundaryAddress = {0};
-    SIZE_T size = VNVME_SHARED_MEMORY_SIZE;
-    PVNVME_SHARED_MEMORY_CONTROL_BLOCK controlBlock;
+    SIZE_T size = VNVME_SHM_SIZE;
+    PVNVME_SHM_CONTROL_BLOCK controlBlock;
     PVNVME_NOTIFY_RING notifyRing;
     
     TRACE_INFO("VnvmeAllocateShm: Allocating %llu bytes (v2 zero-copy)", (ULONGLONG)size);
@@ -63,9 +63,9 @@ VnvmeAllocateShm(
     //==========================================================================
     // 初始化控制块 (v2)
     //==========================================================================
-    controlBlock = (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)virtAddr;
-    controlBlock->Magic = VNVME_SHARED_MEMORY_MAGIC;
-    controlBlock->Version = VNVME_SHARED_MEMORY_VERSION;
+    controlBlock = (PVNVME_SHM_CONTROL_BLOCK)virtAddr;
+    controlBlock->Magic = VNVME_SHM_MAGIC;
+    controlBlock->Version = VNVME_SHM_VERSION;
     controlBlock->TotalSize = (UINT32)size;
     controlBlock->ControlBlockSize = VNVME_CONTROL_BLOCK_SIZE;
     controlBlock->Flags = 0;

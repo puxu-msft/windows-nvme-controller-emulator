@@ -9,9 +9,10 @@
 | 组件 | 版本 | 说明 |
 |------|------|------|
 | Windows | 10/11 64-bit | 开发和测试环境 |
-| Visual Studio | 2019/2022 | 包含 C++ 桌面开发工作负载 |
-| Windows SDK | 10.0.19041.0+ | 用于用户模式组件 |
-| WDK | 10.0.19041.0+ | Windows Driver Kit |
+| Visual Studio | 2022 | 包含 C++ 桌面开发工作负载 |
+| Windows SDK | 10.0.26100.0+ | Windows 11 24H2 SDK |
+| WDK | 10.0.26100.0+ | Windows Driver Kit |
+| KMDF | 1.15+ | 内核模式驱动框架 |
 | Git | 2.x | 版本控制 |
 
 ### 硬件要求
@@ -31,7 +32,7 @@
 
 ### 2. 安装 Windows SDK
 
-SDK 通常随 Visual Studio 一起安装，确保版本 ≥ 10.0.19041.0
+SDK 通常随 Visual Studio 一起安装，确保版本 ≥ 10.0.26100.0 (Windows 11 24H2 SDK)
 
 ### 3. 安装 WDK
 

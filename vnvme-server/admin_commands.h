@@ -10,6 +10,7 @@
 #define _ADMIN_COMMANDS_H_
 
 #include "types.h"
+#include "../include/vnvme_common.h"
 #include "../include/nvme_spec.h"
 
 //===========================================================================

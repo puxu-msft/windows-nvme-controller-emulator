@@ -15,6 +15,7 @@
 #include "vnvme_common.h"
 #include "vnvme_ioctl.h"
 #include "nvme_spec.h"
+#include "vnvme_utils.h"
 #include "debug.h"
 #include "trace.h"
 
@@ -24,7 +25,8 @@
 
 #define VNVME_POOL_TAG              'MVNV'  // VNVM
 #define VNVME_MAX_CONTROLLERS       16
-#define VNVME_MAX_NAMESPACES        16              // 每个控制器最大命名空间数
+// VNVME_MAX_NAMESPACES 已在 vnvme_common.h 中定义
+#define VNVME_MAX_AER_COMMANDS      4               // 最大待处理 AER 命令数
 #define VNVME_BAR0_SIZE             (64 * 1024)     // 64 KB
 #define VNVME_PCIE_CONFIG_SIZE      4096            // 4 KB PCIe配置空间
 // VNVME_MAX_IO_QUEUES 已在 vnvme_common.h 中定义
@@ -71,7 +73,7 @@ typedef struct _VNVME_FDO_CONTEXT {
     // WDF 设备对象
     WDFDEVICE Device;
     WDFDEVICE ControlDevice;
-    // WDFQUEUE ControlQueue;           // TODO: 优雅关闭时需要保存队列句柄
+    WDFQUEUE ControlQueue;              // 控制设备 I/O 队列 (用于优雅关闭)
     
     // 命令处理模式
     VNVME_COMMAND_MODE CommandMode;     // 用户态或内核处理
@@ -96,13 +98,16 @@ typedef struct _VNVME_FDO_CONTEXT {
     KEVENT ShutdownEvent;               // 通知用户态关闭
     volatile BOOLEAN UserReady;         // 用户态服务是否就绪
     volatile BOOLEAN ShutdownRequested; // 关闭请求标志
+    volatile BOOLEAN UserCrashed;       // 用户态服务崩溃标志
     ULONG UserPid;
     LARGE_INTEGER LastHeartbeat;
-    // HANDLE UserEventHandle;          // TODO: 用户可等待事件句柄 (性能优化)
+    HANDLE UserEventHandle;             // 用户态可等待事件句柄
+    BOOLEAN EventNotificationEnabled;   // 事件通知是否启用
     
     // 统计
     volatile LONG64 CommandsProcessed;
     volatile LONG64 ErrorCount;
+    LARGE_INTEGER StartTime;            // 驱动启动时间
     
 } VNVME_FDO_CONTEXT, *PVNVME_FDO_CONTEXT;
 
@@ -122,6 +127,22 @@ typedef enum _VNVME_STORAGE_TYPE {
 typedef struct _VNVME_STORAGE_CONTEXT VNVME_STORAGE_CONTEXT, *PVNVME_STORAGE_CONTEXT;
 
 //===========================================================================
+// NVMe LBA Format 定义 (NVMe 规范)
+//===========================================================================
+
+/**
+ * @brief LBA Format 数据结构 (NVMe Spec 1.4+)
+ * 
+ * 每个 LBA Format 描述一种支持的 LBA 大小和元数据配置。
+ * 最多支持 16 种 LBA 格式 (索引 0-15)。
+ */
+typedef struct _NVME_LBAF {
+    USHORT MS;                          // Metadata Size (字节)
+    UCHAR LBADS;                        // LBA Data Size (2^n 字节, 如 9=512, 12=4096)
+    UCHAR RP;                           // Relative Performance (0=最佳, 3=最差)
+} NVME_LBAF, *PNVME_LBAF;
+
+//===========================================================================
 // PDO 上下文 (虚拟 NVMe 控制器)
 //===========================================================================
 
@@ -132,19 +153,20 @@ typedef struct _VNVME_STORAGE_CONTEXT VNVME_STORAGE_CONTEXT, *PVNVME_STORAGE_CON
 // Phase 2+: 取消注释后端偏移、LBA 格式、统计等字段
 //
 typedef struct _VNVME_NAMESPACE {
-    // TODO Phase 2: 链表节点 (如需动态管理)
-    // LIST_ENTRY ListEntry;
+    // 链表节点 (用于动态管理)
+    LIST_ENTRY ListEntry;               // 链接到控制器的命名空间列表
     
     // 标识
     ULONG NsId;                         // 命名空间 ID (1-based, 0=未使用)
     BOOLEAN Active;                     // 是否激活
-    // BOOLEAN ReadOnly;                // TODO Phase 2: 只读标志
-    // BOOLEAN ThinProvisioned;         // TODO Phase 2: 精简配置
+    BOOLEAN ReadOnly;                   // 只读标志
+    BOOLEAN ThinProvisioned;            // 精简配置
+    BOOLEAN Reserved1;                  // 对齐填充
     
-    // TODO Phase 2: 唯一标识
-    // GUID Guid;
-    // UCHAR Nguid[16];                 // Namespace Globally Unique Identifier
-    // UCHAR Eui64[8];                  // IEEE Extended Unique Identifier
+    // 唯一标识
+    GUID Guid;                          // 命名空间 GUID
+    UCHAR Nguid[16];                    // Namespace Globally Unique Identifier
+    UCHAR Eui64[8];                     // IEEE Extended Unique Identifier
     
     // 容量
     ULONG BlockSize;                    // 逻辑块大小 (512 或 4096)
@@ -154,17 +176,19 @@ typedef struct _VNVME_NAMESPACE {
     // 存储后端
     PVNVME_STORAGE_CONTEXT Storage;     // 存储后端上下文 (可为 NULL)
     
-    // TODO Phase 2: LBA 格式
-    // UCHAR FormattedLbaSize;          // FLBAS: Formatted LBA Size index
-    // UCHAR NumberOfLbaFormats;        // NLBAF: Number of LBA Formats (0-based)
-    // UCHAR NsFeatures;                // NSFEAT: Namespace Features
-    // NVME_LBAF LbaFormats[16];        // LBA Format 数组 (需定义 NVME_LBAF)
+    // LBA 格式
+    UCHAR FormattedLbaSize;             // FLBAS: Formatted LBA Size index
+    UCHAR NumberOfLbaFormats;           // NLBAF: Number of LBA Formats (0-based)
+    UCHAR NsFeatures;                   // NSFEAT: Namespace Features
+    UCHAR Reserved2;                    // 对齐填充
+    NVME_LBAF LbaFormats[16];           // LBA Format 数组 (最多 16 种格式)
     
-    // TODO Phase 3: 统计
-    // volatile LONG64 ReadCommands;    // 读命令计数
-    // volatile LONG64 WriteCommands;   // 写命令计数
-    // volatile LONG64 ReadBytes;       // 读取字节数
-    // volatile LONG64 WriteBytes;      // 写入字节数
+    // 统计 (使用 Interlocked 操作)
+    volatile LONG64 ReadCommands;       // 读命令计数
+    volatile LONG64 WriteCommands;      // 写命令计数
+    volatile LONG64 ReadBytes;          // 读取字节数
+    volatile LONG64 WriteBytes;         // 写入字节数
+    volatile LONG64 FlushCommands;      // Flush 命令计数
 } VNVME_NAMESPACE, *PVNVME_NAMESPACE;
 
 typedef struct _VNVME_QUEUE_STATE {
@@ -174,6 +198,8 @@ typedef struct _VNVME_QUEUE_STATE {
     volatile ULONG Tail;
     volatile BOOLEAN PhaseTag;
     BOOLEAN Created;
+    USHORT CqId;                        // 关联的 CQ ID (仅 SQ 使用)
+    USHORT Reserved;
 } VNVME_QUEUE_STATE, *PVNVME_QUEUE_STATE;
 
 typedef struct _VNVME_PDO_CONTEXT {
@@ -224,6 +250,11 @@ typedef struct _VNVME_PDO_CONTEXT {
     volatile BOOLEAN PollingEnabled;
     volatile BOOLEAN PollingActive;
     
+    // Async Event Request (AER) 存储
+    // NVMe 允许主机提交多个 AER 命令，控制器在有事件时完成它们
+    USHORT AerCids[VNVME_MAX_AER_COMMANDS];     // 存储的 AER 命令 CID
+    USHORT AerCount;                             // 当前存储的 AER 命令数
+    
     // 命名空间
     USHORT NamespaceCount;              // 活动命名空间数量
     VNVME_NAMESPACE Namespaces[VNVME_MAX_NAMESPACES];
@@ -240,6 +271,13 @@ typedef struct _VNVME_PDO_CONTEXT {
 } VNVME_PDO_CONTEXT, *PVNVME_PDO_CONTEXT;
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_PDO_CONTEXT, VnvmeGetPdoContext)
+
+//===========================================================================
+// 心跳和用户态崩溃检测常量
+//===========================================================================
+
+#define VNVME_HEARTBEAT_TIMEOUT_MS      5000    // 心跳超时 (毫秒)
+#define VNVME_HEARTBEAT_CHECK_INTERVAL  1000    // 检查间隔 (毫秒)
 
 //===========================================================================
 // 全局变量声明
@@ -366,7 +404,7 @@ VnvmeStopPollingTimer(
 
 EVT_WDF_TIMER VnvmeEvtPollingTimer;
 
-VOID
+BOOLEAN
 VnvmeProcessDoorbells(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     );
@@ -422,6 +460,24 @@ VnvmePostCompletion(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMPLETION Completion
+    );
+
+// 批处理优化函数
+NTSTATUS
+VnvmeFetchCommandBatch(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _Out_writes_(MaxCommands) PNVME_COMMAND Commands,
+    _In_ ULONG MaxCommands,
+    _Out_ PULONG CommandsFetched
+    );
+
+NTSTATUS
+VnvmePostCompletionBatch(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _In_reads_(CompletionCount) PNVME_COMPLETION Completions,
+    _In_ ULONG CompletionCount
     );
 
 //===========================================================================
@@ -484,6 +540,22 @@ VnvmeProcessAdminCommands(
     _In_ ULONG NewTail
     );
 
+/**
+ * @brief 完成一个待处理的 AER 命令
+ * 
+ * @param PdoContext PDO 上下文
+ * @param EventType 事件类型 (0=Error, 1=SMART, 2=Notice, 6=Vendor)
+ * @param EventInfo 事件信息
+ * @param LogPage 关联的日志页 ID
+ */
+NTSTATUS
+VnvmeCompleteAer(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ UINT8 EventType,
+    _In_ UINT8 EventInfo,
+    _In_ UINT8 LogPage
+    );
+
 //===========================================================================
 // 函数声明 - io_cmd.c
 //===========================================================================
@@ -511,6 +583,17 @@ VnvmeProcessIoCommands(
 //===========================================================================
 // 函数声明 - user_forward.c (用户态转发)
 //===========================================================================
+
+/**
+ * @brief 通知用户态有新命令就绪
+ * 
+ * 当有新命令到达时调用，会设置 CommandReadyEvent 事件。
+ * 用户态可以等待此事件，或使用轮询模式。
+ */
+VOID
+VnvmeNotifyUserMode(
+    _In_ PVNVME_FDO_CONTEXT FdoContext
+    );
 
 /**
  * @brief 转发 Admin 命令到共享内存供用户态处理
@@ -583,6 +666,13 @@ VnvmeStorageWriteZeroes(
 NTSTATUS
 VnvmeStorageFlush(
     _In_ PVNVME_STORAGE_CONTEXT StorageContext
+    );
+
+NTSTATUS
+VnvmeStorageDeallocate(
+    _In_ PVNVME_STORAGE_CONTEXT StorageContext,
+    _In_ ULONGLONG Offset,
+    _In_ ULONGLONG Length
     );
 
 NTSTATUS

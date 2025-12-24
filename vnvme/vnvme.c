@@ -150,8 +150,12 @@ VnvmeEvtDeviceAdd(
     KeInitializeEvent(&fdoContext->UserReadyEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&fdoContext->ShutdownEvent, NotificationEvent, FALSE);
     
-    // 初始化关闭标志
+    // 初始化状态标志
     fdoContext->ShutdownRequested = FALSE;
+    fdoContext->UserCrashed = FALSE;
+    
+    // 记录启动时间
+    KeQuerySystemTime(&fdoContext->StartTime);
     
     // 保存全局指针
     g_FdoContext = fdoContext;
@@ -187,7 +191,7 @@ VnvmeEvtDevicePrepareHardware(
     UNREFERENCED_PARAMETER(ResourcesRaw);
     UNREFERENCED_PARAMETER(ResourcesTranslated);
     
-    TRACE_INFO("VnvmeEvtDevicePrepareHardware: Allocating shared memory");
+    TRACE_INFO("VnvmeEvtDevicePrepareHardware: Allocating SHM");
     
     // 分配共享内存
     status = VnvmeAllocateShm(fdoContext);
@@ -214,6 +218,14 @@ VnvmeEvtDeviceReleaseHardware(
     UNREFERENCED_PARAMETER(ResourcesTranslated);
     
     TRACE_INFO("VnvmeEvtDeviceReleaseHardware: Releasing resources");
+    
+    // 关闭用户态事件句柄 (如果已创建)
+    if (fdoContext->UserEventHandle != NULL) {
+        ZwClose(fdoContext->UserEventHandle);
+        fdoContext->UserEventHandle = NULL;
+        fdoContext->EventNotificationEnabled = FALSE;
+        TRACE_INFO("VnvmeEvtDeviceReleaseHardware: Closed user event handle");
+    }
     
     // 释放共享内存
     VnvmeFreeShm(fdoContext);
@@ -254,13 +266,19 @@ VnvmeEvtDeviceD0Exit(
     // 设置关闭标志
     fdoContext->ShutdownRequested = TRUE;
     
+    // 停止控制设备队列，不再接收新请求
+    if (fdoContext->ControlQueue != NULL) {
+        TRACE_INFO("VnvmeEvtDeviceD0Exit: Stopping control queue");
+        WdfIoQueueStop(fdoContext->ControlQueue, NULL, NULL);
+    }
+    
     // 触发关闭事件通知用户态
     KeSetEvent(&fdoContext->ShutdownEvent, IO_NO_INCREMENT, FALSE);
     
     // 更新共享内存中的关闭标志
     if (fdoContext->ShmKernelVirtAddr != NULL) {
-        PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = 
-            (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)fdoContext->ShmKernelVirtAddr;
+        PVNVME_SHM_CONTROL_BLOCK shm = 
+            (PVNVME_SHM_CONTROL_BLOCK)fdoContext->ShmKernelVirtAddr;
         shm->ShutdownRequested = TRUE;
     }
     
@@ -278,6 +296,12 @@ VnvmeEvtDeviceD0Exit(
             );
         
         TRACE_INFO("VnvmeEvtDeviceD0Exit: User-mode shutdown complete or timed out");
+    }
+    
+    // 等待控制队列中的请求完成
+    if (fdoContext->ControlQueue != NULL) {
+        TRACE_INFO("VnvmeEvtDeviceD0Exit: Draining control queue");
+        WdfIoQueueStopSynchronously(fdoContext->ControlQueue);
     }
     
     return STATUS_SUCCESS;

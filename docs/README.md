@@ -159,7 +159,8 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 
 - **操作系统**: Windows 10 20H1+ / Windows 11 / Windows Server 2019+
 - **开发工具**: Visual Studio 2022
-- **WDK**: Windows Driver Kit 10.0.22621+
+- **WDK**: Windows Driver Kit 10.0.26100+ (Windows 11 24H2 SDK)
+- **KMDF**: KMDF 1.15+
 - **测试签名**: 需要启用测试模式或使用 EV 证书
 
 ### 构建
@@ -258,22 +259,23 @@ Get-PhysicalDisk | Where-Object BusType -eq "NVMe"
 
 ## 项目组成 (v2 混合架构 - 已实现)
 
-> 📋 **状态**: 截至 2025-12-23，核心功能已实现，待测试验证
+> 📋 **状态**: 核心功能已实现，已完成模块化重构
 
 ### 代码统计
 
 | 组件 | 源文件数 | 总行数 | 状态 |
 |------|---------|--------|------|
-| **vnvme.sys** (内核驱动) | 15 | ~5,863 | ✅ 主要功能已实现 |
-| **vnvme-server.exe** (用户态服务) | 3 | ~1,967 | ✅ 核心功能已实现 |
-| **vnvmectl.exe** (命令行工具) | 1 | ~512 | ✅ 基本功能已实现 |
+| **vnvme.sys** (内核驱动) | 19 | ~7,800 | ✅ 主要功能已实现 |
+| **vnvme-server.exe** (用户态服务) | 22 | ~7,050 | ✅ 模块化重构完成 |
+| **vnvmectl.exe** (命令行工具) | 1 | ~511 | ✅ 基本功能已实现 |
 | **共享头文件** | 3 | ~1,160 | ✅ 完整定义 |
 
 ```
 virtual-nvme-driver/
 ├── vnvme/                  # 内核驱动 (单一驱动)
-│   ├── vnvme.c             # ✅ 驱动入口、PnP/Power 回调 (292行)
-│   ├── vnvme.h             # ✅ 主头文件、数据结构定义 (761行)
+│   ├── vnvme.c             # ✅ 驱动入口、PnP/Power 回调 (323行)
+│   ├── vnvme.h             # ✅ 主头文件、数据结构定义 (843行)
+│   ├── vnvme_utils.h       # ✅ 公共宏和工具函数 (168行)
 │   ├── ctrl_dev.c          # ✅ 控制设备、IOCTL 处理 (865行)
 │   ├── bus.c               # ✅ 总线枚举、PDO 创建 (362行)
 │   ├── pdo.c               # ✅ PDO PnP 处理 (496行)
@@ -283,21 +285,35 @@ virtual-nvme-driver/
 │   ├── shm.c               # ✅ 共享内存管理 (263行)
 │   ├── queue.c             # ✅ 队列管理 (185行)
 │   ├── prp.c               # ✅ PRP 列表处理 (175行)
-│   ├── admin_cmd.c         # ✅ Admin 命令处理 (686行)
-│   ├── io_cmd.c            # ✅ I/O 命令处理 (639行)
-│   ├── storage.c           # ✅ 内核存储后端 (733行)
+│   ├── admin_cmd.c         # ✅ Admin 命令处理 (988行)
+│   ├── io_cmd.c            # ✅ I/O 命令处理 (890行)
+│   ├── storage.c           # ✅ 内核存储后端 (1206行)
 │   ├── user_forward.c      # ✅ 用户态命令转发 (231行)
 │   ├── utils.c             # ✅ 工具函数 (75行)
+│   ├── debug.c/h           # ✅ 调试基础设施
+│   ├── trace.h             # ✅ ETW 跟踪定义
 │   └── vnvme.inf           # ✅ 安装文件
 │
-├── vnvme-server/           # 用户态服务
-│   ├── main.c              # ✅ 服务入口、配置加载、主循环 (621行)
-│   ├── command_processor.c # ✅ 命令处理引擎 Admin+I/O (943行)
-│   ├── backend.c           # ✅ 存储后端 内存+文件 (403行)
+├── vnvme-server/           # 用户态服务 (模块化架构)
+│   ├── main.c              # ✅ 服务入口、主循环 (655行)
+│   ├── main_v2.c           # ✅ 模块化入口 (233行)
+│   ├── config.c/h          # ✅ 配置解析 (421+122行)
+│   ├── logger.c/h          # ✅ 日志系统 (295+133行)
+│   ├── driver_comm.c/h     # ✅ 驱动通信 (369+148行)
+│   ├── command_processor.c # ✅ 命令处理器 (985行)
+│   ├── command_engine.c/h  # ✅ 命令引擎 (562+253行)
+│   ├── admin_commands.c/h  # ✅ Admin 命令 (911+301行)
+│   ├── io_commands.c/h     # ✅ I/O 命令 (632+255行)
+│   ├── backend.c/h         # ✅ 后端接口 (431+127行)
+│   ├── backend_common.c    # ✅ 后端分发 (230行)
+│   ├── backend_memory.c    # ✅ 内存后端 (209行)
+│   ├── backend_file.c      # ✅ 文件后端 (314行)
+│   ├── types.h             # ✅ 基础类型 (84行)
+│   ├── vnvme_server.h      # ✅ 服务公共头 (195行)
 │   └── vnvme.conf.example  # ✅ 示例配置文件
 │
 ├── vnvmectl/               # 命令行管理工具
-│   └── main.c              # ✅ 主程序 version/status/list/create/delete (512行)
+│   └── main.c              # ✅ 主程序 version/status/list/create/delete (511行)
 │
 ├── include/                # 共享头文件
 │   ├── vnvme_common.h      # ✅ 公共定义、共享内存结构 (372行)

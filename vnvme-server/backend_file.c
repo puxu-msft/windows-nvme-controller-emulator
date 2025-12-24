@@ -19,6 +19,7 @@ typedef struct _FILE_BACKEND_CONTEXT {
     UINT64          Size;
     UINT32          BlockSize;
     BOOL            ReadOnly;
+    BOOL            DirectIO;           // 直接 I/O 模式
     HANDLE          FileHandle;     // 文件句柄
     WCHAR           FilePath[MAX_PATH];
     CRITICAL_SECTION Lock;          // 访问锁
@@ -225,11 +226,20 @@ PBACKEND_CONTEXT BackendFileCreate(const BACKEND_CONFIG* pConfig)
     pCtx->Size = pConfig->Size;
     pCtx->BlockSize = pConfig->BlockSize > 0 ? pConfig->BlockSize : 512;
     pCtx->ReadOnly = pConfig->ReadOnly;
+    pCtx->DirectIO = pConfig->DirectIO;
     wcscpy_s(pCtx->FilePath, MAX_PATH, pConfig->FilePath);
     
     // 打开或创建文件
     DWORD access = pConfig->ReadOnly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     DWORD creation = pConfig->ReadOnly ? OPEN_EXISTING : OPEN_ALWAYS;
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS;
+    
+    // 直接 I/O 模式：绕过系统缓存，减少内存复制
+    // 注意：需要对齐的缓冲区和偏移量
+    if (pConfig->DirectIO) {
+        flags |= FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH;
+        LogInfo("Direct I/O mode enabled (FILE_FLAG_NO_BUFFERING)");
+    }
     
     pCtx->FileHandle = CreateFileW(
         pConfig->FilePath,
@@ -237,7 +247,7 @@ PBACKEND_CONTEXT BackendFileCreate(const BACKEND_CONFIG* pConfig)
         FILE_SHARE_READ,
         NULL,
         creation,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+        flags,
         NULL
         );
     

@@ -15,21 +15,18 @@
 //===========================================================================
 
 typedef struct _SHM_CONTEXT {
-    PVOID                           userAddress;        // 用户态映射基地址
-    SIZE_T                          size;               // 总大小
+    PVOID                                   userAddress;        // 用户态映射基地址
+    SIZE_T                                  size;               // 总大小
     
     // 控制块
-    PVNVME_SHM_CONTROL_BLOCK        controlBlock;
+    PVNVME_SHM_CONTROL_BLOCK      controlBlock;
     
     // 通知环
-    PVNVME_NOTIFY_RING              notifyRing;
-    
-    // 完成通知环
-    PVNVME_COMPLETION_NOTIFY_RING   completionRing;
+    PVNVME_NOTIFY_RING                      notifyRing;
     
     // 数据缓冲区
-    PVOID                           dataBuffer;
-    SIZE_T                          dataBufferSize;
+    PVOID                                   dataBuffer;
+    SIZE_T                                  dataBufferSize;
 } SHM_CONTEXT, *PSHM_CONTEXT;
 
 //===========================================================================
@@ -44,6 +41,8 @@ typedef struct _DRIVER_COMM_CONTEXT {
     volatile BOOL       running;            // 运行状态
     UINT32              heartbeatIntervalMs;// 心跳间隔
     UINT64              commandsProcessed;  // 处理命令计数
+    HANDLE              commandEvent;       // 命令就绪事件 (可等待)
+    BOOL                eventModeEnabled;   // 事件模式是否启用
 } DRIVER_COMM_CONTEXT, *PDRIVER_COMM_CONTEXT;
 
 //===========================================================================
@@ -71,14 +70,14 @@ void DriverDisconnect(PDRIVER_COMM_CONTEXT pCtx);
  * @param pCtx 驱动上下文
  * @return TRUE 成功，FALSE 失败
  */
-BOOL DriverMapSharedMemory(PDRIVER_COMM_CONTEXT pCtx);
+BOOL DriverMapShm(PDRIVER_COMM_CONTEXT pCtx);
 
 /**
  * 取消映射共享内存
  * 
  * @param pCtx 驱动上下文
  */
-void DriverUnmapSharedMemory(PDRIVER_COMM_CONTEXT pCtx);
+void DriverUnmapShm(PDRIVER_COMM_CONTEXT pCtx);
 
 /**
  * 发送用户态就绪通知
@@ -143,6 +142,26 @@ BOOL DriverGetVersion(PDRIVER_COMM_CONTEXT pCtx, UINT32* pVersion);
  * @param pStatus 输出状态结构
  * @return TRUE 成功，FALSE 失败
  */
-BOOL DriverGetStatus(PDRIVER_COMM_CONTEXT pCtx, PVNVME_DRIVER_STATUS pStatus);
+BOOL DriverGetStatus(PDRIVER_COMM_CONTEXT pCtx, PVNVME_GET_STATUS_OUTPUT pStatus);
+
+/**
+ * 获取命令就绪事件句柄
+ * 
+ * @param pCtx 驱动上下文
+ * @return TRUE 成功，FALSE 失败
+ * 
+ * 成功后 pCtx->commandEvent 包含可等待句柄，
+ * 可用于 WaitForSingleObject 替代轮询。
+ */
+BOOL DriverGetCommandEvent(PDRIVER_COMM_CONTEXT pCtx);
+
+/**
+ * 等待命令就绪
+ * 
+ * @param pCtx 驱动上下文
+ * @param timeoutMs 超时毫秒 (INFINITE 表示无限等待)
+ * @return TRUE 有命令就绪，FALSE 超时或失败
+ */
+BOOL DriverWaitForCommand(PDRIVER_COMM_CONTEXT pCtx, DWORD timeoutMs);
 
 #endif /* _VNVME_DRIVER_COMM_H_ */

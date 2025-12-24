@@ -70,7 +70,8 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp17</LanguageStandard>
+      <LanguageStandard>stdcpp23</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -104,28 +105,17 @@
   </ItemDefinitionGroup>
   
   <ItemGroup>
-    <!-- v1 原始实现 (当前正在使用) -->
-    <ClCompile Include="main.c" />
-    <ClCompile Include="command_processor.c" />
-    <ClCompile Include="backend.c" />
-    
-    <!-- v2 模块化组件 (暂时禁用，待完成后启用) -->
-    <!-- 
+    <!-- v2 模块化实现 -->
+    <ClCompile Include="main_v2.c" />
     <ClCompile Include="config.c" />
     <ClCompile Include="logger.c" />
     <ClCompile Include="driver_comm.c" />
+    <ClCompile Include="command_engine.c" />
+    <ClCompile Include="admin_commands.c" />
+    <ClCompile Include="io_commands.c" />
     <ClCompile Include="backend_common.c" />
     <ClCompile Include="backend_memory.c" />
     <ClCompile Include="backend_file.c" />
-    <ClCompile Include="main_v2.c" />
-    -->
-    
-    <!-- v2 命令处理模块 (暂时禁用，待集成后启用) -->
-    <!--
-    <ClCompile Include="admin_commands.c" />
-    <ClCompile Include="io_commands.c" />
-    <ClCompile Include="command_engine.c" />
-    -->
   </ItemGroup>
   
   <ItemGroup>

@@ -18,6 +18,7 @@ typedef struct _BACKEND_CONFIG {
     WCHAR           FilePath[MAX_PATH]; // 文件路径 (文件后端)
     BOOL            ReadOnly;           // 只读模式
     UINT32          BlockSize;          // 块大小 (默认 512)
+    BOOL            DirectIO;           // 直接 I/O (FILE_FLAG_NO_BUFFERING)
 } BACKEND_CONFIG, *PBACKEND_CONFIG;
 
 //===========================================================================

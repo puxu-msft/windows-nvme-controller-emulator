@@ -66,8 +66,8 @@ FDO (Functional Device Object) 上下文定义在 [vnvme/vnvme.h](../vnvme/vnvme
 
 | 结构体/常量 | 说明 |
 |------------|------|
-| `VNVME_SHARED_MEMORY_SIZE` | 共享内存总大小 (64MB) |
-| `VNVME_SHARED_MEMORY_CONTROL_BLOCK` | 控制块结构 (4KB, v2) |
+| `VNVME_SHM_SIZE` | 共享内存总大小 (64MB) |
+| `VNVME_SHM_CONTROL_BLOCK` | 控制块结构 (4KB, v2) |
 | `VNVME_QUEUE_DESCRIPTOR` | 队列描述符 (32 字节) |
 | `VNVME_NOTIFY_RING` | 通知环 (Doorbell 变更通知) |
 | `VNVME_CONTROLLER_CONFIG` | 控制器配置 |
@@ -77,7 +77,7 @@ FDO (Functional Device Object) 上下文定义在 [vnvme/vnvme.h](../vnvme/vnvme
 
 ```
 +------------------+ 0x00000000
-| Control Block    | 4KB (VNVME_SHARED_MEMORY_CONTROL_BLOCK)
+| Control Block    | 4KB (VNVME_SHM_CONTROL_BLOCK)
 +------------------+ 0x00001000
 | Notify Ring      | 4KB (VNVME_NOTIFY_RING, 对齐)
 +------------------+ 0x00002000

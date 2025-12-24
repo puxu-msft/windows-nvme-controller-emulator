@@ -137,12 +137,49 @@ VnvmeInitializePcieConfig(
     *(PUCHAR)(config + PCI_INTERRUPT_LINE) = 0x00;
     *(PUCHAR)(config + PCI_INTERRUPT_PIN) = 0x01;  // INTA#
     
-    // TODO: Phase 3 - 添加 PCIe 能力结构
-    // - MSI-X Capability
-    // - PCIe Capability
-    // - Power Management Capability
+    // =========================================================================
+    // PCIe 能力链表 (Capability List)
+    // =========================================================================
     
-    TRACE_INFO("VnvmeInitializePcieConfig: Initialized default values");
+    // Power Management Capability (0x40)
+    // Capability ID = 0x01 (Power Management)
+    config[0x40] = 0x01;              // Capability ID: PM
+    config[0x41] = 0x50;              // Next Capability Pointer: MSI
+    *(PUSHORT)(config + 0x42) = 0x0003;  // PMC: D0, D3hot supported, Version 3
+    *(PUSHORT)(config + 0x44) = 0x0000;  // PMCSR: D0 state
+    config[0x46] = 0x00;              // PMCSR_BSE
+    config[0x47] = 0x00;              // Data
+    
+    // MSI Capability (0x50)
+    // Capability ID = 0x05 (MSI)
+    config[0x50] = 0x05;              // Capability ID: MSI
+    config[0x51] = 0x60;              // Next Capability Pointer: MSI-X
+    *(PUSHORT)(config + 0x52) = 0x0080;  // Message Control: 64-bit capable
+    *(PULONG)(config + 0x54) = 0x00000000;  // Message Address (low)
+    *(PULONG)(config + 0x58) = 0x00000000;  // Message Address (high)
+    *(PUSHORT)(config + 0x5C) = 0x0000;  // Message Data
+    
+    // MSI-X Capability (0x60)
+    // Capability ID = 0x11 (MSI-X)
+    config[0x60] = 0x11;              // Capability ID: MSI-X
+    config[0x61] = 0x70;              // Next Capability Pointer: PCIe
+    *(PUSHORT)(config + 0x62) = 0x001F;  // Message Control: 32 vectors, disabled
+    *(PULONG)(config + 0x64) = 0x00002000;  // Table BIR=0, Offset=0x2000
+    *(PULONG)(config + 0x68) = 0x00003000;  // PBA BIR=0, Offset=0x3000
+    
+    // PCI Express Capability (0x70)
+    // Capability ID = 0x10 (PCI Express)
+    config[0x70] = 0x10;              // Capability ID: PCIe
+    config[0x71] = 0x00;              // Next Capability Pointer: None
+    *(PUSHORT)(config + 0x72) = 0x0002;  // PCIe Caps: v2, Endpoint
+    *(PULONG)(config + 0x74) = 0x00008001;  // Device Caps: 256B MPS, Ext Tag
+    *(PUSHORT)(config + 0x78) = 0x0010;  // Device Control: MPS=256
+    *(PUSHORT)(config + 0x7A) = 0x0000;  // Device Status
+    *(PULONG)(config + 0x7C) = 0x00000001;  // Link Caps: 2.5 GT/s, x1
+    *(PUSHORT)(config + 0x80) = 0x0000;  // Link Control
+    *(PUSHORT)(config + 0x82) = 0x0011;  // Link Status: 2.5 GT/s, x1
+    
+    TRACE_INFO("VnvmeInitializePcieConfig: Initialized with PM/MSI/MSI-X/PCIe caps");
     TRACE_INFO("  VID=0x%04X, DID=0x%04X, Class=0x%02X%02X%02X",
                VNVME_VENDOR_ID, VNVME_DEVICE_ID,
                config[PCI_CLASS_CODE + 2], 
@@ -199,6 +236,7 @@ VnvmeWritePcieConfig(
     )
 {
     PUCHAR config;
+    USHORT value16;
     
     if (PdoContext->PcieConfig == NULL) {
         return STATUS_INVALID_DEVICE_STATE;
@@ -214,9 +252,62 @@ VnvmeWritePcieConfig(
     
     TRACE_VERBOSE("VnvmeWritePcieConfig: Offset=0x%X, Length=%u", Offset, Length);
     
-    // TODO: Phase 3 - 处理特殊寄存器写入
-    // Command 寄存器写入可能需要特殊处理
+    // =========================================================================
+    // 处理特殊寄存器写入
+    // =========================================================================
     
+    // Command 寄存器 (0x04) - 某些位是只读的
+    if (Offset == PCI_COMMAND && Length >= 2) {
+        value16 = *(PUSHORT)Buffer;
+        // 保持 Status 寄存器的只读位
+        // 允许: Bus Master Enable (bit 2), Memory Space Enable (bit 1)
+        value16 &= 0x0547;  // 屏蔽保留位
+        *(PUSHORT)(config + Offset) = value16;
+        TRACE_INFO("VnvmeWritePcieConfig: Command register = 0x%04X", value16);
+        return STATUS_SUCCESS;
+    }
+    
+    // PM Control/Status (0x44) - 电源状态转换
+    if (Offset == 0x44 && Length >= 2) {
+        value16 = *(PUSHORT)Buffer;
+        UCHAR newState = (UCHAR)(value16 & 0x03);  // PowerState bits
+        TRACE_INFO("VnvmeWritePcieConfig: PM state transition to D%u", newState);
+        // 只允许 D0 和 D3hot
+        if (newState == 0 || newState == 3) {
+            *(PUSHORT)(config + Offset) = value16 & 0x8103;  // 保留有效位
+        }
+        return STATUS_SUCCESS;
+    }
+    
+    // MSI-X Message Control (0x62) - Enable/Disable
+    if (Offset == 0x62 && Length >= 2) {
+        value16 = *(PUSHORT)Buffer;
+        BOOLEAN enabled = (value16 & 0x8000) != 0;
+        TRACE_INFO("VnvmeWritePcieConfig: MSI-X %s", enabled ? "enabled" : "disabled");
+        // Table Size 是只读的 (低 11 位)
+        value16 = (value16 & 0xC000) | (*(PUSHORT)(config + Offset) & 0x07FF);
+        *(PUSHORT)(config + Offset) = value16;
+        return STATUS_SUCCESS;
+    }
+    
+    // MSI Message Control (0x52) - Enable/Disable
+    if (Offset == 0x52 && Length >= 2) {
+        value16 = *(PUSHORT)Buffer;
+        BOOLEAN enabled = (value16 & 0x0001) != 0;
+        TRACE_INFO("VnvmeWritePcieConfig: MSI %s", enabled ? "enabled" : "disabled");
+        *(PUSHORT)(config + Offset) = value16;
+        return STATUS_SUCCESS;
+    }
+    
+    // 只读寄存器保护
+    if (Offset == PCI_VENDOR_ID || Offset == PCI_DEVICE_ID ||
+        Offset == PCI_REVISION_ID || Offset == PCI_CLASS_CODE ||
+        Offset == PCI_HEADER_TYPE || Offset == PCI_CAPABILITY_PTR) {
+        TRACE_WARN("VnvmeWritePcieConfig: Attempt to write read-only register 0x%X", Offset);
+        return STATUS_SUCCESS;  // 静默忽略
+    }
+    
+    // 其他寄存器直接写入
     RtlCopyMemory(config + Offset, Buffer, Length);
     
     return STATUS_SUCCESS;

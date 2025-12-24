@@ -79,7 +79,9 @@ void LogMessageEx(LOG_LEVEL level, const char* module,
 // 便捷日志宏
 //===========================================================================
 
-#define LOG_MODULE  "main"  // 默认模块名，各模块可重定义
+#ifndef LOG_MODULE
+#define LOG_MODULE  "main"  // 默认模块名，各模块可在 include 前重定义
+#endif
 
 // 基本日志宏
 #define LogError(fmt, ...)   LogMessage(LOG_LEVEL_ERROR, LOG_MODULE, fmt, ##__VA_ARGS__)

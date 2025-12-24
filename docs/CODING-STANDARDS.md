@@ -46,9 +46,9 @@
 | `_CONTEXT` | WDF 设备上下文 | `VNVME_FDO_CONTEXT`, `VNVME_PDO_CONTEXT` |
 | `_STATE` | 状态信息 | `VNVME_QUEUE_STATE` |
 | `_INFO` | 只读信息结构 | `VNVME_CONTROLLER_INFO` |
-| `_INPUT` | IOCTL 输入参数 | `VNVME_MAP_SHARED_MEMORY_INPUT` |
+| `_INPUT` | IOCTL 输入参数 | `VNVME_MAP_SHM_INPUT` |
 | `_OUTPUT` | IOCTL 输出结果 | `VNVME_GET_STATUS_OUTPUT` |
-| `_CONTROL_BLOCK` | 控制/管理结构 | `VNVME_SHARED_MEMORY_CONTROL_BLOCK` |
+| `_CONTROL_BLOCK` | 控制/管理结构 | `VNVME_SHM_CONTROL_BLOCK` |
 
 ### 1.2 NVMe 术语一致性
 
@@ -154,7 +154,7 @@ IOCTL 处理函数使用 `VnvmeHandle<操作>` 格式（静态函数）：
 ```c
 static VnvmeHandleGetVersion(...)      // 处理 IOCTL_VNVME_GET_VERSION
 static VnvmeHandleGetStatus(...)       // 处理 IOCTL_VNVME_GET_STATUS
-static VnvmeHandleMapSharedMemory(...) // 处理 IOCTL_VNVME_MAP_SHARED_MEMORY
+static VnvmeHandleMapSharedMemory(...) // 处理 IOCTL_VNVME_MAP_SHM
 static VnvmeHandleUserReady(...)       // 处理 IOCTL_VNVME_USER_READY
 static VnvmeHandleHeartbeat(...)       // 处理 IOCTL_VNVME_HEARTBEAT
 ```

@@ -126,9 +126,6 @@ typedef struct _SHM_CONTEXT {
     // 通知环
     PVNVME_NOTIFY_RING  NotifyRing;
     
-    // 完成通知环
-    PVNVME_COMPLETION_NOTIFY_RING CompletionRing;
-    
     // 数据缓冲区
     PVOID               DataBuffer;
     SIZE_T              DataBufferSize;

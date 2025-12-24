@@ -16,13 +16,7 @@
 // 辅助函数
 //===========================================================================
 
-/**
- * @brief 构造完成状态
- */
-static UINT16 MakeIoStatus(UINT8 sct, UINT8 sc, UINT8 phase)
-{
-    return (UINT16)(phase | (sc << 1) | (sct << 9));
-}
+// MakeIoStatus 已移至 vnvme_utils.h 作为 NvmeMakeStatus()
 
 /**
  * @brief 发送 I/O 完成
@@ -37,12 +31,15 @@ static NTSTATUS PostIoCompletion(
 {
     NVME_COMPLETION completion = {0};
     UINT8 phase;
+    USHORT sqHead = 0;
     
-    // 获取当前 CQ 的 phase tag
+    // 获取当前 CQ 的 phase tag 和 SQ Head
     if (QueueId == 0) {
         phase = (UINT8)PdoContext->AdminCqPhase;
+        sqHead = (USHORT)PdoContext->AdminSq.Head;
     } else if (QueueId <= VNVME_MAX_IO_QUEUES && PdoContext->IoCq[QueueId - 1].Created) {
         phase = PdoContext->IoCq[QueueId - 1].PhaseTag ? 1 : 0;
+        sqHead = (USHORT)PdoContext->IoSq[QueueId - 1].Head;
     } else {
         return STATUS_INVALID_PARAMETER;
     }
@@ -50,8 +47,8 @@ static NTSTATUS PostIoCompletion(
     completion.CID = Cid;
     completion.DW0 = 0;
     completion.SQID = QueueId;
-    completion.SQHD = 0;  // TODO: 正确的 SQ Head
-    completion.Status = MakeIoStatus(Sct, Sc, phase);
+    completion.SQHD = sqHead;
+    completion.Status = NvmeMakeStatus(Sct, Sc, phase);
     
     return VnvmePostCompletion(PdoContext, QueueId, &completion);
 }
@@ -89,7 +86,6 @@ static NTSTATUS HandleRead(
     PHYSICAL_ADDRESS prpPhys;
     PVOID prpVa;
     SIZE_T mapSize;
-    ULONGLONG bytesRemaining;
     ULONGLONG bufferOffset;
     
     // 解析命令参数
@@ -99,13 +95,13 @@ static NTSTATUS HandleRead(
     TRACE_INFO("HandleRead: QID=%u, CID=%u, NSID=%u, SLBA=%llu, NLB=%u",
                QueueId, Command->CID, nsid, slba, nlb);
     
-    // 验证 NSID
-    if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+    // 验证 NSID (使用公共验证宏)
+    if (!VNVME_NSID_VALID(nsid)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    ns = &PdoContext->Namespaces[nsid - 1];
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
     
     if (!ns->Active) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
@@ -113,11 +109,11 @@ static NTSTATUS HandleRead(
     }
     
     blockSize = ns->BlockSize;
-    totalBytes = (ULONGLONG)nlb * blockSize;
-    byteOffset = slba * blockSize;
+    totalBytes = VNVME_BLOCKS_TO_BYTES(nlb, blockSize);
+    byteOffset = VNVME_LBA_TO_BYTES(slba, blockSize);
     
-    // 验证 LBA 范围
-    if (slba + nlb > ns->TotalBlocks) {
+    // 验证 LBA 范围 (使用公共验证宏)
+    if (!VNVME_LBA_RANGE_VALID(slba, nlb, ns->TotalBlocks)) {
         TRACE_WARN("HandleRead: LBA out of range (SLBA=%llu + NLB=%u > Total=%llu)",
                    slba, nlb, ns->TotalBlocks);
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
@@ -139,7 +135,7 @@ static NTSTATUS HandleRead(
                                     NVME_SCT_GENERIC, NVME_SC_INVALID_FIELD);
         }
         
-        readBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)totalBytes, VNVME_POOL_TAG);
+        readBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
         if (readBuffer == NULL) {
             return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                     NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
@@ -155,7 +151,7 @@ static NTSTATUS HandleRead(
         directPtr = readBuffer;
     } else {
         // 无存储后端: 返回全零
-        readBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)totalBytes, VNVME_POOL_TAG);
+        readBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
         if (readBuffer == NULL) {
             return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                     NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
@@ -165,48 +161,54 @@ static NTSTATUS HandleRead(
     }
 
 WriteToHost:
-    // 将数据写入 PRP 指定的主机内存
-    bytesRemaining = totalBytes;
-    bufferOffset = 0;
-    
-    // 处理 PRP1
-    if (bytesRemaining > 0 && Command->PRP1 != 0) {
-        prpPhys.QuadPart = Command->PRP1;
-        mapSize = (bytesRemaining > PAGE_SIZE) ? PAGE_SIZE : (SIZE_T)bytesRemaining;
+    // 将数据写入 PRP 指定的主机内存 (使用 PRP 列表解析)
+    {
+        PVNVME_PRP_ENTRY prpEntries = NULL;
+        ULONG prpEntryCount = 0;
+        ULONG i;
         
-        prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READWRITE | PAGE_NOCACHE);
-        if (prpVa != NULL) {
-            RtlCopyMemory(prpVa, (PUCHAR)directPtr + bufferOffset, mapSize);
-            MmUnmapIoSpace(prpVa, mapSize);
-            bytesRemaining -= mapSize;
-            bufferOffset += mapSize;
+        status = VnvmeParsePrpList(Command->PRP1, Command->PRP2, (ULONG)totalBytes,
+                                   &prpEntries, &prpEntryCount);
+        if (!NT_SUCCESS(status)) {
+            if (readBuffer != NULL) {
+                ExFreePoolWithTag(readBuffer, VNVME_POOL_TAG);
+            }
+            return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                    NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
         }
-    }
-    
-    // 处理 PRP2 (如果数据超过一页)
-    if (bytesRemaining > 0 && Command->PRP2 != 0) {
-        prpPhys.QuadPart = Command->PRP2;
-        mapSize = (bytesRemaining > PAGE_SIZE) ? PAGE_SIZE : (SIZE_T)bytesRemaining;
         
-        prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READWRITE | PAGE_NOCACHE);
-        if (prpVa != NULL) {
-            RtlCopyMemory(prpVa, (PUCHAR)directPtr + bufferOffset, mapSize);
-            MmUnmapIoSpace(prpVa, mapSize);
-            bytesRemaining -= mapSize;
-            bufferOffset += mapSize;
+        bufferOffset = 0;
+        for (i = 0; i < prpEntryCount && bufferOffset < totalBytes; i++) {
+            prpPhys.QuadPart = prpEntries[i].PhysicalAddress + prpEntries[i].Offset;
+            mapSize = prpEntries[i].Length;
+            
+            if (mapSize > totalBytes - bufferOffset) {
+                mapSize = (SIZE_T)(totalBytes - bufferOffset);
+            }
+            
+            prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READWRITE | PAGE_NOCACHE);
+            if (prpVa != NULL) {
+                RtlCopyMemory(prpVa, (PUCHAR)directPtr + bufferOffset, mapSize);
+                MmUnmapIoSpace(prpVa, mapSize);
+                bufferOffset += mapSize;
+            }
         }
+        
+        VnvmeFreePrpEntries(prpEntries);
     }
-    
-    // TODO: 处理 PRP List (超过 2 页的情况)
     
     // 释放临时缓冲区
     if (readBuffer != NULL) {
         ExFreePoolWithTag(readBuffer, VNVME_POOL_TAG);
     }
     
-    // 更新统计
+    // 更新统计 (控制器级别)
     InterlockedAdd64(&PdoContext->BytesRead, (LONG64)totalBytes);
     InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+    
+    // 更新统计 (命名空间级别)
+    InterlockedAdd64(&ns->ReadBytes, (LONG64)totalBytes);
+    InterlockedIncrement64(&ns->ReadCommands);
     
     return PostIoCompletion(PdoContext, QueueId, Command->CID,
                             NVME_SCT_GENERIC, NVME_SC_SUCCESS);
@@ -243,7 +245,6 @@ static NTSTATUS HandleWrite(
     PHYSICAL_ADDRESS prpPhys;
     PVOID prpVa;
     SIZE_T mapSize;
-    ULONGLONG bytesRemaining;
     ULONGLONG bufferOffset;
     
     slba = ((ULONGLONG)Command->CDW11 << 32) | Command->CDW10;
@@ -252,13 +253,13 @@ static NTSTATUS HandleWrite(
     TRACE_INFO("HandleWrite: QID=%u, CID=%u, NSID=%u, SLBA=%llu, NLB=%u",
                QueueId, Command->CID, nsid, slba, nlb);
     
-    // 验证 NSID
-    if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+    // 验证 NSID (使用公共验证宏)
+    if (!VNVME_NSID_VALID(nsid)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    ns = &PdoContext->Namespaces[nsid - 1];
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
     
     if (!ns->Active) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
@@ -266,11 +267,11 @@ static NTSTATUS HandleWrite(
     }
     
     blockSize = ns->BlockSize;
-    totalBytes = (ULONGLONG)nlb * blockSize;
-    byteOffset = slba * blockSize;
+    totalBytes = VNVME_BLOCKS_TO_BYTES(nlb, blockSize);
+    byteOffset = VNVME_LBA_TO_BYTES(slba, blockSize);
     
-    // 验证 LBA 范围
-    if (slba + nlb > ns->TotalBlocks) {
+    // 验证 LBA 范围 (使用公共验证宏)
+    if (!VNVME_LBA_RANGE_VALID(slba, nlb, ns->TotalBlocks)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_LBA_OUT_OF_RANGE);
     }
@@ -285,7 +286,7 @@ static NTSTATUS HandleWrite(
                                         NVME_SCT_GENERIC, NVME_SC_INVALID_FIELD);
             }
             
-            writeBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)totalBytes, VNVME_POOL_TAG);
+            writeBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
             if (writeBuffer == NULL) {
                 return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                         NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
@@ -299,7 +300,7 @@ static NTSTATUS HandleWrite(
                                     NVME_SCT_GENERIC, NVME_SC_INVALID_FIELD);
         }
         
-        writeBuffer = ExAllocatePool2(POOL_FLAG_NON_PAGED, (SIZE_T)totalBytes, VNVME_POOL_TAG);
+        writeBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
         if (writeBuffer == NULL) {
             // 即使分配失败，也返回成功 (丢弃数据)
             goto Success;
@@ -307,39 +308,41 @@ static NTSTATUS HandleWrite(
         directPtr = writeBuffer;
     }
     
-    // 从 PRP 指定的主机内存读取数据
-    bytesRemaining = totalBytes;
-    bufferOffset = 0;
-    
-    // 处理 PRP1
-    if (bytesRemaining > 0 && Command->PRP1 != 0) {
-        prpPhys.QuadPart = Command->PRP1;
-        mapSize = (bytesRemaining > PAGE_SIZE) ? PAGE_SIZE : (SIZE_T)bytesRemaining;
+    // 从 PRP 指定的主机内存读取数据 (使用 PRP 列表解析)
+    {
+        PVNVME_PRP_ENTRY prpEntries = NULL;
+        ULONG prpEntryCount = 0;
+        ULONG i;
         
-        prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READONLY | PAGE_NOCACHE);
-        if (prpVa != NULL) {
-            RtlCopyMemory((PUCHAR)directPtr + bufferOffset, prpVa, mapSize);
-            MmUnmapIoSpace(prpVa, mapSize);
-            bytesRemaining -= mapSize;
-            bufferOffset += mapSize;
+        status = VnvmeParsePrpList(Command->PRP1, Command->PRP2, (ULONG)totalBytes,
+                                   &prpEntries, &prpEntryCount);
+        if (!NT_SUCCESS(status)) {
+            if (writeBuffer != NULL) {
+                ExFreePoolWithTag(writeBuffer, VNVME_POOL_TAG);
+            }
+            return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                    NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
         }
-    }
-    
-    // 处理 PRP2 (如果数据超过一页)
-    if (bytesRemaining > 0 && Command->PRP2 != 0) {
-        prpPhys.QuadPart = Command->PRP2;
-        mapSize = (bytesRemaining > PAGE_SIZE) ? PAGE_SIZE : (SIZE_T)bytesRemaining;
         
-        prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READONLY | PAGE_NOCACHE);
-        if (prpVa != NULL) {
-            RtlCopyMemory((PUCHAR)directPtr + bufferOffset, prpVa, mapSize);
-            MmUnmapIoSpace(prpVa, mapSize);
-            bytesRemaining -= mapSize;
-            bufferOffset += mapSize;
+        bufferOffset = 0;
+        for (i = 0; i < prpEntryCount && bufferOffset < totalBytes; i++) {
+            prpPhys.QuadPart = prpEntries[i].PhysicalAddress + prpEntries[i].Offset;
+            mapSize = prpEntries[i].Length;
+            
+            if (mapSize > totalBytes - bufferOffset) {
+                mapSize = (SIZE_T)(totalBytes - bufferOffset);
+            }
+            
+            prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READONLY | PAGE_NOCACHE);
+            if (prpVa != NULL) {
+                RtlCopyMemory((PUCHAR)directPtr + bufferOffset, prpVa, mapSize);
+                MmUnmapIoSpace(prpVa, mapSize);
+                bufferOffset += mapSize;
+            }
         }
+        
+        VnvmeFreePrpEntries(prpEntries);
     }
-    
-    // TODO: 处理 PRP List (超过 2 页的情况)
     
     // 写入存储后端 (如果使用临时缓冲区)
     if (ns->Storage != NULL && writeBuffer != NULL) {
@@ -357,9 +360,13 @@ static NTSTATUS HandleWrite(
     }
 
 Success:
-    // 更新统计
+    // 更新统计 (控制器级别)
     InterlockedAdd64(&PdoContext->BytesWritten, (LONG64)totalBytes);
     InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+    
+    // 更新统计 (命名空间级别)
+    InterlockedAdd64(&ns->WriteBytes, (LONG64)totalBytes);
+    InterlockedIncrement64(&ns->WriteCommands);
     
     return PostIoCompletion(PdoContext, QueueId, Command->CID,
                             NVME_SCT_GENERIC, NVME_SC_SUCCESS);
@@ -390,23 +397,25 @@ static NTSTATUS HandleFlush(
             if (PdoContext->Namespaces[i].Active && 
                 PdoContext->Namespaces[i].Storage != NULL) {
                 VnvmeStorageFlush(PdoContext->Namespaces[i].Storage);
+                InterlockedIncrement64(&PdoContext->Namespaces[i].FlushCommands);
             }
         }
     } else {
-        if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+        if (!VNVME_NSID_VALID(nsid)) {
             return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                     NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
         }
         
-        if (!PdoContext->Namespaces[nsid - 1].Active) {
+        if (!PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)].Active) {
             return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                     NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
         }
         
         // 刷新指定命名空间
-        if (PdoContext->Namespaces[nsid - 1].Storage != NULL) {
-            VnvmeStorageFlush(PdoContext->Namespaces[nsid - 1].Storage);
+        if (PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)].Storage != NULL) {
+            VnvmeStorageFlush(PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)].Storage);
         }
+        InterlockedIncrement64(&PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)].FlushCommands);
     }
     
     InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
@@ -443,12 +452,12 @@ static NTSTATUS HandleWriteZeroes(
     TRACE_INFO("HandleWriteZeroes: QID=%u, CID=%u, NSID=%u, SLBA=%llu, NLB=%u",
                QueueId, Command->CID, nsid, slba, nlb);
     
-    if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+    if (!VNVME_NSID_VALID(nsid)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    ns = &PdoContext->Namespaces[nsid - 1];
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
     
     if (!ns->Active) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
@@ -456,10 +465,10 @@ static NTSTATUS HandleWriteZeroes(
     }
     
     blockSize = ns->BlockSize;
-    totalBytes = (ULONGLONG)nlb * blockSize;
-    byteOffset = slba * blockSize;
+    totalBytes = VNVME_BLOCKS_TO_BYTES(nlb, blockSize);
+    byteOffset = VNVME_LBA_TO_BYTES(slba, blockSize);
     
-    if (slba + nlb > ns->TotalBlocks) {
+    if (!VNVME_LBA_RANGE_VALID(slba, nlb, ns->TotalBlocks)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_LBA_OUT_OF_RANGE);
     }
@@ -500,6 +509,8 @@ static NTSTATUS HandleWriteZeroes(
 
 /**
  * @brief 处理 Dataset Management 命令
+ * 
+ * 解析范围描述符并对每个范围执行 TRIM (写零) 操作。
  */
 static NTSTATUS HandleDatasetManagement(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
@@ -510,6 +521,12 @@ static NTSTATUS HandleDatasetManagement(
     ULONG nsid = Command->NSID;
     ULONG nr;           // Number of Ranges (0's based)
     BOOLEAN deallocate; // Attribute - Deallocate (TRIM)
+    PVNVME_NAMESPACE ns;
+    PHYSICAL_ADDRESS prp1Phys;
+    PNVME_DSM_RANGE ranges = NULL;
+    SIZE_T rangeBufferSize;
+    ULONG i;
+    NTSTATUS status;
     
     nr = (Command->CDW10 & 0xFF) + 1;
     deallocate = (Command->CDW11 & 0x04) != 0;
@@ -517,19 +534,236 @@ static NTSTATUS HandleDatasetManagement(
     TRACE_INFO("HandleDatasetManagement: QID=%u, CID=%u, NSID=%u, NR=%u, Deallocate=%u",
                QueueId, Command->CID, nsid, nr, deallocate);
     
-    if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+    if (!VNVME_NSID_VALID(nsid)) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    if (!PdoContext->Namespaces[nsid - 1].Active) {
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
+    
+    if (!ns->Active) {
         return PostIoCompletion(PdoContext, QueueId, Command->CID,
                                 NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    // TODO Phase 4: 解析范围描述符并处理 TRIM
+    // 如果不是 Deallocate 操作，直接返回成功
+    if (!deallocate) {
+        InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_SUCCESS);
+    }
+    
+    // 限制范围数量 (最多 256 个范围 = 4KB)
+    if (nr > 256) {
+        nr = 256;
+    }
+    
+    rangeBufferSize = nr * sizeof(NVME_DSM_RANGE);
+    
+    // 映射范围描述符数据 (从 PRP1)
+    prp1Phys.QuadPart = Command->PRP1;
+    ranges = (PNVME_DSM_RANGE)MmMapIoSpaceEx(prp1Phys, rangeBufferSize, 
+                                              PAGE_READONLY | PAGE_NOCACHE);
+    if (ranges == NULL) {
+        TRACE_WARN("HandleDatasetManagement: Failed to map range descriptors");
+        // 仍然返回成功 - TRIM 是提示性操作
+        InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_SUCCESS);
+    }
+    
+    // 处理每个范围
+    for (i = 0; i < nr; i++) {
+        ULONGLONG slba = ranges[i].StartingLBA;
+        ULONG nlb = ranges[i].LengthInLogicalBlocks;
+        ULONGLONG byteOffset;
+        ULONGLONG byteLength;
+        
+        // 跳过零长度范围
+        if (nlb == 0) {
+            continue;
+        }
+        
+        // 验证 LBA 范围
+        if (slba + nlb > ns->TotalBlocks) {
+            TRACE_WARN("HandleDatasetManagement: Range %u out of bounds", i);
+            continue;  // 跳过无效范围，继续处理其他范围
+        }
+        
+        byteOffset = slba * ns->BlockSize;
+        byteLength = (ULONGLONG)nlb * ns->BlockSize;
+        
+        // 对存储后端执行写零操作 (等效于 TRIM)
+        if (ns->Storage != NULL) {
+            status = VnvmeStorageWriteZeroes(ns->Storage, byteOffset, (ULONG)byteLength);
+            if (!NT_SUCCESS(status)) {
+                TRACE_WARN("HandleDatasetManagement: WriteZeroes failed for range %u", i);
+                // 继续处理其他范围
+            }
+        }
+        
+        TRACE_VERBOSE("HandleDatasetManagement: TRIM range %u: LBA=%llu, Blocks=%u",
+                      i, slba, nlb);
+    }
+    
+    MmUnmapIoSpace(ranges, rangeBufferSize);
     
     InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+    
+    return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                            NVME_SCT_GENERIC, NVME_SC_SUCCESS);
+}
+
+//===========================================================================
+// Compare 命令处理
+//===========================================================================
+
+/**
+ * @brief 处理 Compare 命令
+ * 
+ * Compare 命令将主机提供的数据与存储介质上的数据进行比较。
+ * 如果数据匹配，返回成功；如果不匹配，返回比较失败状态。
+ * 
+ * @param PdoContext PDO 上下文
+ * @param QueueId I/O 队列 ID
+ * @param Command NVMe 命令
+ * @return NTSTATUS 状态码
+ */
+static NTSTATUS HandleCompare(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ USHORT QueueId,
+    _In_ PNVME_COMMAND Command
+    )
+{
+    ULONG nsid = Command->NSID;
+    ULONGLONG slba;
+    USHORT nlb;
+    ULONG blockSize;
+    ULONGLONG totalBytes;
+    ULONGLONG byteOffset;
+    PVNVME_NAMESPACE ns;
+    NTSTATUS status;
+    PVOID compareBuffer = NULL;     // 主机提供的数据
+    PVOID storageBuffer = NULL;     // 存储介质上的数据
+    PVNVME_PRP_ENTRY prpEntries = NULL;
+    ULONG prpEntryCount = 0;
+    ULONG i;
+    ULONGLONG bufferOffset;
+    BOOLEAN mismatch = FALSE;
+    
+    // 解析命令参数
+    slba = ((ULONGLONG)Command->CDW11 << 32) | Command->CDW10;
+    nlb = (USHORT)(Command->CDW12 & 0xFFFF) + 1;
+    
+    TRACE_INFO("HandleCompare: QID=%u, CID=%u, NSID=%u, SLBA=%llu, NLB=%u",
+               QueueId, Command->CID, nsid, slba, nlb);
+    
+    // 验证 NSID (使用公共验证宏)
+    if (!VNVME_NSID_VALID(nsid)) {
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
+    }
+    
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
+    
+    if (!ns->Active) {
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
+    }
+    
+    blockSize = ns->BlockSize;
+    totalBytes = VNVME_BLOCKS_TO_BYTES(nlb, blockSize);
+    byteOffset = VNVME_LBA_TO_BYTES(slba, blockSize);
+    
+    // 验证 LBA 范围 (使用公共验证宏)
+    if (!VNVME_LBA_RANGE_VALID(slba, nlb, ns->TotalBlocks)) {
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_LBA_OUT_OF_RANGE);
+    }
+    
+    // 限制单次比较大小
+    if (totalBytes > 2 * 1024 * 1024) {
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INVALID_FIELD);
+    }
+    
+    // 分配缓冲区 (使用统一宏)
+    compareBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
+    if (compareBuffer == NULL) {
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
+    }
+    
+    storageBuffer = VNVME_ALLOC_POOL(NonPagedPoolNx, (SIZE_T)totalBytes);
+    if (storageBuffer == NULL) {
+        ExFreePoolWithTag(compareBuffer, VNVME_POOL_TAG);
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
+    }
+    
+    // 解析 PRP 列表
+    status = VnvmeParsePrpList(Command->PRP1, Command->PRP2, (ULONG)totalBytes,
+                               &prpEntries, &prpEntryCount);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(compareBuffer, VNVME_POOL_TAG);
+        ExFreePoolWithTag(storageBuffer, VNVME_POOL_TAG);
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
+    }
+    
+    // 从 PRP 读取主机数据
+    bufferOffset = 0;
+    for (i = 0; i < prpEntryCount && bufferOffset < totalBytes; i++) {
+        PHYSICAL_ADDRESS prpPhys;
+        PVOID prpVa;
+        SIZE_T mapSize;
+        
+        prpPhys.QuadPart = prpEntries[i].PhysicalAddress + prpEntries[i].Offset;
+        mapSize = prpEntries[i].Length;
+        
+        if (mapSize > totalBytes - bufferOffset) {
+            mapSize = (SIZE_T)(totalBytes - bufferOffset);
+        }
+        
+        prpVa = MmMapIoSpaceEx(prpPhys, mapSize, PAGE_READONLY | PAGE_NOCACHE);
+        if (prpVa != NULL) {
+            RtlCopyMemory((PUCHAR)compareBuffer + bufferOffset, prpVa, mapSize);
+            MmUnmapIoSpace(prpVa, mapSize);
+            bufferOffset += mapSize;
+        }
+    }
+    
+    VnvmeFreePrpEntries(prpEntries);
+    
+    // 从存储后端读取数据
+    if (ns->Storage != NULL) {
+        status = VnvmeStorageRead(ns->Storage, byteOffset, storageBuffer, (ULONG)totalBytes);
+        if (!NT_SUCCESS(status)) {
+            ExFreePoolWithTag(compareBuffer, VNVME_POOL_TAG);
+            ExFreePoolWithTag(storageBuffer, VNVME_POOL_TAG);
+            return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                    NVME_SCT_MEDIA_ERROR, NVME_SC_UNRECOVERED_READ_ERROR);
+        }
+    } else {
+        // 无存储后端：假设存储全零
+        RtlZeroMemory(storageBuffer, (SIZE_T)totalBytes);
+    }
+    
+    // 比较数据
+    if (RtlCompareMemory(compareBuffer, storageBuffer, (SIZE_T)totalBytes) != totalBytes) {
+        mismatch = TRUE;
+    }
+    
+    ExFreePoolWithTag(compareBuffer, VNVME_POOL_TAG);
+    ExFreePoolWithTag(storageBuffer, VNVME_POOL_TAG);
+    
+    InterlockedIncrement64(&PdoContext->IoCommandsProcessed);
+    
+    if (mismatch) {
+        // NVMe 规范定义 Compare Failure 状态码
+        return PostIoCompletion(PdoContext, QueueId, Command->CID,
+                                NVME_SCT_MEDIA_ERROR, NVME_SC_COMPARE_FAILURE);
+    }
     
     return PostIoCompletion(PdoContext, QueueId, Command->CID,
                             NVME_SCT_GENERIC, NVME_SC_SUCCESS);
@@ -581,10 +815,7 @@ VnvmeProcessIoCommand(
             break;
             
         case NVME_IO_COMPARE:
-            // TODO: 实现 Compare 命令
-            TRACE_WARN("VnvmeProcessIoCommand: Compare not implemented");
-            status = PostIoCompletion(PdoContext, QueueId, Command->CID,
-                                      NVME_SCT_GENERIC, NVME_SC_INVALID_OPCODE);
+            status = HandleCompare(PdoContext, QueueId, Command);
             break;
             
         default:

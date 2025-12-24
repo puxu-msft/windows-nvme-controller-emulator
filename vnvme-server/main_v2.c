@@ -7,30 +7,25 @@
  *   - logger.c/.h      - 日志系统
  *   - driver_comm.c/.h - 驱动通信
  *   - backend*.c/.h    - 存储后端
- *   - command_processor.c/.h - 命令处理
+ *   - command_engine.c/.h - 命令引擎
  */
 
-#include <windows.h>
-#include <stdio.h>
-
-// 模块化头文件
-#include "vnvme_server.h"
+// 模块化头文件 (v2 架构 - 不再使用 vnvme_server.h)
+#include "types.h"
 #include "config.h"
 #include "logger.h"
 #include "driver_comm.h"
 #include "backend.h"
+#include "command_engine.h"
 
-/*===========================================================================
- * 外部函数声明
- *===========================================================================*/
+// 版本信息来自 vnvme_common.h
+#include "../include/vnvme_common.h"
 
-// 命令处理器 (保留原有接口)
-BOOL CmdProcessorInit(PVOID shmAddress, PBACKEND_CONTEXT backend);
-UINT64 CmdProcessorRun(void);
+#include <stdio.h>
 
-/*===========================================================================
- * 全局变量
- *===========================================================================*/
+//===========================================================================
+// 全局变量
+//===========================================================================
 
 volatile BOOL g_Running = TRUE;
 BOOL g_DebugMode = FALSE;
@@ -38,10 +33,11 @@ BOOL g_DebugMode = FALSE;
 static SERVER_CONFIG g_Config = {0};
 static DRIVER_COMM_CONTEXT g_DriverCtx = {0};
 static PBACKEND_CONTEXT g_Backend = NULL;
+static PCMD_ENGINE_CONTEXT g_CmdEngine = NULL;
 
-/*===========================================================================
- * 控制台处理程序
- *===========================================================================*/
+//===========================================================================
+// 控制台处理程序
+//===========================================================================
 
 static BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType)
 {
@@ -57,15 +53,23 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD dwCtrlType)
     }
 }
 
-/*===========================================================================
- * 主循环
- *===========================================================================*/
+//===========================================================================
+// 主循环
+//===========================================================================
 
 static void MainLoop(void)
 {
     UINT64 totalCommands = 0;
     DWORD lastHeartbeat = GetTickCount();
     const DWORD heartbeatInterval = 1000;  // 1秒
+    const DWORD waitTimeout = 100;         // 100ms 等待超时 (允许定期心跳和关闭检查)
+    
+    // 尝试启用事件等待模式
+    if (DriverGetCommandEvent(&g_DriverCtx)) {
+        LogInfo("Event wait mode enabled (low CPU usage)");
+    } else {
+        LogInfo("Polling mode active (event not available)");
+    }
     
     LogInfo("Entering main loop (Ctrl+C to exit)...");
     
@@ -78,13 +82,13 @@ static void MainLoop(void)
         }
         
         // 处理命令
-        UINT64 processed = CmdProcessorRun();
+        UINT64 processed = CmdEnginePoll(g_CmdEngine);
         totalCommands += processed;
         
         // 定期发送心跳
         DWORD now = GetTickCount();
         if (now - lastHeartbeat >= heartbeatInterval) {
-            DriverSendHeartbeat(&g_DriverCtx, totalCommands);
+            DriverSendHeartbeat(&g_DriverCtx);
             lastHeartbeat = now;
             
             if (processed > 0) {
@@ -92,8 +96,11 @@ static void MainLoop(void)
             }
         }
         
-        // 短暂休眠避免 CPU 占用过高
-        Sleep(1);
+        // 等待新命令 (使用事件等待或轮询)
+        // 如果刚处理了命令，继续检查是否有更多命令
+        if (processed == 0) {
+            DriverWaitForCommand(&g_DriverCtx, waitTimeout);
+        }
     }
     
     // 刷新后端存储
@@ -105,9 +112,9 @@ static void MainLoop(void)
     LogInfo("Shutdown complete. Total commands processed: %llu", totalCommands);
 }
 
-/*===========================================================================
- * 打印配置
- *===========================================================================*/
+//===========================================================================
+// 打印配置
+//===========================================================================
 
 static void PrintStartupBanner(void)
 {
@@ -118,9 +125,9 @@ static void PrintStartupBanner(void)
     printf("\n");
 }
 
-/*===========================================================================
- * 主函数
- *===========================================================================*/
+//===========================================================================
+// 主函数
+//===========================================================================
 
 int main(int argc, char* argv[])
 {
@@ -129,7 +136,7 @@ int main(int argc, char* argv[])
     
     // 解析命令行参数
     ConfigSetDefaults(&g_Config);
-    if (!ConfigParseArgs(&g_Config, argc, argv)) {
+    if (!ConfigParseArgs(argc, argv, &g_Config)) {
         return 1;
     }
     
@@ -167,13 +174,13 @@ int main(int argc, char* argv[])
     LogInfo("Driver version: 0x%08X", g_DriverCtx.driverVersion);
     
     // 映射共享内存
-    LogInfo("Mapping shared memory...");
-    if (!DriverMapSharedMemory(&g_DriverCtx)) {
-        LogError("Cannot map shared memory");
+    LogInfo("Mapping SHM...");
+    if (!DriverMapShm(&g_DriverCtx)) {
+        LogError("Cannot map SHM");
         result = 1;
         goto cleanup_driver;
     }
-    LogInfo("Shared memory: address=%p, size=%zu bytes",
+    LogInfo("SHM: address=%p, size=%zu bytes",
             g_DriverCtx.shm.userAddress, g_DriverCtx.shm.size);
     
     // 创建存储后端
@@ -183,6 +190,7 @@ int main(int argc, char* argv[])
     backendConfig.Size = g_Config.storage.size;
     backendConfig.BlockSize = g_Config.storage.blockSize;
     backendConfig.ReadOnly = g_Config.storage.readOnly;
+    backendConfig.DirectIO = g_Config.storage.directIO;
     wcscpy_s(backendConfig.FilePath, MAX_PATH, g_Config.storage.filePath);
     
     g_Backend = BackendCreate(&backendConfig);
@@ -195,13 +203,21 @@ int main(int argc, char* argv[])
             BackendGetTypeName(backendConfig.Type),
             BackendGetSize(g_Backend));
     
-    // 初始化命令处理器
-    LogInfo("Initializing command processor...");
-    if (!CmdProcessorInit(g_DriverCtx.shm.userAddress, g_Backend)) {
-        LogError("Failed to initialize command processor");
+    // 创建并初始化命令引擎
+    LogInfo("Initializing command engine...");
+    g_CmdEngine = CmdEngineCreate();
+    if (g_CmdEngine == NULL) {
+        LogError("Failed to create command engine");
         result = 1;
         goto cleanup_backend;
     }
+    
+    if (!CmdEngineInitSimple(g_CmdEngine, g_DriverCtx.shm.userAddress, g_Backend)) {
+        LogError("Failed to initialize command engine");
+        result = 1;
+        goto cleanup_cmdengine;
+    }
+    CmdEngineSetDebugMode(g_CmdEngine, g_DebugMode);
     
     // 通知驱动用户态就绪
     LogInfo("Notifying driver...");
@@ -217,6 +233,12 @@ int main(int argc, char* argv[])
     MainLoop();
     
     // 清理
+cleanup_cmdengine:
+    if (g_CmdEngine != NULL) {
+        CmdEngineDestroy(g_CmdEngine);
+        g_CmdEngine = NULL;
+    }
+    
 cleanup_backend:
     if (g_Backend != NULL) {
         BackendDestroy(g_Backend);

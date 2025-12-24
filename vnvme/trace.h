@@ -58,6 +58,7 @@
 #define TRACE_ERROR(msg, ...)   TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, msg, ##__VA_ARGS__)
 #define TRACE_WARN(msg, ...)    TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, msg, ##__VA_ARGS__)
 #define TRACE_INFO(msg, ...)    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_DEBUG(msg, ...)   TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, msg, ##__VA_ARGS__)
 #define TRACE_VERBOSE(msg, ...) TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, msg, ##__VA_ARGS__)
 
 #endif /* _TRACE_H_ */

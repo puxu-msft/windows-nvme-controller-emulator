@@ -186,6 +186,8 @@ VnvmeReadBar0Register(
 
 /**
  * @brief 写入 BAR0 寄存器
+ * 
+ * 处理 NVMe 控制器寄存器写入，某些寄存器需要特殊处理。
  */
 VOID
 VnvmeWriteBar0Register(
@@ -205,10 +207,73 @@ VnvmeWriteBar0Register(
     
     TRACE_VERBOSE("VnvmeWriteBar0Register: Offset=0x%X, Value=0x%08X", Offset, Value);
     
-    // TODO: Phase 3 - 处理特殊寄存器写入
-    // CC 寄存器写入需要处理使能/禁用逻辑
+    // =========================================================================
+    // 处理特殊寄存器写入
+    // =========================================================================
     
-    *reg = Value;
+    switch (Offset) {
+    case 0x00:  // CAP (低32位) - 只读
+    case 0x04:  // CAP (高32位) - 只读
+    case 0x08:  // VS - 只读
+    case 0x1C:  // CSTS - 只读 (由硬件更新)
+    case 0x38:  // CMBLOC - 只读
+    case 0x3C:  // CMBSZ - 只读
+        TRACE_VERBOSE("VnvmeWriteBar0Register: Read-only register 0x%X, ignored", Offset);
+        return;  // 忽略写入只读寄存器
+        
+    case 0x0C:  // INTMS (Interrupt Mask Set)
+        // 设置中断屏蔽位
+        *reg |= Value;
+        TRACE_INFO("VnvmeWriteBar0Register: INTMS write 0x%X, new mask=0x%X", Value, *reg);
+        return;
+        
+    case 0x10:  // INTMC (Interrupt Mask Clear)
+        // 清除中断屏蔽位
+        *(PULONG)((PUCHAR)PdoContext->Bar0VirtAddr + 0x0C) &= ~Value;
+        TRACE_INFO("VnvmeWriteBar0Register: INTMC write 0x%X", Value);
+        return;
+        
+    case 0x14:  // CC (Controller Configuration)
+        {
+            ULONG oldCC = *reg;
+            BOOLEAN oldEN = (oldCC & 0x1) != 0;
+            BOOLEAN newEN = (Value & 0x1) != 0;
+            
+            // 记录 CC 变化
+            TRACE_INFO("VnvmeWriteBar0Register: CC 0x%08X -> 0x%08X (EN: %u->%u)",
+                       oldCC, Value, oldEN, newEN);
+            
+            // 更新 CC 寄存器
+            *reg = Value;
+            
+            // CC.EN 变化会在 doorbell.c 的 VnvmeProcessDoorbells 中处理
+            // 这里只需要记录变化
+        }
+        return;
+        
+    case 0x20:  // NSSR (NVM Subsystem Reset)
+        if (Value == 0x4E564D65) {  // "NVMe" in little-endian
+            TRACE_INFO("VnvmeWriteBar0Register: NVM Subsystem Reset triggered");
+            // 重置控制器状态
+            if (PdoContext->Registers != NULL) {
+                PdoContext->Registers->CSTS.AsUint32 = 0;
+                PdoContext->Registers->CC.AsUint32 = 0;
+            }
+        }
+        // NSSR 不保存写入值
+        return;
+        
+    case 0x24:  // AQA (Admin Queue Attributes)
+        TRACE_INFO("VnvmeWriteBar0Register: AQA = 0x%08X (ASQS=%u, ACQS=%u)",
+                   Value, (Value & 0xFFF) + 1, ((Value >> 16) & 0xFFF) + 1);
+        *reg = Value;
+        return;
+        
+    default:
+        // 其他寄存器直接写入
+        *reg = Value;
+        return;
+    }
 }
 
 /**

@@ -8,7 +8,9 @@
 #ifndef _VNVME_TYPES_H_
 #define _VNVME_TYPES_H_
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <stdint.h>
 #include <stdbool.h>

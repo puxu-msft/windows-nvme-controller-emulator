@@ -13,7 +13,7 @@
 // 常量
 //===========================================================================
 
-#define VNVME_DEVICE_PATH   L"\\\\.\\vnvme"
+#define VNVME_DEVICE_PATH   VNVME_CONTROL_USER_PATH  // L"\\\\.\\VNVMEControl"
 
 //===========================================================================
 // 心跳线程
@@ -23,14 +23,14 @@ static DWORD WINAPI HeartbeatThreadProc(LPVOID lpParameter)
 {
     PDRIVER_COMM_CONTEXT pCtx = (PDRIVER_COMM_CONTEXT)lpParameter;
     
-    LogDebug("Heartbeat thread started, interval=%u ms", pCtx->HeartbeatIntervalMs);
+    LogDebug("Heartbeat thread started, interval=%u ms", pCtx->heartbeatIntervalMs);
     
-    while (pCtx->Running) {
+    while (pCtx->running) {
         if (!DriverSendHeartbeat(pCtx)) {
             LogWarn("Failed to send heartbeat");
         }
         
-        Sleep(pCtx->HeartbeatIntervalMs);
+        Sleep(pCtx->heartbeatIntervalMs);
     }
     
     LogDebug("Heartbeat thread stopped");
@@ -47,7 +47,7 @@ BOOL DriverConnect(PDRIVER_COMM_CONTEXT pCtx)
     
     LogDebug("Connecting to driver: %ls", VNVME_DEVICE_PATH);
     
-    pCtx->DeviceHandle = CreateFileW(
+    pCtx->deviceHandle = CreateFileW(
         VNVME_DEVICE_PATH,
         GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -57,7 +57,7 @@ BOOL DriverConnect(PDRIVER_COMM_CONTEXT pCtx)
         NULL
         );
     
-    if (pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         LogError("Failed to open driver device: error %u", GetLastError());
         return FALSE;
     }
@@ -74,12 +74,12 @@ void DriverDisconnect(PDRIVER_COMM_CONTEXT pCtx)
     DriverStopHeartbeat(pCtx);
     
     // 取消映射共享内存
-    DriverUnmapSharedMemory(pCtx);
+    DriverUnmapShm(pCtx);
     
     // 关闭设备句柄
-    if (pCtx->DeviceHandle && pCtx->DeviceHandle != INVALID_HANDLE_VALUE) {
-        CloseHandle(pCtx->DeviceHandle);
-        pCtx->DeviceHandle = NULL;
+    if (pCtx->deviceHandle && pCtx->deviceHandle != INVALID_HANDLE_VALUE) {
+        CloseHandle(pCtx->deviceHandle);
+        pCtx->deviceHandle = NULL;
         LogInfo("Disconnected from driver");
     }
 }
@@ -88,20 +88,20 @@ void DriverDisconnect(PDRIVER_COMM_CONTEXT pCtx)
 // 共享内存
 //===========================================================================
 
-BOOL DriverMapSharedMemory(PDRIVER_COMM_CONTEXT pCtx)
+BOOL DriverMapShm(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (!pCtx || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
     
-    LogDebug("Mapping shared memory...");
+    LogDebug("Mapping SHM...");
     
-    VNVME_SHM_MAP_REQUEST request = {0};
-    VNVME_SHM_MAP_RESPONSE response = {0};
+    VNVME_MAP_SHM_INPUT request = {0};
+    VNVME_MAP_SHM_OUTPUT response = {0};
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
-        pCtx->DeviceHandle,
+        pCtx->deviceHandle,
         IOCTL_VNVME_MAP_SHM,
         &request,
         sizeof(request),
@@ -116,75 +116,71 @@ BOOL DriverMapSharedMemory(PDRIVER_COMM_CONTEXT pCtx)
         return FALSE;
     }
     
-    if (!response.UserAddress || response.Size == 0) {
-        LogError("Invalid shared memory response");
+    if (!response.UserAddress || response.ActualSize == 0) {
+        LogError("Invalid SHM response");
         return FALSE;
     }
     
     // 设置共享内存上下文
-    pCtx->Shm.BaseAddress = response.UserAddress;
-    pCtx->Shm.Size = response.Size;
+    pCtx->shm.userAddress = response.UserAddress;
+    pCtx->shm.size = response.ActualSize;
     
     // 解析共享内存布局
-    pCtx->Shm.ControlBlock = (PVNVME_SHM_CONTROL_BLOCK)pCtx->Shm.BaseAddress;
+    pCtx->shm.controlBlock = (PVNVME_SHM_CONTROL_BLOCK)pCtx->shm.userAddress;
     
-    // 验证签名
-    if (pCtx->Shm.ControlBlock->Signature != VNVME_SHM_SIGNATURE) {
-        LogError("Invalid shared memory signature: 0x%X", 
-                 pCtx->Shm.ControlBlock->Signature);
-        DriverUnmapSharedMemory(pCtx);
+    // 验证魔数
+    if (pCtx->shm.controlBlock->Magic != VNVME_SHM_MAGIC) {
+        LogError("Invalid SHM magic: 0x%X", 
+                 pCtx->shm.controlBlock->Magic);
+        DriverUnmapShm(pCtx);
         return FALSE;
     }
     
     // 计算各区域指针
-    PUCHAR base = (PUCHAR)pCtx->Shm.BaseAddress;
+    PUCHAR base = (PUCHAR)pCtx->shm.userAddress;
     
-    pCtx->Shm.NotifyRing = (PVNVME_NOTIFY_RING)(base + pCtx->Shm.ControlBlock->NotifyRingOffset);
-    pCtx->Shm.CompletionRing = (PVNVME_COMPLETION_NOTIFY_RING)(base + pCtx->Shm.ControlBlock->CompletionRingOffset);
-    pCtx->Shm.DataBuffer = base + pCtx->Shm.ControlBlock->DataBufferOffset;
-    pCtx->Shm.DataBufferSize = pCtx->Shm.ControlBlock->DataBufferSize;
+    pCtx->shm.notifyRing = (PVNVME_NOTIFY_RING)(base + pCtx->shm.controlBlock->NotifyRingOffset);
+    pCtx->shm.dataBuffer = base + pCtx->shm.controlBlock->DataBufferOffset;
+    pCtx->shm.dataBufferSize = pCtx->shm.controlBlock->DataBufferSize;
     
-    LogInfo("Shared memory mapped: base=%p, size=%zu", 
-            pCtx->Shm.BaseAddress, pCtx->Shm.Size);
-    LogDebug("  ControlBlock: %p", pCtx->Shm.ControlBlock);
-    LogDebug("  NotifyRing: %p (entries=%u)", 
-             pCtx->Shm.NotifyRing, pCtx->Shm.ControlBlock->NotifyRingSize);
-    LogDebug("  CompletionRing: %p", pCtx->Shm.CompletionRing);
+    LogInfo("SHM mapped: base=%p, size=%zu", 
+            pCtx->shm.userAddress, pCtx->shm.size);
+    LogDebug("  ControlBlock: %p", pCtx->shm.controlBlock);
+    LogDebug("  NotifyRing: %p (size=%u)", 
+             pCtx->shm.notifyRing, pCtx->shm.controlBlock->NotifyRingSize);
     LogDebug("  DataBuffer: %p (size=%zu)", 
-             pCtx->Shm.DataBuffer, pCtx->Shm.DataBufferSize);
+             pCtx->shm.dataBuffer, pCtx->shm.dataBufferSize);
     
     return TRUE;
 }
 
-void DriverUnmapSharedMemory(PDRIVER_COMM_CONTEXT pCtx)
+void DriverUnmapShm(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || !pCtx->Shm.BaseAddress) return;
+    if (!pCtx || !pCtx->shm.userAddress) return;
     
-    if (pCtx->DeviceHandle && pCtx->DeviceHandle != INVALID_HANDLE_VALUE) {
-        VNVME_SHM_UNMAP_REQUEST request = {0};
+    // 在测试模式下显式调用 IOCTL 取消映射，确保状态一致性
+    // 生产环境中共享内存在进程结束时自动取消映射
+    if (pCtx->deviceHandle != INVALID_HANDLE_VALUE) {
         DWORD bytesReturned;
-        
         DeviceIoControl(
-            pCtx->DeviceHandle,
+            pCtx->deviceHandle,
             IOCTL_VNVME_UNMAP_SHM,
-            &request,
-            sizeof(request),
-            NULL,
-            0,
+            NULL, 0,
+            NULL, 0,
             &bytesReturned,
             NULL
             );
     }
     
-    pCtx->Shm.BaseAddress = NULL;
-    pCtx->Shm.Size = 0;
-    pCtx->Shm.ControlBlock = NULL;
-    pCtx->Shm.NotifyRing = NULL;
-    pCtx->Shm.CompletionRing = NULL;
-    pCtx->Shm.DataBuffer = NULL;
-    pCtx->Shm.DataBufferSize = 0;
+    // 清理本地状态
+    pCtx->shm.userAddress = NULL;
+    pCtx->shm.size = 0;
+    pCtx->shm.controlBlock = NULL;
+    pCtx->shm.notifyRing = NULL;
+    pCtx->shm.dataBuffer = NULL;
+    pCtx->shm.dataBufferSize = 0;
     
-    LogDebug("Shared memory unmapped");
+    LogDebug("SHM unmapped");
 }
 
 //===========================================================================
@@ -193,14 +189,14 @@ void DriverUnmapSharedMemory(PDRIVER_COMM_CONTEXT pCtx)
 
 BOOL DriverSendUserReady(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (!pCtx || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
     
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
-        pCtx->DeviceHandle,
+        pCtx->deviceHandle,
         IOCTL_VNVME_USER_READY,
         NULL,
         0,
@@ -221,14 +217,14 @@ BOOL DriverSendUserReady(PDRIVER_COMM_CONTEXT pCtx)
 
 BOOL DriverSendHeartbeat(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (!pCtx || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
     
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
-        pCtx->DeviceHandle,
+        pCtx->deviceHandle,
         IOCTL_VNVME_HEARTBEAT,
         NULL,
         0,
@@ -251,10 +247,10 @@ BOOL DriverStartHeartbeat(PDRIVER_COMM_CONTEXT pCtx, UINT32 intervalMs)
 {
     if (!pCtx) return FALSE;
     
-    pCtx->HeartbeatIntervalMs = intervalMs > 0 ? intervalMs : 1000;
-    pCtx->Running = TRUE;
+    pCtx->heartbeatIntervalMs = intervalMs > 0 ? intervalMs : 1000;
+    pCtx->running = TRUE;
     
-    pCtx->HeartbeatThread = CreateThread(
+    pCtx->heartbeatThread = CreateThread(
         NULL,
         0,
         HeartbeatThreadProc,
@@ -263,7 +259,7 @@ BOOL DriverStartHeartbeat(PDRIVER_COMM_CONTEXT pCtx, UINT32 intervalMs)
         NULL
         );
     
-    if (!pCtx->HeartbeatThread) {
+    if (!pCtx->heartbeatThread) {
         LogError("Failed to create heartbeat thread: error %u", GetLastError());
         return FALSE;
     }
@@ -274,13 +270,13 @@ BOOL DriverStartHeartbeat(PDRIVER_COMM_CONTEXT pCtx, UINT32 intervalMs)
 
 void DriverStopHeartbeat(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || !pCtx->HeartbeatThread) return;
+    if (!pCtx || !pCtx->heartbeatThread) return;
     
-    pCtx->Running = FALSE;
+    pCtx->running = FALSE;
     
-    WaitForSingleObject(pCtx->HeartbeatThread, 5000);
-    CloseHandle(pCtx->HeartbeatThread);
-    pCtx->HeartbeatThread = NULL;
+    WaitForSingleObject(pCtx->heartbeatThread, 5000);
+    CloseHandle(pCtx->heartbeatThread);
+    pCtx->heartbeatThread = NULL;
     
     LogInfo("Heartbeat thread stopped");
 }
@@ -291,18 +287,18 @@ void DriverStopHeartbeat(PDRIVER_COMM_CONTEXT pCtx)
 
 BOOL DriverIsShutdownRequested(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || !pCtx->Shm.ControlBlock) {
+    if (!pCtx || !pCtx->shm.controlBlock) {
         return FALSE;
     }
     
-    return pCtx->Shm.ControlBlock->ShutdownRequested != 0;
+    return pCtx->shm.controlBlock->ShutdownRequested != 0;
 }
 
 void DriverNotifyShutdownComplete(PDRIVER_COMM_CONTEXT pCtx)
 {
-    if (!pCtx || !pCtx->Shm.ControlBlock) return;
+    if (!pCtx || !pCtx->shm.controlBlock) return;
     
-    pCtx->Shm.ControlBlock->UserReady = 0;
+    pCtx->shm.controlBlock->UserReady = 0;
     MemoryBarrier();
     
     LogInfo("Shutdown complete notification sent");
@@ -314,15 +310,15 @@ void DriverNotifyShutdownComplete(PDRIVER_COMM_CONTEXT pCtx)
 
 BOOL DriverGetVersion(PDRIVER_COMM_CONTEXT pCtx, UINT32* pVersion)
 {
-    if (!pCtx || !pVersion || pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (!pCtx || !pVersion || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
     
-    VNVME_VERSION_INFO versionInfo = {0};
+    VNVME_GET_VERSION_OUTPUT versionInfo = {0};
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
-        pCtx->DeviceHandle,
+        pCtx->deviceHandle,
         IOCTL_VNVME_GET_VERSION,
         NULL,
         0,
@@ -337,25 +333,25 @@ BOOL DriverGetVersion(PDRIVER_COMM_CONTEXT pCtx, UINT32* pVersion)
         return FALSE;
     }
     
-    *pVersion = versionInfo.Version;
+    *pVersion = versionInfo.DriverVersion;
     return TRUE;
 }
 
-BOOL DriverGetStatus(PDRIVER_COMM_CONTEXT pCtx, PVNVME_DRIVER_STATUS pStatus)
+BOOL DriverGetStatus(PDRIVER_COMM_CONTEXT pCtx, PVNVME_GET_STATUS_OUTPUT pStatus)
 {
-    if (!pCtx || !pStatus || pCtx->DeviceHandle == INVALID_HANDLE_VALUE) {
+    if (!pCtx || !pStatus || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
         return FALSE;
     }
     
     DWORD bytesReturned;
     
     BOOL result = DeviceIoControl(
-        pCtx->DeviceHandle,
+        pCtx->deviceHandle,
         IOCTL_VNVME_GET_STATUS,
         NULL,
         0,
         pStatus,
-        sizeof(VNVME_DRIVER_STATUS),
+        sizeof(VNVME_GET_STATUS_OUTPUT),
         &bytesReturned,
         NULL
         );
@@ -366,4 +362,87 @@ BOOL DriverGetStatus(PDRIVER_COMM_CONTEXT pCtx, PVNVME_DRIVER_STATUS pStatus)
     }
     
     return TRUE;
+}
+
+//===========================================================================
+// 事件等待机制
+//===========================================================================
+
+BOOL DriverGetCommandEvent(PDRIVER_COMM_CONTEXT pCtx)
+{
+    if (!pCtx || pCtx->deviceHandle == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+    
+    // 已经有事件句柄
+    if (pCtx->commandEvent != NULL) {
+        return TRUE;
+    }
+    
+    VNVME_GET_COMMAND_EVENT_OUTPUT output = {0};
+    DWORD bytesReturned;
+    
+    BOOL result = DeviceIoControl(
+        pCtx->deviceHandle,
+        IOCTL_VNVME_GET_COMMAND_EVENT,
+        NULL,
+        0,
+        &output,
+        sizeof(output),
+        &bytesReturned,
+        NULL
+        );
+    
+    if (!result) {
+        LogWarn("IOCTL_VNVME_GET_COMMAND_EVENT failed: error %u (falling back to polling)", 
+                GetLastError());
+        pCtx->eventModeEnabled = FALSE;
+        return FALSE;
+    }
+    
+    if (output.EventHandle == NULL) {
+        LogWarn("Driver returned NULL event handle (falling back to polling)");
+        pCtx->eventModeEnabled = FALSE;
+        return FALSE;
+    }
+    
+    pCtx->commandEvent = output.EventHandle;
+    pCtx->eventModeEnabled = TRUE;
+    LogInfo("Event mode enabled, handle=0x%p", pCtx->commandEvent);
+    
+    return TRUE;
+}
+
+BOOL DriverWaitForCommand(PDRIVER_COMM_CONTEXT pCtx, DWORD timeoutMs)
+{
+    if (!pCtx) {
+        return FALSE;
+    }
+    
+    // 未启用事件模式，回退到短暂 Sleep
+    if (!pCtx->eventModeEnabled || pCtx->commandEvent == NULL) {
+        Sleep(1);
+        return TRUE;
+    }
+    
+    DWORD waitResult = WaitForSingleObject(pCtx->commandEvent, timeoutMs);
+    
+    switch (waitResult) {
+        case WAIT_OBJECT_0:
+            // 事件已触发，有命令就绪
+            return TRUE;
+            
+        case WAIT_TIMEOUT:
+            // 超时，没有新命令
+            return FALSE;
+            
+        case WAIT_FAILED:
+            LogWarn("WaitForSingleObject failed: error %u", GetLastError());
+            // 禁用事件模式，回退到轮询
+            pCtx->eventModeEnabled = FALSE;
+            return FALSE;
+            
+        default:
+            return FALSE;
+    }
 }

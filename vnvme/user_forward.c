@@ -19,13 +19,13 @@
 /**
  * @brief 获取共享内存控制块
  */
-static PVNVME_SHARED_MEMORY_CONTROL_BLOCK
+static PVNVME_SHM_CONTROL_BLOCK
 GetShmControlBlock(void)
 {
     if (g_FdoContext == NULL || g_FdoContext->ShmKernelVirtAddr == NULL) {
         return NULL;
     }
-    return (PVNVME_SHARED_MEMORY_CONTROL_BLOCK)g_FdoContext->ShmKernelVirtAddr;
+    return (PVNVME_SHM_CONTROL_BLOCK)g_FdoContext->ShmKernelVirtAddr;
 }
 
 /**
@@ -34,7 +34,7 @@ GetShmControlBlock(void)
 static PVNVME_NOTIFY_RING
 GetNotifyRing(void)
 {
-    PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
     if (shm == NULL || shm->NotifyRingOffset == 0) {
         return NULL;
     }
@@ -87,13 +87,33 @@ NotifyRingPush(
 }
 
 /**
- * @brief 唤醒用户态服务
+ * @brief 唤醒用户态服务 (内部使用)
  */
 static VOID
 SignalUserMode(void)
 {
     if (g_FdoContext != NULL && g_FdoContext->UserReady) {
         KeSetEvent(&g_FdoContext->CommandReadyEvent, IO_NO_INCREMENT, FALSE);
+    }
+}
+
+/**
+ * @brief 通知用户态有新命令就绪 (公开 API)
+ * 
+ * 当有新命令到达时调用，会设置 CommandReadyEvent 事件。
+ * 用户态可以等待此事件，或使用轮询模式。
+ */
+VOID
+VnvmeNotifyUserMode(
+    _In_ PVNVME_FDO_CONTEXT FdoContext
+    )
+{
+    if (FdoContext == NULL) {
+        FdoContext = g_FdoContext;
+    }
+    
+    if (FdoContext != NULL && FdoContext->EventNotificationEnabled) {
+        KeSetEvent(&FdoContext->CommandReadyEvent, IO_NO_INCREMENT, FALSE);
     }
 }
 
@@ -113,12 +133,12 @@ VnvmeForwardAdminCommandsToUser(
     _In_ ULONG NewTail
     )
 {
-    PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
     
     UNREFERENCED_PARAMETER(PdoContext);
     
     if (shm == NULL) {
-        TRACE_WARN("VnvmeForwardAdminCommandsToUser: Shared memory not initialized");
+        TRACE_WARN("VnvmeForwardAdminCommandsToUser: SHM not initialized");
         return;
     }
     
@@ -157,14 +177,14 @@ VnvmeForwardIoCommandsToUser(
     _In_ ULONG NewTail
     )
 {
-    PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
     PVNVME_QUEUE_DESCRIPTOR ioSqDescriptors;
     USHORT queueIndex;
     
     UNREFERENCED_PARAMETER(PdoContext);
     
     if (shm == NULL) {
-        TRACE_WARN("VnvmeForwardIoCommandsToUser: Shared memory not initialized");
+        TRACE_WARN("VnvmeForwardIoCommandsToUser: SHM not initialized");
         return;
     }
     
@@ -217,8 +237,12 @@ VnvmeProcessUserCompletions(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     )
 {
-    PVNVME_SHARED_MEMORY_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_QUEUE_DESCRIPTOR ioDescs;
     ULONG adminCqTail;
+    USHORT i;
+    ULONG ioCqTail;
+    BOOLEAN needInterrupt = FALSE;
     
     if (shm == NULL) {
         return STATUS_DEVICE_NOT_READY;
@@ -229,15 +253,66 @@ VnvmeProcessUserCompletions(
     if (adminCqTail != PdoContext->AdminCq.Tail) {
         TRACE_VERBOSE("VnvmeProcessUserCompletions: Admin CQ tail %lu -> %lu",
                       PdoContext->AdminCq.Tail, adminCqTail);
-        PdoContext->AdminCq.Tail = adminCqTail;
         
-        // 更新统计
-        InterlockedAdd64(&PdoContext->AdminCommandsProcessed, 
-                         adminCqTail - PdoContext->AdminCq.Tail);
+        // 计算增量并更新统计
+        {
+            LONG64 delta;
+            if (adminCqTail >= PdoContext->AdminCq.Tail) {
+                delta = (LONG64)(adminCqTail - PdoContext->AdminCq.Tail);
+            } else {
+                // 处理环回
+                delta = (LONG64)(shm->AdminCQ.Capacity - PdoContext->AdminCq.Tail + adminCqTail);
+            }
+            InterlockedAdd64(&PdoContext->AdminCommandsProcessed, delta);
+        }
+        
+        PdoContext->AdminCq.Tail = adminCqTail;
+        needInterrupt = TRUE;
     }
     
-    // TODO: 处理 I/O CQ 更新
-    // TODO: 触发 MSI-X 中断 (如果需要)
+    // 处理 I/O CQ 更新
+    if (shm->IoQueueDescriptorOffset != 0) {
+        ioDescs = (PVNVME_QUEUE_DESCRIPTOR)((PUCHAR)shm + shm->IoQueueDescriptorOffset);
+        
+        for (i = 0; i < PdoContext->IoQueueCount; i++) {
+            // CQ 在偶数索引后: [SQ0][CQ0][SQ1][CQ1]...
+            PVNVME_QUEUE_DESCRIPTOR cqDesc = &ioDescs[i * 2 + 1];
+            
+            if (!PdoContext->IoCq[i].Created) {
+                continue;
+            }
+            
+            ioCqTail = cqDesc->Tail;
+            if (ioCqTail != PdoContext->IoCq[i].Tail) {
+                TRACE_VERBOSE("VnvmeProcessUserCompletions: I/O CQ%u tail %lu -> %lu",
+                              i + 1, PdoContext->IoCq[i].Tail, ioCqTail);
+                
+                // 计算增量并更新统计
+                {
+                    LONG64 delta;
+                    if (ioCqTail >= PdoContext->IoCq[i].Tail) {
+                        delta = (LONG64)(ioCqTail - PdoContext->IoCq[i].Tail);
+                    } else {
+                        // 处理环回
+                        delta = (LONG64)(cqDesc->Capacity - PdoContext->IoCq[i].Tail + ioCqTail);
+                    }
+                    InterlockedAdd64(&PdoContext->IoCommandsProcessed, delta);
+                }
+                
+                PdoContext->IoCq[i].Tail = ioCqTail;
+                needInterrupt = TRUE;
+            }
+        }
+    }
+    
+    // 触发 MSI-X 中断 (如果有完成更新)
+    // 注意: 在虚拟设备中，我们通过事件通知机制而非真正的硬件中断
+    // 如果需要模拟中断，可以在这里触发
+    if (needInterrupt) {
+        TRACE_VERBOSE("VnvmeProcessUserCompletions: Completions processed, would trigger interrupt");
+        // 未来可以添加: 通过 WDF 中断对象触发软件中断
+        // 或者通知等待完成的线程
+    }
     
     return STATUS_SUCCESS;
 }

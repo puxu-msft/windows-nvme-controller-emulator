@@ -575,6 +575,22 @@ C_ASSERT(sizeof(PCIE_CONFIG_HEADER) == 64);
 #define PCIE_SUBCLASS_NVM               0x08
 #define PCIE_PROGIF_NVME                0x02
 
+/*===========================================================================
+ * Dataset Management Range Descriptor
+ *===========================================================================*/
+
+/**
+ * @brief Dataset Management Range (16 bytes)
+ * 用于 TRIM/Deallocate 操作
+ */
+typedef struct _NVME_DSM_RANGE {
+    UINT32 ContextAttributes;           // Context Attributes
+    UINT32 LengthInLogicalBlocks;       // Length in Logical Blocks
+    UINT64 StartingLBA;                 // Starting LBA
+} NVME_DSM_RANGE, *PNVME_DSM_RANGE;
+
+C_ASSERT(sizeof(NVME_DSM_RANGE) == 16);
+
 #pragma pack(pop)
 #pragma warning(pop)
 

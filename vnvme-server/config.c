@@ -110,6 +110,7 @@ void ConfigPrintUsage(const char* programName)
     printf("  -s, --size <size>      Storage size (e.g., 100G, 512M)\n");
     printf("  -b, --backend <type>   Backend type: memory, file\n");
     printf("  -f, --file <path>      Backend file path (for file backend)\n");
+    printf("  --direct-io            Enable direct I/O (FILE_FLAG_NO_BUFFERING)\n");
     printf("  -m, --model <name>     Model number string\n");
     printf("  -n, --serial <sn>      Serial number string\n");
     printf("  --log-level <level>    Log level: error, warn, info, debug, verbose\n");
@@ -119,7 +120,7 @@ void ConfigPrintUsage(const char* programName)
     printf("  -v, --version          Show version\n");
     printf("\nExamples:\n");
     printf("  %s --size 100G --backend memory\n", programName);
-    printf("  %s --size 500G --backend file --file C:\\vnvme\\disk.img\n", programName);
+    printf("  %s --size 500G --backend file --file C:\\vnvme\\disk.img --direct-io\n", programName);
     printf("  %s --config vnvme.conf\n", programName);
 }
 
@@ -193,6 +194,12 @@ BOOL ConfigParseArgs(int argc, char* argv[], PSERVER_CONFIG pConfig)
         if ((strcmp(arg, "-f") == 0 || strcmp(arg, "--file") == 0) && i + 1 < argc) {
             MultiByteToWideChar(CP_UTF8, 0, argv[++i], -1,
                                pConfig->storage.filePath, MAX_PATH);
+            continue;
+        }
+        
+        // 直接 I/O
+        if (strcmp(arg, "--direct-io") == 0) {
+            pConfig->storage.directIO = TRUE;
             continue;
         }
         
@@ -317,6 +324,9 @@ BOOL ConfigLoadFile(const WCHAR* filePath, PSERVER_CONFIG pConfig)
                                    pConfig->storage.filePath, MAX_PATH);
             } else if (_stricmp(key, "ReadOnly") == 0) {
                 pConfig->storage.readOnly = (_stricmp(value, "true") == 0 || 
+                                             _stricmp(value, "1") == 0);
+            } else if (_stricmp(key, "DirectIO") == 0) {
+                pConfig->storage.directIO = (_stricmp(value, "true") == 0 || 
                                              _stricmp(value, "1") == 0);
             }
         } else if (_stricmp(currentSection, "controller") == 0) {

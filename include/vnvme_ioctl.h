@@ -16,9 +16,9 @@
 #include <winioctl.h>
 #endif
 
-/*===========================================================================
- * IOCTL 代码定义
- *===========================================================================*/
+//===========================================================================
+// IOCTL 代码定义
+//===========================================================================
 
 /* 设备类型 - 使用自定义类型 (unsigned 避免符号扩展) */
 #define FILE_DEVICE_VNVME       0x8000U
@@ -39,10 +39,10 @@
     CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 /* 共享内存 */
-#define IOCTL_VNVME_MAP_SHARED_MEMORY   \
+#define IOCTL_VNVME_MAP_SHM   \
     CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 10, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 
-#define IOCTL_VNVME_UNMAP_SHARED_MEMORY \
+#define IOCTL_VNVME_UNMAP_SHM \
     CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 11, METHOD_BUFFERED, FILE_READ_DATA | FILE_WRITE_DATA)
 
 /* 用户态状态 */
@@ -89,9 +89,16 @@
 #define IOCTL_VNVME_SET_DEBUG_LEVEL     \
     CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 101, METHOD_BUFFERED, FILE_WRITE_DATA)
 
-/*===========================================================================
- * IOCTL 输入/输出结构
- *===========================================================================*/
+/* 性能统计 */
+#define IOCTL_VNVME_GET_STATS           \
+    CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 110, METHOD_BUFFERED, FILE_READ_DATA)
+
+#define IOCTL_VNVME_RESET_STATS         \
+    CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 111, METHOD_BUFFERED, FILE_WRITE_DATA)
+
+//===========================================================================
+// IOCTL 输入/输出结构
+//===========================================================================
 
 #pragma pack(push, 1)
 
@@ -154,20 +161,20 @@ typedef struct _VNVME_GET_STATUS_OUTPUT {
 #define VNVME_USER_STATUS_ERROR             3
 
 /*---------------------------------------------------------------------------
- * IOCTL_VNVME_MAP_SHARED_MEMORY
+ * IOCTL_VNVME_MAP_SHM
  *---------------------------------------------------------------------------*/
 
-typedef struct _VNVME_MAP_SHARED_MEMORY_INPUT {
+typedef struct _VNVME_MAP_SHM_INPUT {
     UINT32 RequestedSize;               // 请求大小 (0 = 使用默认)
     UINT32 Reserved;
-} VNVME_MAP_SHARED_MEMORY_INPUT, *PVNVME_MAP_SHARED_MEMORY_INPUT;
+} VNVME_MAP_SHM_INPUT, *PVNVME_MAP_SHM_INPUT;
 
-typedef struct _VNVME_MAP_SHARED_MEMORY_OUTPUT {
+typedef struct _VNVME_MAP_SHM_OUTPUT {
     PVOID UserAddress;                  // 映射到用户空间的地址
     UINT32 ActualSize;                  // 实际大小
     UINT32 Reserved;
     HANDLE CommandEventHandle;          // 命令事件句柄 (可等待)
-} VNVME_MAP_SHARED_MEMORY_OUTPUT, *PVNVME_MAP_SHARED_MEMORY_OUTPUT;
+} VNVME_MAP_SHM_OUTPUT, *PVNVME_MAP_SHM_OUTPUT;
 
 /*---------------------------------------------------------------------------
  * IOCTL_VNVME_USER_READY
@@ -213,7 +220,7 @@ typedef struct _VNVME_GET_COMMAND_EVENT_OUTPUT {
 
 typedef struct _VNVME_SUBMIT_COMPLETIONS_INPUT {
     UINT32 CompletionCount;             // 完成数量
-    UINT32 Reserved;
+    UINT32 ControllerId;                // 目标控制器 ID (0 = 广播到所有控制器)
 } VNVME_SUBMIT_COMPLETIONS_INPUT, *PVNVME_SUBMIT_COMPLETIONS_INPUT;
 
 /*---------------------------------------------------------------------------
@@ -281,6 +288,31 @@ typedef struct _VNVME_DELETE_NAMESPACE_INPUT {
 } VNVME_DELETE_NAMESPACE_INPUT, *PVNVME_DELETE_NAMESPACE_INPUT;
 
 /*---------------------------------------------------------------------------
+ * IOCTL_VNVME_LIST_NAMESPACES
+ *---------------------------------------------------------------------------*/
+
+typedef struct _VNVME_LIST_NAMESPACES_INPUT {
+    UINT32 ControllerId;                // 控制器 ID
+    UINT32 Reserved;
+} VNVME_LIST_NAMESPACES_INPUT, *PVNVME_LIST_NAMESPACES_INPUT;
+
+#define VNVME_MAX_NAMESPACES_PER_CONTROLLER  16
+
+typedef struct _VNVME_NAMESPACE_INFO {
+    UINT32 NSID;                        // 命名空间 ID
+    UINT32 Flags;                       // 标志 (VNVME_NS_FLAG_*)
+    UINT64 TotalBlocks;                 // 总块数
+    UINT32 BlockSize;                   // 块大小
+    UINT32 Reserved;
+} VNVME_NAMESPACE_INFO, *PVNVME_NAMESPACE_INFO;
+
+typedef struct _VNVME_LIST_NAMESPACES_OUTPUT {
+    UINT32 Count;                       // 命名空间数量
+    UINT32 Reserved;
+    VNVME_NAMESPACE_INFO Namespaces[VNVME_MAX_NAMESPACES_PER_CONTROLLER];
+} VNVME_LIST_NAMESPACES_OUTPUT, *PVNVME_LIST_NAMESPACES_OUTPUT;
+
+/*---------------------------------------------------------------------------
  * IOCTL_VNVME_GET_DEBUG_INFO
  *---------------------------------------------------------------------------*/
 
@@ -311,6 +343,63 @@ typedef struct _VNVME_SET_DEBUG_LEVEL_INPUT {
 #define VNVME_DEBUG_FLAG_TRACE_DMA      0x0004
 #define VNVME_DEBUG_FLAG_TRACE_QUEUE    0x0008
 #define VNVME_DEBUG_FLAG_TRACE_ALL      0xFFFF
+
+/*---------------------------------------------------------------------------
+ * IOCTL_VNVME_GET_STATS
+ *---------------------------------------------------------------------------*/
+
+// 命名空间统计
+typedef struct _VNVME_NAMESPACE_STATS {
+    UINT32 NSID;                        // 命名空间 ID
+    UINT32 Active;                      // 是否激活
+    UINT64 TotalBlocks;                 // 总块数
+    UINT32 BlockSize;                   // 块大小
+    UINT64 ReadCommands;                // 读命令数
+    UINT64 WriteCommands;               // 写命令数
+    UINT64 FlushCommands;               // Flush 命令数
+    UINT64 ReadBytes;                   // 读取字节数
+    UINT64 WriteBytes;                  // 写入字节数
+} VNVME_NAMESPACE_STATS, *PVNVME_NAMESPACE_STATS;
+
+// 控制器统计
+typedef struct _VNVME_CONTROLLER_STATS {
+    UINT32 ControllerId;                // 控制器 ID
+    UINT32 NamespaceCount;              // 命名空间数量
+    UINT64 AdminCommandsProcessed;      // Admin 命令数
+    UINT64 IoCommandsProcessed;         // I/O 命令数
+    UINT64 TotalReadBytes;              // 总读取字节数
+    UINT64 TotalWriteBytes;             // 总写入字节数
+    UINT32 IoQueueCount;                // I/O 队列数量
+    UINT32 PollingIntervalUs;           // 当前轮询间隔 (微秒)
+} VNVME_CONTROLLER_STATS, *PVNVME_CONTROLLER_STATS;
+
+// 系统统计输入
+typedef struct _VNVME_GET_STATS_INPUT {
+    UINT32 ControllerId;                // 控制器 ID (0 = 所有控制器)
+    UINT32 Flags;                       // 标志 (保留)
+} VNVME_GET_STATS_INPUT, *PVNVME_GET_STATS_INPUT;
+
+// 系统统计输出
+#define VNVME_MAX_STATS_CONTROLLERS 8
+#define VNVME_MAX_STATS_NAMESPACES  16
+
+typedef struct _VNVME_GET_STATS_OUTPUT {
+    UINT32 ControllerCount;             // 返回的控制器数
+    UINT32 TotalNamespaceCount;         // 总命名空间数
+    UINT64 Uptime;                      // 驱动运行时间 (毫秒)
+    UINT64 TotalCommandsProcessed;      // 总命令数
+    VNVME_CONTROLLER_STATS Controllers[VNVME_MAX_STATS_CONTROLLERS];
+    VNVME_NAMESPACE_STATS Namespaces[VNVME_MAX_STATS_NAMESPACES];
+} VNVME_GET_STATS_OUTPUT, *PVNVME_GET_STATS_OUTPUT;
+
+/*---------------------------------------------------------------------------
+ * IOCTL_VNVME_RESET_STATS
+ *---------------------------------------------------------------------------*/
+
+typedef struct _VNVME_RESET_STATS_INPUT {
+    UINT32 ControllerId;                // 控制器 ID (0 = 所有控制器)
+    UINT32 Flags;                       // 保留
+} VNVME_RESET_STATS_INPUT, *PVNVME_RESET_STATS_INPUT;
 
 #pragma pack(pop)
 

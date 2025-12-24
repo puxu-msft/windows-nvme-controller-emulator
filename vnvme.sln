@@ -6,8 +6,19 @@ MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme", "vnvme\vnvme.vcxproj", "{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme-server", "vnvme-server\vnvme-server.vcxproj", "{B2C3D4E5-F6A7-8901-BCDE-F12345678901}"
+	ProjectSection(ProjectDependencies) = postProject
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890} = {A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+	EndProjectSection
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvmectl", "vnvmectl\vnvmectl.vcxproj", "{C3D4E5F6-A7B8-9012-CDEF-123456789012}"
+	ProjectSection(ProjectDependencies) = postProject
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890} = {A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+	EndProjectSection
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vnvme-tests", "tests\vnvme-tests.vcxproj", "{C4D5E6F7-8901-2345-6789-ABCDEF012345}"
+	ProjectSection(ProjectDependencies) = postProject
+		{A1B2C3D4-E5F6-7890-ABCD-EF1234567890} = {A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -41,6 +52,12 @@ Global
 		{C3D4E5F6-A7B8-9012-CDEF-123456789012}.Release|ARM64.Build.0 = Release|ARM64
 		{C3D4E5F6-A7B8-9012-CDEF-123456789012}.Release|x64.ActiveCfg = Release|x64
 		{C3D4E5F6-A7B8-9012-CDEF-123456789012}.Release|x64.Build.0 = Release|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Debug|ARM64.ActiveCfg = Debug|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Debug|x64.ActiveCfg = Debug|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Debug|x64.Build.0 = Debug|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Release|ARM64.ActiveCfg = Release|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Release|x64.ActiveCfg = Release|x64
+		{C4D5E6F7-8901-2345-6789-ABCDEF012345}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

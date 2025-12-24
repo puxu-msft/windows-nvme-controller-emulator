@@ -15,14 +15,7 @@
 // 辅助函数
 //===========================================================================
 
-/**
- * @brief 构造完成状态
- */
-static UINT16 MakeStatus(UINT8 sct, UINT8 sc, UINT8 phase)
-{
-    // Status 字段格式: [15:15] DNR, [14:14] M, [11:9] SCT, [8:1] SC, [0:0] P
-    return (UINT16)(phase | (sc << 1) | (sct << 9));
-}
+// MakeStatus 已移至 vnvme_utils.h 作为 NvmeMakeStatus()
 
 /**
  * @brief 发送成功完成
@@ -39,7 +32,7 @@ static NTSTATUS PostSuccessCompletion(
     completion.DW0 = Dw0;
     completion.SQID = 0;  // Admin Queue
     completion.SQHD = (UINT16)PdoContext->LastAdminSqTail;
-    completion.Status = MakeStatus(0, 0, (UINT8)PdoContext->AdminCqPhase);
+    completion.Status = NvmeMakeStatus(0, 0, (UINT8)PdoContext->AdminCqPhase);
     
     return VnvmePostCompletion(PdoContext, 0, &completion);
 }
@@ -60,7 +53,7 @@ static NTSTATUS PostErrorCompletion(
     completion.DW0 = 0;
     completion.SQID = 0;
     completion.SQHD = (UINT16)PdoContext->LastAdminSqTail;
-    completion.Status = MakeStatus(Sct, Sc, (UINT8)PdoContext->AdminCqPhase);
+    completion.Status = NvmeMakeStatus(Sct, Sc, (UINT8)PdoContext->AdminCqPhase);
     
     return VnvmePostCompletion(PdoContext, 0, &completion);
 }
@@ -167,14 +160,14 @@ static NTSTATUS HandleIdentifyNamespace(
     
     TRACE_INFO("HandleIdentifyNamespace: CID=%u, NSID=%u", Command->CID, nsid);
     
-    // 验证 NSID
-    if (nsid == 0 || nsid > VNVME_MAX_NAMESPACES) {
+    // 验证 NSID (使用公共验证宏)
+    if (!VNVME_NSID_VALID(nsid)) {
         TRACE_ERROR("HandleIdentifyNamespace: Invalid NSID %u", nsid);
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_INVALID_NAMESPACE);
     }
     
-    ns = &PdoContext->Namespaces[nsid - 1];
+    ns = &PdoContext->Namespaces[VNVME_NSID_TO_INDEX(nsid)];
     
     if (!ns->Active) {
         TRACE_WARN("HandleIdentifyNamespace: NSID %u not active", nsid);
@@ -199,12 +192,22 @@ static NTSTATUS HandleIdentifyNamespace(
     nsData->NSZE = ns->TotalBlocks;
     nsData->NCAP = ns->TotalBlocks;
     nsData->NUSE = ns->TotalBlocks;
-    nsData->NSFEAT = 0;
-    nsData->NLBAF = 0;              // 1 LBA format (0-based)
-    nsData->FLBAS = 0;              // Format 0 in use
+    
+    // 命名空间特性
+    nsData->NSFEAT = ns->NsFeatures;
+    if (ns->ThinProvisioned) {
+        nsData->NSFEAT |= 0x01;       // Thin Provisioning bit
+    }
+    
+    nsData->NLBAF = ns->NumberOfLbaFormats;     // 支持的 LBA 格式数 (0-based)
+    nsData->FLBAS = ns->FormattedLbaSize;       // 当前格式
     nsData->MC = 0;                 // No metadata
     nsData->DPC = 0;                // No end-to-end protection
     nsData->DPS = 0;
+    
+    // 命名空间唯一标识符
+    RtlCopyMemory(nsData->NGUID, ns->Nguid, 16);
+    RtlCopyMemory(nsData->EUI64, ns->Eui64, 8);
     
     // LBA Format 0: 512 bytes or 4096 bytes
     if (ns->BlockSize == 4096) {
@@ -235,6 +238,63 @@ static NTSTATUS HandleIdentifyNamespace(
 }
 
 /**
+ * @brief 处理 Identify Active Namespace ID List (CNS=0x02)
+ * 
+ * 返回从指定 NSID 开始的活动命名空间 ID 列表。
+ * 列表为 1024 个 32 位条目，以 0 结尾。
+ */
+static NTSTATUS HandleIdentifyActiveNsList(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ PNVME_COMMAND Command
+    )
+{
+    PUINT32 nsList = NULL;
+    PHYSICAL_ADDRESS prp1Phys;
+    PVOID prp1Va = NULL;
+    ULONG startNsid = Command->NSID;
+    ULONG index = 0;
+    ULONG i;
+    
+    TRACE_INFO("HandleIdentifyActiveNsList: CID=%u, StartNSID=%u", Command->CID, startNsid);
+    
+    // 分配命名空间 ID 列表 (4096 bytes = 1024 x 4 bytes)
+    nsList = (PUINT32)VNVME_ALLOC_POOL(NonPagedPoolNx, 4096);
+    if (nsList == NULL) {
+        return PostErrorCompletion(PdoContext, Command->CID,
+                                   NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
+    }
+    
+    RtlZeroMemory(nsList, 4096);
+    
+    // 填充活动命名空间 ID 列表
+    // 从 startNsid + 1 开始，返回所有活动的命名空间 ID
+    for (i = startNsid; i < VNVME_MAX_NAMESPACES && index < 1024; i++) {
+        if (PdoContext->Namespaces[i].Active) {
+            nsList[index++] = i + 1;  // NSID 是 1-based
+        }
+    }
+    
+    TRACE_INFO("HandleIdentifyActiveNsList: Found %u active namespaces", index);
+    
+    // 映射并复制数据到 PRP1
+    prp1Phys.QuadPart = Command->PRP1;
+    prp1Va = MmMapIoSpaceEx(prp1Phys, 4096, PAGE_READWRITE | PAGE_NOCACHE);
+    
+    if (prp1Va == NULL) {
+        VNVME_FREE_POOL(nsList);
+        return PostErrorCompletion(PdoContext, Command->CID,
+                                   NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
+    }
+    
+    RtlCopyMemory(prp1Va, nsList, 4096);
+    MmUnmapIoSpace(prp1Va, 4096);
+    
+    VNVME_FREE_POOL(nsList);
+    
+    return PostSuccessCompletion(PdoContext, Command->CID, 0);
+}
+
+/**
  * @brief 处理 Identify 命令
  */
 static NTSTATUS HandleIdentify(
@@ -254,10 +314,7 @@ static NTSTATUS HandleIdentify(
             return HandleIdentifyController(PdoContext, Command);
             
         case 0x02:  // Active Namespace ID List
-            // TODO: 实现活动命名空间列表
-            TRACE_WARN("HandleIdentify: CNS=0x02 not implemented");
-            return PostErrorCompletion(PdoContext, Command->CID,
-                                       NVME_SCT_GENERIC, NVME_SC_INVALID_FIELD);
+            return HandleIdentifyActiveNsList(PdoContext, Command);
             
         default:
             TRACE_WARN("HandleIdentify: Unknown CNS 0x%02X", cns);
@@ -287,8 +344,8 @@ static NTSTATUS HandleCreateIoCq(
     TRACE_INFO("HandleCreateIoCq: QID=%u, Size=%u, PC=%u, IEN=%u, IV=%u",
                qid, qsize, pc, ien, iv);
     
-    // 验证参数
-    if (qid == 0 || qid > VNVME_MAX_IO_QUEUES) {
+    // 验证参数 (使用公共验证宏)
+    if (!VNVME_IO_QUEUE_ID_VALID(qid)) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
@@ -299,18 +356,18 @@ static NTSTATUS HandleCreateIoCq(
     }
     
     // 检查队列是否已存在
-    if (PdoContext->IoCq[qid - 1].Created) {
+    if (PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
     // 创建队列
-    PdoContext->IoCq[qid - 1].BaseAddress.QuadPart = Command->PRP1;
-    PdoContext->IoCq[qid - 1].Size = qsize;
-    PdoContext->IoCq[qid - 1].Head = 0;
-    PdoContext->IoCq[qid - 1].Tail = 0;
-    PdoContext->IoCq[qid - 1].PhaseTag = TRUE;
-    PdoContext->IoCq[qid - 1].Created = TRUE;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].BaseAddress.QuadPart = Command->PRP1;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Size = qsize;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Head = 0;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Tail = 0;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].PhaseTag = TRUE;
+    PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created = TRUE;
     
     TRACE_INFO("HandleCreateIoCq: CQ%u created, Base=0x%016llX, Size=%u",
                qid, Command->PRP1, qsize);
@@ -334,8 +391,8 @@ static NTSTATUS HandleCreateIoSq(
     TRACE_INFO("HandleCreateIoSq: QID=%u, Size=%u, PC=%u, CQID=%u",
                qid, qsize, pc, cqid);
     
-    // 验证参数
-    if (qid == 0 || qid > VNVME_MAX_IO_QUEUES) {
+    // 验证参数 (使用公共验证宏)
+    if (!VNVME_IO_QUEUE_ID_VALID(qid)) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
@@ -346,23 +403,24 @@ static NTSTATUS HandleCreateIoSq(
     }
     
     // 验证关联的 CQ 是否存在
-    if (cqid == 0 || cqid > VNVME_MAX_IO_QUEUES || !PdoContext->IoCq[cqid - 1].Created) {
+    if (!VNVME_IO_QUEUE_ID_VALID(cqid) || !PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(cqid)].Created) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_CQ_INVALID);
     }
     
     // 检查队列是否已存在
-    if (PdoContext->IoSq[qid - 1].Created) {
+    if (PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
     // 创建队列
-    PdoContext->IoSq[qid - 1].BaseAddress.QuadPart = Command->PRP1;
-    PdoContext->IoSq[qid - 1].Size = qsize;
-    PdoContext->IoSq[qid - 1].Head = 0;
-    PdoContext->IoSq[qid - 1].Tail = 0;
-    PdoContext->IoSq[qid - 1].Created = TRUE;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].BaseAddress.QuadPart = Command->PRP1;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Size = qsize;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Head = 0;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Tail = 0;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].CqId = cqid;
+    PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created = TRUE;
     
     if (PdoContext->IoQueueCount < qid) {
         PdoContext->IoQueueCount = qid;
@@ -386,19 +444,29 @@ static NTSTATUS HandleDeleteIoCq(
     
     TRACE_INFO("HandleDeleteIoCq: QID=%u", qid);
     
-    if (qid == 0 || qid > VNVME_MAX_IO_QUEUES) {
+    if (!VNVME_IO_QUEUE_ID_VALID(qid)) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
-    if (!PdoContext->IoCq[qid - 1].Created) {
+    if (!PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
-    // TODO: 检查是否有 SQ 关联到这个 CQ
+    // 检查是否有 SQ 关联到这个 CQ
+    {
+        USHORT i;
+        for (i = 0; i < VNVME_MAX_IO_QUEUES; i++) {
+            if (PdoContext->IoSq[i].Created && PdoContext->IoSq[i].CqId == qid) {
+                TRACE_WARN("HandleDeleteIoCq: CQ%u still has SQ%u associated", qid, i + 1);
+                return PostErrorCompletion(PdoContext, Command->CID,
+                                           NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_DELETION);
+            }
+        }
+    }
     
-    RtlZeroMemory(&PdoContext->IoCq[qid - 1], sizeof(VNVME_QUEUE_STATE));
+    RtlZeroMemory(&PdoContext->IoCq[VNVME_QUEUE_ID_TO_INDEX(qid)], sizeof(VNVME_QUEUE_STATE));
     
     TRACE_INFO("HandleDeleteIoCq: CQ%u deleted", qid);
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
@@ -416,17 +484,17 @@ static NTSTATUS HandleDeleteIoSq(
     
     TRACE_INFO("HandleDeleteIoSq: QID=%u", qid);
     
-    if (qid == 0 || qid > VNVME_MAX_IO_QUEUES) {
+    if (!VNVME_IO_QUEUE_ID_VALID(qid)) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
-    if (!PdoContext->IoSq[qid - 1].Created) {
+    if (!PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)].Created) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_COMMAND, NVME_SC_INVALID_QUEUE_ID);
     }
     
-    RtlZeroMemory(&PdoContext->IoSq[qid - 1], sizeof(VNVME_QUEUE_STATE));
+    RtlZeroMemory(&PdoContext->IoSq[VNVME_QUEUE_ID_TO_INDEX(qid)], sizeof(VNVME_QUEUE_STATE));
     
     TRACE_INFO("HandleDeleteIoSq: SQ%u deleted", qid);
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
@@ -558,16 +626,177 @@ static NTSTATUS HandleAbort(
 
 /**
  * @brief 处理 Async Event Request 命令
+ * 
+ * AER 命令用于异步通知主机控制器状态变化。
+ * 控制器存储这些命令，在发生事件时完成它们。
+ * 
+ * 支持的事件类型:
+ * - 0: Error Status
+ * - 1: SMART / Health Status
+ * - 2: Notice
+ * - 6: Vendor Specific
  */
 static NTSTATUS HandleAsyncEventRequest(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
 {
-    TRACE_INFO("HandleAsyncEventRequest: CID=%u", Command->CID);
+    TRACE_INFO("HandleAsyncEventRequest: CID=%u, AerCount=%u", 
+               Command->CID, PdoContext->AerCount);
     
-    // TODO: 存储 AER 命令，稍后完成
-    // 当前简单返回成功
+    // 检查是否超过最大 AER 命令限制
+    if (PdoContext->AerCount >= VNVME_MAX_AER_COMMANDS) {
+        TRACE_WARN("HandleAsyncEventRequest: AER limit reached");
+        return PostErrorCompletion(PdoContext, Command->CID,
+                                   NVME_SCT_COMMAND, NVME_SC_ASYNC_EVENT_LIMIT_EXCEEDED);
+    }
+    
+    // 存储 AER 命令 CID，稍后在发生事件时完成
+    PdoContext->AerCids[PdoContext->AerCount] = Command->CID;
+    PdoContext->AerCount++;
+    
+    TRACE_INFO("HandleAsyncEventRequest: Stored AER CID=%u, total=%u",
+               Command->CID, PdoContext->AerCount);
+    
+    // 不立即返回完成 - AER 命令保持挂起状态
+    // 当发生事件时，调用 VnvmeCompleteAer() 来完成它
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 Get Log Page (Opcode 0x02)
+ * 
+ * 支持的日志页:
+ * - 0x01: Error Information
+ * - 0x02: SMART / Health Information
+ * - 0x03: Firmware Slot Information
+ */
+static NTSTATUS HandleGetLogPage(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ PNVME_COMMAND Command
+    )
+{
+    UINT8 lid = (UINT8)(Command->CDW10 & 0xFF);
+    UINT32 numdl = (Command->CDW10 >> 16) & 0xFFFF;
+    UINT32 numdu = Command->CDW11 & 0xFFFF;
+    UINT32 numDwords = ((UINT32)numdu << 16) | numdl;
+    UINT32 dataLength = (numDwords + 1) * 4;  // NUMD is 0-based
+    PHYSICAL_ADDRESS prp1Phys;
+    PVOID prp1Va = NULL;
+    PVOID logData = NULL;
+    
+    TRACE_INFO("HandleGetLogPage: LID=0x%02X, DataLen=%u", lid, dataLength);
+    
+    // 限制最大数据长度
+    if (dataLength > 4096) {
+        dataLength = 4096;
+    }
+    
+    // 分配日志数据缓冲区
+    logData = VNVME_ALLOC_POOL(NonPagedPoolNx, dataLength);
+    if (logData == NULL) {
+        return PostErrorCompletion(PdoContext, Command->CID,
+                                   NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
+    }
+    
+    RtlZeroMemory(logData, dataLength);
+    
+    switch (lid) {
+        case 0x01:  // Error Information Log
+            // 返回空的错误日志 (无错误)
+            // 每个条目 64 字节，我们返回空列表
+            break;
+            
+        case 0x02:  // SMART / Health Information Log
+            {
+                PUCHAR smart = (PUCHAR)logData;
+                // 填充 SMART 数据 (最少 512 字节)
+                if (dataLength >= 512) {
+                    // Byte 0: Critical Warning = 0 (无警告)
+                    smart[0] = 0;
+                    
+                    // Bytes 1-2: Composite Temperature (Kelvin)
+                    // 298K = 25°C
+                    smart[1] = 0x2A;  // 298 & 0xFF
+                    smart[2] = 0x01;  // 298 >> 8
+                    
+                    // Byte 3: Available Spare = 100%
+                    smart[3] = 100;
+                    
+                    // Byte 4: Available Spare Threshold = 10%
+                    smart[4] = 10;
+                    
+                    // Byte 5: Percentage Used = 0%
+                    smart[5] = 0;
+                    
+                    // Bytes 32-47: Data Units Read (128 bits)
+                    // 简单填充 0
+                    
+                    // Bytes 48-63: Data Units Written (128 bits)
+                    // 简单填充 0
+                    
+                    // Bytes 64-79: Host Read Commands (128 bits)
+                    // 简单填充 0
+                    
+                    // Bytes 80-95: Host Write Commands (128 bits)
+                    // 简单填充 0
+                    
+                    // Bytes 128-143: Power On Hours (128 bits)
+                    // 简单填充 1 小时
+                    smart[128] = 1;
+                    
+                    // Bytes 144-159: Power Cycles (128 bits)
+                    smart[144] = 1;
+                }
+            }
+            break;
+            
+        case 0x03:  // Firmware Slot Information Log
+            {
+                PUCHAR fwInfo = (PUCHAR)logData;
+                // 512 字节结构
+                if (dataLength >= 512) {
+                    // Byte 0: AFI (Active Firmware Info)
+                    // Bits [2:0] = Active Slot = 1
+                    fwInfo[0] = 0x01;
+                    
+                    // Bytes 8-15: FRS1 (Firmware Revision Slot 1)
+                    // "1.0.0   "
+                    fwInfo[8] = '1';
+                    fwInfo[9] = '.';
+                    fwInfo[10] = '0';
+                    fwInfo[11] = '.';
+                    fwInfo[12] = '0';
+                    fwInfo[13] = ' ';
+                    fwInfo[14] = ' ';
+                    fwInfo[15] = ' ';
+                }
+            }
+            break;
+            
+        default:
+            TRACE_WARN("HandleGetLogPage: Unsupported LID 0x%02X", lid);
+            VNVME_FREE_POOL(logData);
+            return PostErrorCompletion(PdoContext, Command->CID,
+                                       NVME_SCT_GENERIC, NVME_SC_INVALID_LOG_PAGE);
+    }
+    
+    // 映射并复制数据到 PRP1
+    prp1Phys.QuadPart = Command->PRP1;
+    prp1Va = MmMapIoSpaceEx(prp1Phys, dataLength, PAGE_READWRITE | PAGE_NOCACHE);
+    
+    if (prp1Va == NULL) {
+        VNVME_FREE_POOL(logData);
+        return PostErrorCompletion(PdoContext, Command->CID,
+                                   NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
+    }
+    
+    RtlCopyMemory(prp1Va, logData, dataLength);
+    MmUnmapIoSpace(prp1Va, dataLength);
+    
+    VNVME_FREE_POOL(logData);
+    
+    TRACE_INFO("HandleGetLogPage: Success, LID=0x%02X", lid);
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
 }
 
@@ -647,10 +876,7 @@ VnvmeProcessAdminCommand(
             break;
             
         case NVME_ADMIN_GET_LOG_PAGE:
-            // TODO: 实现 Get Log Page
-            TRACE_WARN("VnvmeProcessAdminCommand: Get Log Page not implemented");
-            status = PostErrorCompletion(PdoContext, Command->CID,
-                                         NVME_SCT_GENERIC, NVME_SC_INVALID_OPCODE);
+            status = HandleGetLogPage(PdoContext, Command);
             break;
             
         default:
@@ -708,4 +934,55 @@ VnvmeProcessAdminCommands(
         head = (head + 1) % queueSize;
         PdoContext->AdminSq.Head = head;
     }
+}
+//===========================================================================
+// AER 完成辅助函数
+//===========================================================================
+
+/**
+ * @brief 完成一个待处理的 AER 命令
+ * 
+ * 当发生异步事件时调用此函数，它会完成一个存储的 AER 命令。
+ * 
+ * @param PdoContext PDO 上下文
+ * @param EventType 事件类型 (0=Error, 1=SMART, 2=Notice, 6=Vendor)
+ * @param EventInfo 事件信息
+ * @param LogPage 关联的日志页 ID
+ * @return NTSTATUS 状态码
+ */
+NTSTATUS
+VnvmeCompleteAer(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ UINT8 EventType,
+    _In_ UINT8 EventInfo,
+    _In_ UINT8 LogPage
+    )
+{
+    USHORT cid;
+    ULONG dw0;
+    USHORT i;
+    
+    if (PdoContext->AerCount == 0) {
+        TRACE_WARN("VnvmeCompleteAer: No pending AER commands");
+        return STATUS_UNSUCCESSFUL;
+    }
+    
+    // 获取第一个存储的 AER CID
+    cid = PdoContext->AerCids[0];
+    
+    // 移动剩余的 AER CID
+    for (i = 0; i < PdoContext->AerCount - 1; i++) {
+        PdoContext->AerCids[i] = PdoContext->AerCids[i + 1];
+    }
+    PdoContext->AerCount--;
+    
+    // 构造 DW0: 事件类型 (位 2:0), 事件信息 (位 15:8), 日志页 ID (位 23:16)
+    dw0 = ((ULONG)EventType & 0x7) |
+          (((ULONG)EventInfo & 0xFF) << 8) |
+          (((ULONG)LogPage & 0xFF) << 16);
+    
+    TRACE_INFO("VnvmeCompleteAer: CID=%u, Type=%u, Info=%u, LogPage=0x%02X",
+               cid, EventType, EventInfo, LogPage);
+    
+    return PostSuccessCompletion(PdoContext, cid, dw0);
 }

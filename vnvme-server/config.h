@@ -22,6 +22,7 @@ typedef struct _STORAGE_CONFIG {
     UINT32      blockSize;              // 块大小 (默认 512)
     WCHAR       filePath[MAX_PATH];     // 文件后端路径
     BOOL        readOnly;               // 只读模式
+    BOOL        directIO;               // 直接 I/O (FILE_FLAG_NO_BUFFERING)
 } STORAGE_CONFIG, *PSTORAGE_CONFIG;
 
 /**

@@ -3,9 +3,20 @@
  * @brief Doorbell 轮询处理
  * 
  * 实现轮询定时器来检测 Doorbell 写入。
+ * 支持自适应轮询间隔：
+ * - 有工作时：减少间隔到最小值 (更频繁轮询)
+ * - 无工作时：增加间隔到最大值 (节省 CPU)
  */
 
 #include "vnvme.h"
+
+// 自适应轮询参数
+#define VNVME_POLL_INTERVAL_MIN_US      100     // 最小间隔 100us
+#define VNVME_POLL_INTERVAL_MAX_US      10000   // 最大间隔 10ms
+#define VNVME_POLL_INTERVAL_DEFAULT_US  1000    // 默认间隔 1ms
+
+// 用户态心跳超时 (10秒，100ns 单位)
+#define VNVME_HEARTBEAT_TIMEOUT_100NS   (10LL * 10000000LL)
 
 //===========================================================================
 // 轮询定时器管理
@@ -14,8 +25,8 @@
 /**
  * @brief 初始化轮询定时器
  * 
- * 创建周期性定时器用于轮询 Doorbell 和 CC 寄存器变化。
- * 定时器间隔由 VNVME_POLLING_INTERVAL_MS 定义 (默认 1ms)。
+ * 创建定时器用于轮询 Doorbell 和 CC 寄存器变化。
+ * 使用自适应轮询间隔，根据负载动态调整。
  */
 NTSTATUS
 VnvmeInitializePollingTimer(
@@ -28,11 +39,10 @@ VnvmeInitializePollingTimer(
     
     TRACE_INFO("VnvmeInitializePollingTimer: Creating polling timer");
     
-    // 配置周期性定时器
-    WDF_TIMER_CONFIG_INIT_PERIODIC(
+    // 配置非周期性定时器 (手动重新调度以支持自适应间隔)
+    WDF_TIMER_CONFIG_INIT(
         &timerConfig,
-        VnvmeEvtPollingTimer,
-        VNVME_POLLING_INTERVAL_MS
+        VnvmeEvtPollingTimer
         );
     
     timerConfig.AutomaticSerialization = TRUE;
@@ -52,8 +62,11 @@ VnvmeInitializePollingTimer(
         return status;
     }
     
-    TRACE_INFO("VnvmeInitializePollingTimer: Timer created, interval=%d ms",
-               VNVME_POLLING_INTERVAL_MS);
+    // 初始化自适应轮询间隔
+    PdoContext->PollingIntervalUs = VNVME_POLL_INTERVAL_DEFAULT_US;
+    
+    TRACE_INFO("VnvmeInitializePollingTimer: Timer created, initial interval=%lu us",
+               PdoContext->PollingIntervalUs);
     
     return STATUS_SUCCESS;
 }
@@ -67,8 +80,10 @@ VnvmeStartPollingTimer(
     )
 {
     if (PdoContext->PollingTimer != NULL) {
-        TRACE_INFO("VnvmeStartPollingTimer: Starting timer");
-        WdfTimerStart(PdoContext->PollingTimer, WDF_REL_TIMEOUT_IN_MS(VNVME_POLLING_INTERVAL_MS));
+        TRACE_INFO("VnvmeStartPollingTimer: Starting timer with interval %lu us",
+                   PdoContext->PollingIntervalUs);
+        WdfTimerStart(PdoContext->PollingTimer, 
+                      WDF_REL_TIMEOUT_IN_US(PdoContext->PollingIntervalUs));
         PdoContext->PollingActive = TRUE;
     }
 }
@@ -93,6 +108,75 @@ VnvmeStopPollingTimer(
 //===========================================================================
 
 /**
+ * @brief 调整轮询间隔
+ * 
+ * 根据是否有工作动态调整轮询间隔:
+ * - 有工作: 减半间隔 (更频繁轮询)
+ * - 无工作: 加倍间隔 (节省 CPU)
+ */
+static VOID
+AdjustPollingInterval(
+    _In_ PVNVME_PDO_CONTEXT PdoContext,
+    _In_ BOOLEAN HadWork
+    )
+{
+    ULONG newInterval = PdoContext->PollingIntervalUs;
+    
+    if (HadWork) {
+        // 有工作 - 减少间隔 (更快响应)
+        newInterval = newInterval / 2;
+        if (newInterval < VNVME_POLL_INTERVAL_MIN_US) {
+            newInterval = VNVME_POLL_INTERVAL_MIN_US;
+        }
+    } else {
+        // 无工作 - 增加间隔 (节省 CPU)
+        newInterval = newInterval + newInterval / 4;  // 增加 25%
+        if (newInterval > VNVME_POLL_INTERVAL_MAX_US) {
+            newInterval = VNVME_POLL_INTERVAL_MAX_US;
+        }
+    }
+    
+    PdoContext->PollingIntervalUs = newInterval;
+}
+
+/**
+ * @brief 检查用户态服务心跳
+ * 
+ * 如果用户态服务超过 10 秒没有发送心跳，认为其已崩溃。
+ * 在这种情况下，切换到内核态命令处理模式继续运行。
+ */
+static VOID
+CheckUserModeHeartbeat(
+    _In_ PVNVME_FDO_CONTEXT FdoContext
+    )
+{
+    LARGE_INTEGER currentTime;
+    LONGLONG elapsed;
+    
+    if (FdoContext == NULL || !FdoContext->UserReady || FdoContext->UserCrashed) {
+        return;
+    }
+    
+    KeQuerySystemTime(&currentTime);
+    elapsed = currentTime.QuadPart - FdoContext->LastHeartbeat.QuadPart;
+    
+    if (elapsed > VNVME_HEARTBEAT_TIMEOUT_100NS) {
+        TRACE_ERROR("CheckUserModeHeartbeat: User-mode service timeout! "
+                    "Last heartbeat was %lld seconds ago",
+                    elapsed / 10000000LL);
+        
+        // 标记用户态已崩溃
+        FdoContext->UserCrashed = TRUE;
+        FdoContext->UserReady = FALSE;
+        
+        // 切换到内核态命令处理模式
+        FdoContext->CommandMode = VNVME_CMD_MODE_KERNEL;
+        
+        TRACE_WARN("CheckUserModeHeartbeat: Switched to kernel-mode command processing");
+    }
+}
+
+/**
  * @brief 轮询定时器回调
  */
 VOID
@@ -102,12 +186,27 @@ VnvmeEvtPollingTimer(
 {
     WDFDEVICE device;
     PVNVME_PDO_CONTEXT pdoContext;
+    BOOLEAN hadWork;
     
     device = (WDFDEVICE)WdfTimerGetParentObject(Timer);
     pdoContext = VnvmeGetPdoContext(device);
     
-    // 检查 Doorbell 变化
-    VnvmeProcessDoorbells(pdoContext);
+    // 检查用户态服务心跳 (仅在用户态模式下)
+    if (g_FdoContext != NULL && g_FdoContext->CommandMode == VNVME_CMD_MODE_USER) {
+        CheckUserModeHeartbeat(g_FdoContext);
+    }
+    
+    // 检查 Doorbell 变化并获取是否有工作
+    hadWork = VnvmeProcessDoorbells(pdoContext);
+    
+    // 调整轮询间隔
+    AdjustPollingInterval(pdoContext, hadWork);
+    
+    // 重新调度定时器 (非周期性定时器需要手动重新调度)
+    if (pdoContext->PollingActive && pdoContext->PollingEnabled) {
+        WdfTimerStart(pdoContext->PollingTimer,
+                      WDF_REL_TIMEOUT_IN_US(pdoContext->PollingIntervalUs));
+    }
 }
 
 /**
@@ -118,8 +217,10 @@ VnvmeEvtPollingTimer(
  * 根据 CommandMode 选择处理方式:
  * - VNVME_CMD_MODE_KERNEL: 直接在内核中调用 admin_cmd.c/io_cmd.c
  * - VNVME_CMD_MODE_USER:   转发命令到共享内存，由用户态处理
+ * 
+ * @return TRUE 如果处理了任何工作，否则 FALSE
  */
-VOID
+BOOLEAN
 VnvmeProcessDoorbells(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     )
@@ -131,7 +232,7 @@ VnvmeProcessDoorbells(
     VNVME_COMMAND_MODE cmdMode = VNVME_DEFAULT_CMD_MODE;
     
     if (PdoContext->Doorbells == NULL || PdoContext->Registers == NULL) {
-        return;
+        return FALSE;
     }
     
     // 获取命令处理模式
@@ -169,7 +270,7 @@ VnvmeProcessDoorbells(
     
     // 2. 如果控制器未就绪 (CC.EN=0 或 CSTS.RDY=0)，不处理 Doorbell
     if (!(PdoContext->Registers->CC.EN && PdoContext->Registers->CSTS.RDY)) {
-        return;
+        return hadWork;
     }
     
     // 3. 处理 Admin 队列 (Queue ID = 0)
@@ -206,16 +307,17 @@ VnvmeProcessDoorbells(
     for (USHORT qid = 1; qid <= PdoContext->IoQueueCount; qid++) {
         ULONG ioSqTailIdx = qid * 2;      // I/O SQ Tail Doorbell index
         ULONG ioCqHeadIdx = qid * 2 + 1;  // I/O CQ Head Doorbell index
+        USHORT queueIndex = VNVME_QUEUE_ID_TO_INDEX(qid);
         
-        if (!PdoContext->IoSq[qid - 1].Created) {
+        if (!PdoContext->IoSq[queueIndex].Created) {
             continue;
         }
         
         sqTail = PdoContext->Doorbells[ioSqTailIdx] & 0xFFFF;
         
-        if (sqTail != PdoContext->IoSq[qid - 1].Tail) {
+        if (sqTail != PdoContext->IoSq[queueIndex].Tail) {
             TRACE_VERBOSE("VnvmeProcessDoorbells: I/O SQ[%u] tail %lu -> %lu",
-                          qid, PdoContext->IoSq[qid - 1].Tail, sqTail);
+                          qid, PdoContext->IoSq[queueIndex].Tail, sqTail);
             
             // 根据模式选择处理方式
             if (cmdMode == VNVME_CMD_MODE_KERNEL) {
@@ -226,23 +328,17 @@ VnvmeProcessDoorbells(
                 VnvmeForwardIoCommandsToUser(PdoContext, qid, sqTail);
             }
             
-            PdoContext->IoSq[qid - 1].Tail = sqTail;
+            PdoContext->IoSq[queueIndex].Tail = sqTail;
             hadWork = TRUE;
         }
         
         cqHead = PdoContext->Doorbells[ioCqHeadIdx] & 0xFFFF;
-        if (cqHead != PdoContext->IoCq[qid - 1].Head) {
+        if (cqHead != PdoContext->IoCq[queueIndex].Head) {
             TRACE_VERBOSE("VnvmeProcessDoorbells: I/O CQ[%u] head %lu -> %lu",
-                          qid, PdoContext->IoCq[qid - 1].Head, cqHead);
-            PdoContext->IoCq[qid - 1].Head = cqHead;
+                          qid, PdoContext->IoCq[queueIndex].Head, cqHead);
+            PdoContext->IoCq[queueIndex].Head = cqHead;
         }
     }
     
-    UNREFERENCED_PARAMETER(hadWork);
-    // TODO Phase 4: 自适应轮询间隔
-    // if (hadWork) {
-    //     PollingIntervalUs = max(PollingIntervalUs / 2, 10);
-    // } else {
-    //     PollingIntervalUs = min(PollingIntervalUs * 2, 1000);
-    // }
+    return hadWork;
 }

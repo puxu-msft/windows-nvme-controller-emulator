@@ -184,7 +184,7 @@ NTSTATUS VnvmeCreateControlDevice(
 // ============ v2 架构: 用户态服务通信 ============
 
 // 共享内存映射 (用户态服务调用)
-#define IOCTL_VNVME_MAP_SHARED_MEMORY \
+#define IOCTL_VNVME_MAP_SHM \
     CTL_CODE(FILE_DEVICE_VNVME, 0x850, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
 // 通知内核用户态已就绪
@@ -216,16 +216,16 @@ NTSTATUS VnvmeCreateControlDevice(
 
 ```c
 //
-// IOCTL_VNVME_MAP_SHARED_MEMORY 输入
+// IOCTL_VNVME_MAP_SHM 输入
 //
-typedef struct _VNVME_MAP_SHARED_MEMORY_IN {
+typedef struct _VNVME_MAP_SHM_IN {
     ULONG ControllerIndex;          // 控制器索引
-} VNVME_MAP_SHARED_MEMORY_IN, *PVNVME_MAP_SHARED_MEMORY_IN;
+} VNVME_MAP_SHM_IN, *PVNVME_MAP_SHM_IN;
 
 //
-// IOCTL_VNVME_MAP_SHARED_MEMORY 输出
+// IOCTL_VNVME_MAP_SHM 输出
 //
-typedef struct _VNVME_MAP_SHARED_MEMORY_OUT {
+typedef struct _VNVME_MAP_SHM_OUT {
     VNVME_IOCTL_RESULT Result;
     
     PVOID UserAddress;              // 映射到用户空间的地址
@@ -242,7 +242,7 @@ typedef struct _VNVME_MAP_SHARED_MEMORY_OUT {
     ULONG CompletionRingSize;       // 完成环大小
     ULONG DataBufferSize;           // 数据缓冲区大小
     
-} VNVME_MAP_SHARED_MEMORY_OUT, *PVNVME_MAP_SHARED_MEMORY_OUT;
+} VNVME_MAP_SHM_OUT, *PVNVME_MAP_SHM_OUT;
 
 //
 // IOCTL_VNVME_USER_READY 输入

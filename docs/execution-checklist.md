@@ -465,7 +465,7 @@
               status = VnvmeHandleGetStatus(Request, OutputBufferLength, &bytesReturned);
               break;
               
-          case IOCTL_VNVME_MAP_SHARED_MEMORY:
+          case IOCTL_VNVME_MAP_SHM:
               status = VnvmeHandleMapSharedMemory(Request, OutputBufferLength, &bytesReturned);
               break;
               
@@ -887,7 +887,7 @@
 
 ### 3.2 IOCTL 实现 (ioctl_handlers.c)
 
-- [ ] **3.2.1** 实现 MAP_SHARED_MEMORY
+- [ ] **3.2.1** 实现 MAP_SHM
   ```c
   NTSTATUS VnvmeHandleMapSharedMemory(WDFREQUEST Request, ...);
   ```

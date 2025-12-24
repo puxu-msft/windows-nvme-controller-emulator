@@ -2,6 +2,19 @@
 
 本文档定义 Virtual NVMe 项目的开发阶段、里程碑和详细任务列表。
 
+## 📊 当前进度总览 (2024-12-24 更新)
+
+| 阶段 | 描述 | 完成度 | 状态 |
+|------|------|--------|------|
+| Phase 1 | 项目骨架 / FDO 创建 | 95% | ✅ 代码完成，待运行验证 |
+| Phase 2 | PDO / PCIe / BAR0 | 95% | ✅ 代码完成，待运行验证 |
+| Phase 3 | 用户态通信 / 共享内存 | 98% | ✅ 功能完整 |
+| Phase 4 | NVMe 命令处理 | 98% | ✅ Admin + I/O 命令完整 |
+| Phase 5 | 存储后端 | 95% | ✅ 内存/文件后端完整 |
+| Phase 6 | 测试和优化 | 75% | 🔶 调试基础设施完成，测试待进行 |
+
+**总体进度: ~92%** - 代码功能基本完整，需要实际测试验证
+
 ## 任务状态图例
 
 | 标记 | 含义 |
@@ -268,7 +281,7 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 
 #### 3.5 心跳和错误恢复
 - [x] 实现心跳定时器 (每秒发送)
-- [ ] 实现用户态崩溃检测
+- [x] 实现用户态崩溃检测 (CheckUserModeHeartbeat, 10秒超时自动切换内核模式)
 - [x] 实现优雅关闭处理
 
 #### 3.6 优雅关闭 (Graceful Shutdown)
@@ -278,11 +291,11 @@ Get-PnpDeviceProperty -InstanceId "<PDO ID>" -KeyName DEVPKEY_Device_Service
 **内核侧 (vnvme.sys)**:
 - [x] 添加 `ShutdownEvent` 到 FDO 上下文
 - [x] 添加 `ShutdownRequested` 标志
-- [ ] 添加 `ControlQueue` 用于等待 IOCTL 完成
+- [x] 添加 `ControlQueue` 用于等待 IOCTL 完成
 - [x] 在 `VnvmeEvtDeviceD0Exit` 中触发关闭事件
-- [ ] 使用 `WdfIoQueueStop()` 停止接收新请求
+- [x] 使用 `WdfIoQueueStop()` 停止接收新请求
 - [x] 等待所有待处理命令完成 (超时 5 秒)
-- [ ] 清理共享内存和 PDO
+- [~] 清理共享内存和 PDO (现有实现，待完善)
 
 **用户态侧 (vnvme-server)**:
 - [x] 检测 `ShutdownRequested` 标志
@@ -495,7 +508,7 @@ nvme list
 - [x] 实现 `VnvmeStorageFlush()` - 刷新缓冲区 (更新时间戳)
 - [x] 实现 `StorageFileCleanup()` - 关闭文件
 - [x] 支持稀疏文件 (`VNVME_STORAGE_TYPE_SPARSE`, `VnvmeStorageDeallocate()`)
-- [ ] 支持预分配
+- [x] 支持预分配 (`--preallocate` 选项，使用 SetFileValidData)
 
 #### 5.4 命名空间管理
 - [x] VNVME_NAMESPACE 包含 Storage 字段
@@ -664,7 +677,7 @@ Get-Content X:\test.txt
 **6.3.3 事件通知 (2 天)**
 - [x] 实现 `VnvmeCreateUserEventHandle()` 创建用户可等待事件 (通过 IOCTL_VNVME_GET_COMMAND_EVENT)
 - [x] 实现混合通知模式 (低负载事件 + 高负载轮询)
-- [ ] 用户态 `WaitForSingleObject()` 等待实现
+- [x] 用户态 `WaitForSingleObject()` 等待实现 (driver_comm.c, command_engine.c)
 - [x] IOCTL 返回事件句柄给用户态
 - [ ] 测试验证延迟降低
 
@@ -676,8 +689,9 @@ Get-Content X:\test.txt
 
 **6.3.5 后端存储优化 (1 天)**
 - [ ] 实现异步 I/O (I/O Completion Port)
-- [ ] 直接 I/O 支持 (`FILE_FLAG_NO_BUFFERING`)
+- [x] 直接 I/O 支持 (`FILE_FLAG_NO_BUFFERING`, `--direct-io` 选项)
 - [x] 稀疏文件后端 (`VNVME_STORAGE_TYPE_SPARSE`)
+- [x] 文件预分配支持 (`--preallocate` 选项, SetFileValidData)
 - [ ] 测试验证后端 I/O 性能
 
 #### 6.4 文档完善

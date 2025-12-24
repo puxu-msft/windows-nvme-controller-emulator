@@ -20,6 +20,7 @@ typedef struct _FILE_BACKEND_CONTEXT {
     UINT32          BlockSize;
     BOOL            ReadOnly;
     BOOL            DirectIO;           // 直接 I/O 模式
+    BOOL            Preallocate;        // 预分配空间
     HANDLE          FileHandle;     // 文件句柄
     WCHAR           FilePath[MAX_PATH];
     CRITICAL_SECTION Lock;          // 访问锁
@@ -227,6 +228,7 @@ PBACKEND_CONTEXT BackendFileCreate(const BACKEND_CONFIG* pConfig)
     pCtx->BlockSize = pConfig->BlockSize > 0 ? pConfig->BlockSize : 512;
     pCtx->ReadOnly = pConfig->ReadOnly;
     pCtx->DirectIO = pConfig->DirectIO;
+    pCtx->Preallocate = pConfig->Preallocate;
     wcscpy_s(pCtx->FilePath, MAX_PATH, pConfig->FilePath);
     
     // 打开或创建文件
@@ -280,6 +282,22 @@ PBACKEND_CONTEXT BackendFileCreate(const BACKEND_CONFIG* pConfig)
         }
         
         LogInfo("Extended file to %llu bytes", pConfig->Size);
+        
+        // 预分配: 使用 SetFileValidData 立即分配磁盘空间
+        // 这需要 SE_MANAGE_VOLUME_NAME 权限 (通常需要管理员)
+        if (pConfig->Preallocate) {
+            if (SetFileValidData(pCtx->FileHandle, (LONGLONG)pConfig->Size)) {
+                LogInfo("Preallocated file space (SetFileValidData succeeded)");
+            } else {
+                // SetFileValidData 可能因权限不足失败，这不是致命错误
+                DWORD err = GetLastError();
+                if (err == ERROR_PRIVILEGE_NOT_HELD) {
+                    LogWarn("Preallocation requires administrator privileges (SE_MANAGE_VOLUME_NAME)");
+                } else {
+                    LogWarn("SetFileValidData failed: error %u (non-fatal)", err);
+                }
+            }
+        }
     } else if ((UINT64)fileSize.QuadPart > 0) {
         // 使用现有文件大小
         if ((UINT64)fileSize.QuadPart < pConfig->Size) {

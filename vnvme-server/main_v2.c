@@ -191,6 +191,7 @@ int main(int argc, char* argv[])
     backendConfig.BlockSize = g_Config.storage.blockSize;
     backendConfig.ReadOnly = g_Config.storage.readOnly;
     backendConfig.DirectIO = g_Config.storage.directIO;
+    backendConfig.Preallocate = g_Config.storage.preallocate;
     wcscpy_s(backendConfig.FilePath, MAX_PATH, g_Config.storage.filePath);
     
     g_Backend = BackendCreate(&backendConfig);

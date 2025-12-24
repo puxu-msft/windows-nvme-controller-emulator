@@ -23,6 +23,7 @@ typedef struct _STORAGE_CONFIG {
     WCHAR       filePath[MAX_PATH];     // 文件后端路径
     BOOL        readOnly;               // 只读模式
     BOOL        directIO;               // 直接 I/O (FILE_FLAG_NO_BUFFERING)
+    BOOL        preallocate;            // 预分配文件空间
 } STORAGE_CONFIG, *PSTORAGE_CONFIG;
 
 /**

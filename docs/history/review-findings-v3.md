@@ -111,7 +111,7 @@
 | H-2 根设备枚举 | grep "根设备枚举" architecture-v2.md | ✅ 第205行，三种方式完整 |
 | H-3 资源报告 | grep "VnvmePdoQueryResources" pcie-emulation.md | ✅ 第514行实现，第626行调用 |
 | M-2 Set Features | grep "Set Features" nvme-commands.md | ✅ 第831行定义，第859行实现 |
-| L-2 共享内存 IOCTL | grep "IOCTL_VNVME_MAP_SHARED_MEMORY" ioctl-interface.md | ✅ 第185行定义，结构完整 |
+| L-2 共享内存 IOCTL | grep "IOCTL_VNVME_MAP_SHM" ioctl-interface.md | ✅ 第185行定义，结构完整 |
 
 ### 文档一致性检查
 

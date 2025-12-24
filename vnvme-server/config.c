@@ -111,6 +111,7 @@ void ConfigPrintUsage(const char* programName)
     printf("  -b, --backend <type>   Backend type: memory, file\n");
     printf("  -f, --file <path>      Backend file path (for file backend)\n");
     printf("  --direct-io            Enable direct I/O (FILE_FLAG_NO_BUFFERING)\n");
+    printf("  --preallocate          Preallocate file space (avoid fragmentation)\n");
     printf("  -m, --model <name>     Model number string\n");
     printf("  -n, --serial <sn>      Serial number string\n");
     printf("  --log-level <level>    Log level: error, warn, info, debug, verbose\n");
@@ -120,7 +121,7 @@ void ConfigPrintUsage(const char* programName)
     printf("  -v, --version          Show version\n");
     printf("\nExamples:\n");
     printf("  %s --size 100G --backend memory\n", programName);
-    printf("  %s --size 500G --backend file --file C:\\vnvme\\disk.img --direct-io\n", programName);
+    printf("  %s --size 500G --backend file --file C:\\vnvme\\disk.img --direct-io --preallocate\n", programName);
     printf("  %s --config vnvme.conf\n", programName);
 }
 
@@ -200,6 +201,12 @@ BOOL ConfigParseArgs(int argc, char* argv[], PSERVER_CONFIG pConfig)
         // 直接 I/O
         if (strcmp(arg, "--direct-io") == 0) {
             pConfig->storage.directIO = TRUE;
+            continue;
+        }
+        
+        // 预分配
+        if (strcmp(arg, "--preallocate") == 0) {
+            pConfig->storage.preallocate = TRUE;
             continue;
         }
         

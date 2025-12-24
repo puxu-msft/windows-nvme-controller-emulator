@@ -2,6 +2,8 @@
 
 本文档定义 vnvme-server 的高度模块化设计，包含完整的模块依赖图、接口定义和实现计划。
 
+**当前状态**: v2 模块化架构已启用为默认版本 (2024-12-24)
+
 ---
 
 ## 设计原则
@@ -14,7 +16,7 @@
 
 ---
 
-## 目标架构 (v2 - 高度模块化)
+## 目标架构 (v2 - 高度模块化 - 已启用)
 
 ```
 vnvme-server/
@@ -22,7 +24,7 @@ vnvme-server/
 ├── core/                           # 核心基础设施
 │   ├── types.h                     # ✅ 基础类型、错误码、宏
 │   ├── logger.h / logger.c         # ✅ 日志系统
-│   ├── config.h / config.c         # ✅ 配置管理
+│   ├── config.h / config.c         # ✅ 配置管理 (+预分配选项)
 │   └── utils.h / utils.c           # ⬜ 通用工具函数
 │
 ├── driver/                         # 驱动通信层
@@ -31,16 +33,16 @@ vnvme-server/
 │   └── heartbeat.h / heartbeat.c   # ⬜ 心跳管理 (从 driver_comm 分离)
 │
 ├── protocol/                       # NVMe 协议处理
-│   ├── command_engine.h / command_engine.c   # ✅ 命令引擎 (分发+调度) (562+253行)
+│   ├── command_engine.h / command_engine.c   # ✅ 命令引擎 (+事件等待模式)
 │   ├── admin_commands.h / admin_commands.c   # ✅ Admin 命令 (911+301行)
 │   ├── io_commands.h / io_commands.c         # ✅ I/O 命令 (632+255行)
 │   └── nvme_types.h                # ⬜ NVMe 协议类型 (复用 include/nvme_spec.h)
 │
 ├── backend/                        # 存储后端层
-│   ├── backend.h                   # ✅ 后端接口
+│   ├── backend.h                   # ✅ 后端接口 (+预分配支持)
 │   ├── backend_common.c            # ✅ 后端工厂/分发
 │   ├── backend_memory.c            # ✅ 内存后端
-│   ├── backend_file.c              # ✅ 文件后端
+│   ├── backend_file.c              # ✅ 文件后端 (+SetFileValidData)
 │   ├── backend_sparse.c            # ⬜ 稀疏文件后端 (扩展)
 │   └── backend_vhdx.c              # ⬜ VHDX 后端 (扩展)
 │
@@ -52,8 +54,8 @@ vnvme-server/
 │   ├── controller.h / controller.c # ⬜ 控制器状态机
 │   └── features.h / features.c     # ⬜ Feature 管理
 │
-├── main.c                          # ✅ 程序入口 (655行)
-├── main_v2.c                       # ✅ 模块化入口 (233行, 待启用)
+├── main.c                          # ✅ 程序入口 (655行, v1 备用)
+├── main_v2.c                       # ✅ 模块化入口 (233行, 默认启用)
 ├── vnvme_server.h                  # ✅ 公共头文件
 │
 └── tests/                          # 单元测试

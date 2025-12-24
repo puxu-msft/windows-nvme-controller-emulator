@@ -312,6 +312,19 @@ $$ 用户态就绪
 bp vnvme!VnvmeHandleUserReady
 ```
 
+### 用户态崩溃检测
+
+```
+$$ 心跳检查 (10秒超时)
+bp vnvme!CheckUserModeHeartbeat
+
+$$ 查看崩溃状态
+dt vnvme!VNVME_FDO_CONTEXT UserCrashed
+
+$$ 查看控制块时间戳
+dt vnvme!VNVME_SHM_CONTROL_BLOCK LastUserHeartbeat
+```
+
 ### 条件断点示例
 
 ```
@@ -334,6 +347,40 @@ bp vnvme!VnvmePostCompletion "j (dwo(@rcx+0xc)!=0) '';'gc'"
    - 命令参数：`--debug --backend memory --size 64M`
    - 以管理员身份运行
 4. F5 启动调试
+
+### 模块化架构调试 (v2)
+
+vnvme-server v2 使用模块化架构，各模块可独立调试：
+
+```
+$$ 后端初始化
+bp vnvme_server!BackendFileCreate
+bp vnvme_server!BackendMemoryCreate
+
+$$ 命令引擎
+bp vnvme_server!CmdEngineCreate
+bp vnvme_server!CmdEngineRun
+
+$$ 事件等待模式
+bp vnvme_server!CmdEngineSetCommandEvent
+
+$$ 服务启动
+bp vnvme_server!ServerStart
+bp vnvme_server!ServerRun
+```
+
+### 性能模式调试
+
+```powershell
+# 轮询模式 (高性能，高 CPU)
+vnvme-server.exe --poll-interval 0
+
+# 事件等待模式 (低 CPU，需驱动支持)
+vnvme-server.exe --poll-interval 0 --use-events
+
+# 混合模式 (平衡)
+vnvme-server.exe --poll-interval 100
+```
 
 ### 使用 WinDbg
 
@@ -403,6 +450,25 @@ vnvme-server.exe --log-file C:\vnvme\server.log
 1. 使用 `vnvmectl stats` 查看统计信息
 2. 检查 CPU 使用率（轮询间隔可能太短）
 3. 使用 `xperf` 或 `WPR` 收集性能跟踪
+4. 检查是否使用了事件等待模式
+
+**优化建议**:
+- 使用 `--poll-interval 100` 减少 CPU 使用
+- 启用文件预分配 `--preallocate` 提升写入性能
+- 使用内存后端进行性能测试
+
+### 用户态服务崩溃
+
+**症状**: vnvme-server 意外退出
+
+**驱动行为**:
+- 驱动会在 10 秒内检测到用户态崩溃
+- 自动切换到内核态处理（返回错误）
+- `UserCrashed` 标志置为 TRUE
+
+**恢复步骤**:
+1. 重新启动 vnvme-server
+2. 驱动自动检测并恢复用户态处理
 
 ### 内存泄漏
 

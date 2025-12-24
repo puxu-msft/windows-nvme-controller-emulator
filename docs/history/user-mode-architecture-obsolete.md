@@ -305,7 +305,7 @@ NTSTATUS VnvmeShimHandleMmioRead(
     _In_ ULONG Offset,
     _Out_ PULONG64 Value)
 {
-    PVNVME_SHARED_MEMORY shared = Context->SharedMemory;
+    PVNVME_SHM shared = Context->SharedMemory;
     VNVME_KERNEL_REQUEST request;
     VNVME_USER_RESPONSE response;
     

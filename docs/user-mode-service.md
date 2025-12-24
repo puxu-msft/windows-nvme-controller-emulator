@@ -67,10 +67,12 @@ vnvme-server.exe --config vnvme.conf   # 必须运行！
 > - `command_processor.c` - NVMe 命令处理器 (985行)
 > - `backend.c` - 存储后端 (431行)
 >
-> **v2 模块化版本** (22 文件, ~7,900 行): ✅ **已完成**
+> **v2 模块化版本** (22 文件, ~7,900 行): ✅ **已启用为默认**
 > - 完整模块分离: config, logger, driver_comm, backend_*, command_engine
-> - Admin/IO 命令已分离: admin_commands.c (911行), io_commands.c (632行)
-> - 新增命令引擎: command_engine.c (562行)
+> - Admin/IO 命令已分离: admin_commands.c (911行), io_commands.c (633行)
+> - 新增命令引擎: command_engine.c (580行)
+> - 支持事件等待模式: WaitForSingleObject 低 CPU 占用
+> - 支持文件预分配: --preallocate 选项
 
 ## 项目结构
 
@@ -110,8 +112,8 @@ vnvme-server/
 │   └── backend_file.c      # ✅ 文件后端 (314行)
 │
 ├── 入口
-│   ├── main.c              # v1 入口 (655行, 当前使用)
-│   └── main_v2.c           # ✅ 模块化入口 (233行, 待启用)
+│   ├── main.c              # v1 入口 (655行, 已废弃)
+│   └── main_v2.c           # ✅ 模块化入口 (257行, 默认启用)
 │
 ├── 兼容层 (v1)
 │   ├── command_processor.c # v1 命令处理 (985行)

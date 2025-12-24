@@ -67,6 +67,7 @@ typedef struct _CMD_ENGINE_STATS {
     UINT64                  bytesWritten;
     UINT64                  errors;
     UINT64                  pollCount;
+    UINT64                  eventWakeups;       // 事件唤醒次数
     UINT64                  lastPollTimestamp;
 } CMD_ENGINE_STATS, *PCMD_ENGINE_STATS;
 
@@ -106,6 +107,10 @@ typedef struct _CMD_ENGINE_CONTEXT {
     // 配置
     UINT32                  maxIoQueues;
     BOOL                    debugMode;
+    
+    // 事件等待 (用于替代轮询)
+    HANDLE                  commandEvent;   // 命令就绪事件 (可选)
+    BOOL                    useEventWait;   // 是否使用事件等待模式
     
     // 统计
     CMD_ENGINE_STATS        stats;
@@ -198,6 +203,16 @@ void CmdEngineGetStats(PCMD_ENGINE_CONTEXT pCtx, PCMD_ENGINE_STATS pStats);
  * 重置统计信息
  */
 void CmdEngineResetStats(PCMD_ENGINE_CONTEXT pCtx);
+
+/**
+ * 设置命令就绪事件
+ * 
+ * 设置后，CmdEngineRun 将使用 WaitForSingleObject 替代轮询
+ * 
+ * @param pCtx          命令引擎上下文
+ * @param hEvent        命令就绪事件句柄
+ */
+void CmdEngineSetCommandEvent(PCMD_ENGINE_CONTEXT pCtx, HANDLE hEvent);
 
 /**
  * 获取 Admin 命令处理器上下文

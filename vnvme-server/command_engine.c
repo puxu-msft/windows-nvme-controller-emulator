@@ -488,6 +488,10 @@ UINT64 CmdEnginePoll(PCMD_ENGINE_CONTEXT pCtx)
 
 /**
  * 运行命令处理循环
+ * 
+ * 支持两种模式:
+ * 1. 轮询模式 (默认): 持续轮询 + 短暂 Sleep
+ * 2. 事件等待模式: 使用 WaitForSingleObject 等待命令就绪事件
  */
 BOOL CmdEngineRun(PCMD_ENGINE_CONTEXT pCtx, volatile BOOL* pRunning)
 {
@@ -501,8 +505,18 @@ BOOL CmdEngineRun(PCMD_ENGINE_CONTEXT pCtx, volatile BOOL* pRunning)
         UINT64 processed = CmdEnginePoll(pCtx);
         
         if (processed == 0) {
-            // 没有命令处理，短暂休眠
-            Sleep(1);
+            // 没有命令处理
+            if (pCtx->useEventWait && pCtx->commandEvent != NULL) {
+                // 事件等待模式: 等待内核信号或超时
+                DWORD waitResult = WaitForSingleObject(pCtx->commandEvent, 10);
+                if (waitResult == WAIT_OBJECT_0) {
+                    // 事件被触发，继续处理
+                    pCtx->stats.eventWakeups++;
+                }
+            } else {
+                // 轮询模式: 短暂休眠
+                Sleep(1);
+            }
         }
     }
     
@@ -535,6 +549,21 @@ void CmdEngineResetStats(PCMD_ENGINE_CONTEXT pCtx)
     if (pCtx != NULL) {
         memset(&pCtx->stats, 0, sizeof(CMD_ENGINE_STATS));
         IoCmdResetStats(&pCtx->ioCtx);
+    }
+}
+
+/**
+ * 设置命令就绪事件
+ */
+void CmdEngineSetCommandEvent(PCMD_ENGINE_CONTEXT pCtx, HANDLE hEvent)
+{
+    if (pCtx != NULL) {
+        pCtx->commandEvent = hEvent;
+        pCtx->useEventWait = (hEvent != NULL);
+        
+        if (pCtx->useEventWait) {
+            printf("Command engine: Event wait mode enabled\n");
+        }
     }
 }
 

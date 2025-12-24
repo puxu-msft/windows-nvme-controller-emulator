@@ -19,6 +19,7 @@ typedef struct _BACKEND_CONFIG {
     BOOL            ReadOnly;           // 只读模式
     UINT32          BlockSize;          // 块大小 (默认 512)
     BOOL            DirectIO;           // 直接 I/O (FILE_FLAG_NO_BUFFERING)
+    BOOL            Preallocate;        // 预分配文件空间 (避免碎片)
 } BACKEND_CONFIG, *PBACKEND_CONFIG;
 
 //===========================================================================

@@ -11,6 +11,9 @@ param(
     [ValidateScript({ $_ -ge 0 })]
     [uint32]$Flags = 0xFFFFFFFF,  # 默认所有模块
     
+    [ValidateRange(1000, 60000)]
+    [int]$HeartbeatTimeoutMs = 0,  # 心跳超时 (毫秒)，0 表示不修改
+    
     [switch]$Reset,
     [switch]$Show
 )
@@ -54,9 +57,11 @@ function Show-CurrentSettings {
         
         $level = if ($props.DebugLevel) { $props.DebugLevel } else { 3 }
         $flags = if ($props.DebugFlags) { $props.DebugFlags } else { 0xFFFFFFFF }
+        $heartbeat = if ($props.HeartbeatTimeoutMs) { $props.HeartbeatTimeoutMs } else { 10000 }
         
         Write-Host "DebugLevel: $level ($($LevelNames[$level]))" -ForegroundColor Yellow
         Write-Host "DebugFlags: 0x$($flags.ToString('X8'))" -ForegroundColor Yellow
+        Write-Host "HeartbeatTimeoutMs: $heartbeat ms ($([math]::Round($heartbeat/1000, 1)) seconds)" -ForegroundColor Yellow
         
         Write-Host "`nEnabled Modules:" -ForegroundColor Green
         foreach ($flag in $FlagNames.Keys | Sort-Object) {
@@ -70,6 +75,7 @@ function Show-CurrentSettings {
         Write-Host "Registry path not found. Using defaults." -ForegroundColor Yellow
         Write-Host "DebugLevel: 3 (INFO)" -ForegroundColor Yellow
         Write-Host "DebugFlags: 0xFFFFFFFF (ALL)" -ForegroundColor Yellow
+        Write-Host "HeartbeatTimeoutMs: 10000 ms (10 seconds)" -ForegroundColor Yellow
     }
     
     Write-Host "================================`n" -ForegroundColor Cyan
@@ -79,6 +85,7 @@ function Reset-Settings {
     if (Test-Path $RegistryPath) {
         Remove-ItemProperty -Path $RegistryPath -Name "DebugLevel" -ErrorAction SilentlyContinue
         Remove-ItemProperty -Path $RegistryPath -Name "DebugFlags" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path $RegistryPath -Name "HeartbeatTimeoutMs" -ErrorAction SilentlyContinue
         Write-Host "Debug settings reset to defaults." -ForegroundColor Green
     } else {
         Write-Host "Nothing to reset." -ForegroundColor Yellow
@@ -86,7 +93,7 @@ function Reset-Settings {
 }
 
 function Set-DebugSettings {
-    param($Level, $Flags)
+    param($Level, $Flags, $HeartbeatTimeoutMs)
     
     # 确保注册表路径存在
     if (-not (Test-Path $RegistryPath)) {
@@ -102,6 +109,12 @@ function Set-DebugSettings {
     Set-ItemProperty -Path $RegistryPath -Name "DebugFlags" -Value $Flags -Type DWord
     Write-Host "Set DebugFlags = 0x$($Flags.ToString('X8'))" -ForegroundColor Green
     
+    # 设置心跳超时 (仅当指定时)
+    if ($HeartbeatTimeoutMs -gt 0) {
+        Set-ItemProperty -Path $RegistryPath -Name "HeartbeatTimeoutMs" -Value $HeartbeatTimeoutMs -Type DWord
+        Write-Host "Set HeartbeatTimeoutMs = $HeartbeatTimeoutMs ms ($([math]::Round($HeartbeatTimeoutMs/1000, 1)) seconds)" -ForegroundColor Green
+    }
+    
     Write-Host "`nNote: Restart the driver for changes to take effect." -ForegroundColor Yellow
 }
 
@@ -112,6 +125,6 @@ if ($Show) {
     Reset-Settings
     Show-CurrentSettings
 } else {
-    Set-DebugSettings -Level $Level -Flags $Flags
+    Set-DebugSettings -Level $Level -Flags $Flags -HeartbeatTimeoutMs $HeartbeatTimeoutMs
     Show-CurrentSettings
 }

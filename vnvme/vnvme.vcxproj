@@ -124,8 +124,13 @@
     <ClCompile Include="admin_cmd.c" />
     <ClCompile Include="io_cmd.c" />
     <ClCompile Include="storage.c" />
+    <ClCompile Include="storage_memory.c" />
+    <ClCompile Include="storage_file.c" />
     <ClCompile Include="user_forward.c" />
     <ClCompile Include="utils.c" />
+    <ClCompile Include="config.c">
+      <WppEnabled>false</WppEnabled>
+    </ClCompile>
     <ClCompile Include="debug.c">
       <WppEnabled>false</WppEnabled>
     </ClCompile>
@@ -133,8 +138,10 @@
   
   <ItemGroup>
     <ClInclude Include="vnvme.h" />
+    <ClInclude Include="config.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="debug.h" />
+    <ClInclude Include="storage_priv.h" />
   </ItemGroup>
   
   <ItemGroup>

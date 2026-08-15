@@ -268,3 +268,72 @@ VnvmeUnmapShmFromUser(
         FdoContext->ShmUserVirtAddr = NULL;
     }
 }
+
+//===========================================================================
+// 共享内存访问辅助函数
+//===========================================================================
+
+/**
+ * @brief 获取共享内存控制块指针 (内核模式)
+ * 
+ * 这是一个公共函数，供多个模块使用。
+ * 内部使用线程安全的方式获取 FDO 上下文。
+ * 
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ * @return 控制块指针，失败返回 NULL
+ */
+PVNVME_SHM_CONTROL_BLOCK
+VnvmeShmGetControlBlock(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
+    )
+{
+    if (FdoContext == NULL) {
+        FdoContext = VnvmeGetFdoContextSafe();
+    }
+    
+    if (FdoContext == NULL || FdoContext->ShmKernelVirtAddr == NULL) {
+        return NULL;
+    }
+    
+    return (PVNVME_SHM_CONTROL_BLOCK)FdoContext->ShmKernelVirtAddr;
+}
+
+/**
+ * @brief 获取通知环指针 (内核模式)
+ * 
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ * @return 通知环指针，失败返回 NULL
+ */
+PVNVME_NOTIFY_RING
+VnvmeShmGetNotifyRing(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
+    )
+{
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(FdoContext);
+    
+    if (shm == NULL || shm->NotifyRingOffset == 0) {
+        return NULL;
+    }
+    
+    return (PVNVME_NOTIFY_RING)((PUCHAR)shm + shm->NotifyRingOffset);
+}
+
+/**
+ * @brief 获取 I/O 队列描述符数组 (内核模式)
+ * 
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ * @return 描述符数组指针，失败返回 NULL
+ */
+PVNVME_QUEUE_DESCRIPTOR
+VnvmeShmGetIoQueueDescriptors(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
+    )
+{
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(FdoContext);
+    
+    if (shm == NULL || shm->IoQueueDescriptorOffset == 0) {
+        return NULL;
+    }
+    
+    return (PVNVME_QUEUE_DESCRIPTOR)((PUCHAR)shm + shm->IoQueueDescriptorOffset);
+}

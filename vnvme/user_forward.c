@@ -17,31 +17,6 @@
 //===========================================================================
 
 /**
- * @brief 获取共享内存控制块
- */
-static PVNVME_SHM_CONTROL_BLOCK
-GetShmControlBlock(void)
-{
-    if (g_FdoContext == NULL || g_FdoContext->ShmKernelVirtAddr == NULL) {
-        return NULL;
-    }
-    return (PVNVME_SHM_CONTROL_BLOCK)g_FdoContext->ShmKernelVirtAddr;
-}
-
-/**
- * @brief 获取通知环
- */
-static PVNVME_NOTIFY_RING
-GetNotifyRing(void)
-{
-    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
-    if (shm == NULL || shm->NotifyRingOffset == 0) {
-        return NULL;
-    }
-    return (PVNVME_NOTIFY_RING)((PUCHAR)shm + shm->NotifyRingOffset);
-}
-
-/**
  * @brief 向通知环添加条目
  * 
  * @param QueueId 队列 ID (0 = Admin)
@@ -56,7 +31,7 @@ NotifyRingPush(
     _In_ ULONG Index
     )
 {
-    PVNVME_NOTIFY_RING ring = GetNotifyRing();
+    PVNVME_NOTIFY_RING ring = VnvmeShmGetNotifyRing(NULL);
     ULONG tail;
     ULONG nextTail;
     
@@ -78,8 +53,11 @@ NotifyRingPush(
     ring->Entries[tail].Type = Type;
     ring->Entries[tail].Index = Index;
     
-    // 内存屏障，确保数据写入后再更新 Tail
-    KeMemoryBarrier();
+    // P2 优化: 使用写屏障代替完整内存屏障
+    // 对于单生产者-单消费者场景，只需确保数据写入在 Tail 更新之前完成
+    // KeMemoryBarrierWithoutFence() 提供编译器屏障 + 处理器写排序保证
+    // 这比 KeMemoryBarrier() 更轻量 (避免 mfence 指令)
+    KeMemoryBarrierWithoutFence();
     
     ring->Tail = nextTail;
     
@@ -133,7 +111,7 @@ VnvmeForwardAdminCommandsToUser(
     _In_ ULONG NewTail
     )
 {
-    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(NULL);
     
     UNREFERENCED_PARAMETER(PdoContext);
     
@@ -177,7 +155,7 @@ VnvmeForwardIoCommandsToUser(
     _In_ ULONG NewTail
     )
 {
-    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(NULL);
     PVNVME_QUEUE_DESCRIPTOR ioSqDescriptors;
     USHORT queueIndex;
     
@@ -237,7 +215,7 @@ VnvmeProcessUserCompletions(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     )
 {
-    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(NULL);
     PVNVME_QUEUE_DESCRIPTOR ioDescs;
     ULONG adminCqTail;
     USHORT i;
@@ -315,4 +293,171 @@ VnvmeProcessUserCompletions(
     }
     
     return STATUS_SUCCESS;
+}
+
+//===========================================================================
+// 用户态崩溃恢复
+//===========================================================================
+
+/**
+ * @brief 构造内部错误状态
+ */
+static UINT16
+MakeAbortStatus(UINT8 phase)
+{
+    // SCT=0 (Generic), SC=0x06 (Internal Error), Phase
+    return (UINT16)(phase | (0x06 << 1) | (0x00 << 9));
+}
+
+/**
+ * @brief 中止所有待处理的用户态命令
+ * 
+ * 当用户态服务崩溃时调用。遍历所有队列，为 Head 到 Tail 之间
+ * 的所有命令生成内部错误完成项。
+ * 
+ * @param PdoContext PDO 上下文
+ * @return 被中止的命令数量
+ */
+ULONG
+VnvmeAbortPendingUserCommands(
+    _In_ PVNVME_PDO_CONTEXT PdoContext
+    )
+{
+    PVNVME_SHM_CONTROL_BLOCK shm = VnvmeShmGetControlBlock(NULL);
+    PNVME_COMMAND adminSq;
+    PNVME_COMPLETION adminCq;
+    PVNVME_QUEUE_DESCRIPTOR ioDescs;
+    ULONG abortedCount = 0;
+    ULONG head, tail, capacity;
+    ULONG cqTail;
+    UINT8 phase;
+    USHORT i;
+    
+    if (shm == NULL || PdoContext == NULL) {
+        return 0;
+    }
+    
+    TRACE_WARN("VnvmeAbortPendingUserCommands: Aborting pending commands due to user-mode crash");
+    
+    //==========================================================================
+    // 中止 Admin 队列待处理命令
+    //==========================================================================
+    head = shm->AdminSQ.Head;
+    tail = shm->AdminSQ.Tail;
+    capacity = shm->AdminSQ.Capacity;
+    
+    if (head != tail && capacity > 0) {
+        adminSq = (PNVME_COMMAND)((PUCHAR)shm + shm->AdminSQ.Offset);
+        adminCq = (PNVME_COMPLETION)((PUCHAR)shm + shm->AdminCQ.Offset);
+        cqTail = shm->AdminCQ.Tail;
+        phase = (UINT8)shm->AdminCQ.Phase;
+        
+        while (head != tail) {
+            PNVME_COMMAND cmd = &adminSq[head];
+            PNVME_COMPLETION cqe = &adminCq[cqTail];
+            
+            // 填充错误完成项
+            cqe->DW0 = 0;
+            cqe->DW1 = 0;
+            cqe->SQHD = (UINT16)head;
+            cqe->SQID = 0;  // Admin Queue
+            cqe->CID = cmd->CID;
+            cqe->Status = MakeAbortStatus(phase);
+            
+            TRACE_INFO("VnvmeAbortPendingUserCommands: Aborted Admin cmd CID=%u, Opcode=0x%02X",
+                       cmd->CID, cmd->OPC);
+            
+            // 更新 CQ tail 和 phase
+            cqTail = (cqTail + 1) % capacity;
+            if (cqTail == 0) {
+                phase = !phase;
+            }
+            
+            // 更新 SQ head
+            head = (head + 1) % capacity;
+            abortedCount++;
+        }
+        
+        // 更新共享内存中的队列状态
+        shm->AdminSQ.Head = head;
+        shm->AdminCQ.Tail = cqTail;
+        shm->AdminCQ.Phase = phase;
+        
+        // 同步到 PDO 上下文
+        PdoContext->AdminCq.Tail = cqTail;
+        PdoContext->AdminCqPhase = phase;
+    }
+    
+    //==========================================================================
+    // 中止 I/O 队列待处理命令
+    //==========================================================================
+    if (shm->IoQueueDescriptorOffset != 0) {
+        ioDescs = (PVNVME_QUEUE_DESCRIPTOR)((PUCHAR)shm + shm->IoQueueDescriptorOffset);
+        
+        for (i = 0; i < PdoContext->IoQueueCount; i++) {
+            PVNVME_QUEUE_DESCRIPTOR sqDesc = &ioDescs[i * 2];
+            PVNVME_QUEUE_DESCRIPTOR cqDesc = &ioDescs[i * 2 + 1];
+            PNVME_COMMAND ioSq;
+            PNVME_COMPLETION ioCq;
+            
+            if (!PdoContext->IoSq[i].Created || !sqDesc->Valid) {
+                continue;
+            }
+            
+            head = sqDesc->Head;
+            tail = sqDesc->Tail;
+            capacity = sqDesc->Capacity;
+            
+            if (head == tail || capacity == 0) {
+                continue;
+            }
+            
+            ioSq = (PNVME_COMMAND)((PUCHAR)shm + sqDesc->Offset);
+            ioCq = (PNVME_COMPLETION)((PUCHAR)shm + cqDesc->Offset);
+            cqTail = cqDesc->Tail;
+            phase = (UINT8)cqDesc->Phase;
+            
+            while (head != tail) {
+                PNVME_COMMAND cmd = &ioSq[head];
+                PNVME_COMPLETION cqe = &ioCq[cqTail % cqDesc->Capacity];
+                
+                // 填充错误完成项
+                cqe->DW0 = 0;
+                cqe->DW1 = 0;
+                cqe->SQHD = (UINT16)head;
+                cqe->SQID = i + 1;  // I/O Queue ID (1-based)
+                cqe->CID = cmd->CID;
+                cqe->Status = MakeAbortStatus(phase);
+                
+                TRACE_VERBOSE("VnvmeAbortPendingUserCommands: Aborted I/O cmd QID=%u, CID=%u",
+                              i + 1, cmd->CID);
+                
+                // 更新 CQ tail 和 phase
+                cqTail = (cqTail + 1) % cqDesc->Capacity;
+                if (cqTail == 0) {
+                    phase = !phase;
+                }
+                
+                // 更新 SQ head
+                head = (head + 1) % capacity;
+                abortedCount++;
+            }
+            
+            // 更新共享内存中的队列状态
+            sqDesc->Head = head;
+            cqDesc->Tail = cqTail;
+            cqDesc->Phase = phase;
+            
+            // 同步到 PDO 上下文
+            PdoContext->IoCq[i].Tail = cqTail;
+            PdoContext->IoCq[i].PhaseTag = phase ? TRUE : FALSE;
+        }
+    }
+    
+    if (abortedCount > 0) {
+        TRACE_WARN("VnvmeAbortPendingUserCommands: Aborted %lu pending commands", abortedCount);
+        InterlockedAdd64(&g_FdoContext->ErrorCount, abortedCount);
+    }
+    
+    return abortedCount;
 }

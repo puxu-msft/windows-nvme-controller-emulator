@@ -8,35 +8,6 @@
 #include "vnvme.h"
 
 //===========================================================================
-// 前向声明
-//===========================================================================
-
-extern PVNVME_FDO_CONTEXT g_FdoContext;
-
-/**
- * @brief 获取共享内存控制块
- */
-static PVNVME_SHM_CONTROL_BLOCK GetShmControlBlock(void)
-{
-    if (g_FdoContext && g_FdoContext->ShmKernelVirtAddr) {
-        return (PVNVME_SHM_CONTROL_BLOCK)g_FdoContext->ShmKernelVirtAddr;
-    }
-    return NULL;
-}
-
-/**
- * @brief 获取 I/O 队列描述符数组
- */
-static PVNVME_QUEUE_DESCRIPTOR GetIoQueueDescriptors(void)
-{
-    PVNVME_SHM_CONTROL_BLOCK shm = GetShmControlBlock();
-    if (shm == NULL || shm->IoQueueDescriptorOffset == 0) {
-        return NULL;
-    }
-    return (PVNVME_QUEUE_DESCRIPTOR)((PUCHAR)shm + shm->IoQueueDescriptorOffset);
-}
-
-//===========================================================================
 // Admin 队列管理
 //===========================================================================
 
@@ -113,17 +84,19 @@ VnvmeCreateIoSubmissionQueue(
     TRACE_INFO("VnvmeCreateIoSubmissionQueue: QID=%u, Size=%u, CQ=%u, PRP=0x%016llX",
                QueueId, QueueSize, CqId, PrpAddress);
     
-    // 验证 QueueId 范围
-    if (QueueId == 0 || QueueId > VNVME_MAX_IO_QUEUES) {
-        TRACE_ERROR("VnvmeCreateIoSubmissionQueue: Invalid QID %u", QueueId);
+    // 验证 QueueId 范围 (使用运行时配置限制)
+    if (QueueId == 0 || QueueId > CONFIG_MAX_IO_QUEUES) {
+        TRACE_ERROR("VnvmeCreateIoSubmissionQueue: Invalid QID %u (max=%u)", 
+                    QueueId, CONFIG_MAX_IO_QUEUES);
         return STATUS_INVALID_PARAMETER;
     }
     
     queueIndex = QueueId - 1;
     
     // 验证对应的 CQ 是否存在
-    if (CqId == 0 || CqId > VNVME_MAX_IO_QUEUES) {
-        TRACE_ERROR("VnvmeCreateIoSubmissionQueue: Invalid CQ ID %u", CqId);
+    if (CqId == 0 || CqId > CONFIG_MAX_IO_QUEUES) {
+        TRACE_ERROR("VnvmeCreateIoSubmissionQueue: Invalid CQ ID %u (max=%u)", 
+                    CqId, CONFIG_MAX_IO_QUEUES);
         return STATUS_INVALID_PARAMETER;
     }
     
@@ -139,8 +112,8 @@ VnvmeCreateIoSubmissionQueue(
     }
     
     // 获取共享内存和队列描述符
-    shm = GetShmControlBlock();
-    ioDescs = GetIoQueueDescriptors();
+    shm = VnvmeShmGetControlBlock(NULL);
+    ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
     
     if (shm == NULL || ioDescs == NULL) {
         TRACE_ERROR("VnvmeCreateIoSubmissionQueue: Shared memory not available");
@@ -206,9 +179,10 @@ VnvmeCreateIoCompletionQueue(
     TRACE_INFO("VnvmeCreateIoCompletionQueue: QID=%u, Size=%u, IRQ=%u, PRP=0x%016llX",
                QueueId, QueueSize, IrqVector, PrpAddress);
     
-    // 验证 QueueId 范围
-    if (QueueId == 0 || QueueId > VNVME_MAX_IO_QUEUES) {
-        TRACE_ERROR("VnvmeCreateIoCompletionQueue: Invalid QID %u", QueueId);
+    // 验证 QueueId 范围 (使用运行时配置限制)
+    if (QueueId == 0 || QueueId > CONFIG_MAX_IO_QUEUES) {
+        TRACE_ERROR("VnvmeCreateIoCompletionQueue: Invalid QID %u (max=%u)", 
+                    QueueId, CONFIG_MAX_IO_QUEUES);
         return STATUS_INVALID_PARAMETER;
     }
     
@@ -221,8 +195,8 @@ VnvmeCreateIoCompletionQueue(
     }
     
     // 获取共享内存和队列描述符
-    shm = GetShmControlBlock();
-    ioDescs = GetIoQueueDescriptors();
+    shm = VnvmeShmGetControlBlock(NULL);
+    ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
     
     if (shm == NULL || ioDescs == NULL) {
         TRACE_ERROR("VnvmeCreateIoCompletionQueue: Shared memory not available");
@@ -279,9 +253,10 @@ VnvmeDeleteIoSubmissionQueue(
     
     TRACE_INFO("VnvmeDeleteIoSubmissionQueue: QID=%u", QueueId);
     
-    // 验证 QueueId 范围
-    if (QueueId == 0 || QueueId > VNVME_MAX_IO_QUEUES) {
-        TRACE_ERROR("VnvmeDeleteIoSubmissionQueue: Invalid QID %u", QueueId);
+    // 验证 QueueId 范围 (使用运行时配置限制)
+    if (QueueId == 0 || QueueId > CONFIG_MAX_IO_QUEUES) {
+        TRACE_ERROR("VnvmeDeleteIoSubmissionQueue: Invalid QID %u (max=%u)", 
+                    QueueId, CONFIG_MAX_IO_QUEUES);
         return STATUS_INVALID_PARAMETER;
     }
     
@@ -297,7 +272,7 @@ VnvmeDeleteIoSubmissionQueue(
     RtlZeroMemory(&PdoContext->IoSq[queueIndex], sizeof(VNVME_QUEUE_STATE));
     
     // 更新共享内存中的队列描述符
-    ioDescs = GetIoQueueDescriptors();
+    ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
     if (ioDescs != NULL) {
         sqDesc = &ioDescs[queueIndex * 2];
         sqDesc->Valid = 0;
@@ -330,9 +305,10 @@ VnvmeDeleteIoCompletionQueue(
     
     TRACE_INFO("VnvmeDeleteIoCompletionQueue: QID=%u", QueueId);
     
-    // 验证 QueueId 范围
-    if (QueueId == 0 || QueueId > VNVME_MAX_IO_QUEUES) {
-        TRACE_ERROR("VnvmeDeleteIoCompletionQueue: Invalid QID %u", QueueId);
+    // 验证 QueueId 范围 (使用运行时配置限制)
+    if (QueueId == 0 || QueueId > CONFIG_MAX_IO_QUEUES) {
+        TRACE_ERROR("VnvmeDeleteIoCompletionQueue: Invalid QID %u (max=%u)", 
+                    QueueId, CONFIG_MAX_IO_QUEUES);
         return STATUS_INVALID_PARAMETER;
     }
     
@@ -361,7 +337,7 @@ VnvmeDeleteIoCompletionQueue(
     RtlZeroMemory(&PdoContext->IoCq[queueIndex], sizeof(VNVME_QUEUE_STATE));
     
     // 更新共享内存中的队列描述符
-    ioDescs = GetIoQueueDescriptors();
+    ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
     if (ioDescs != NULL) {
         cqDesc = &ioDescs[queueIndex * 2 + 1];
         cqDesc->Valid = 0;
@@ -403,7 +379,7 @@ VnvmeFetchCommand(
     
     RtlZeroMemory(Command, sizeof(NVME_COMMAND));
     
-    shm = GetShmControlBlock();
+    shm = VnvmeShmGetControlBlock(NULL);
     if (shm == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -417,11 +393,11 @@ VnvmeFetchCommand(
         PVNVME_QUEUE_DESCRIPTOR ioDescs;
         ULONG queueIndex = QueueId - 1;
         
-        if (QueueId > VNVME_MAX_IO_QUEUES || !PdoContext->IoSq[queueIndex].Created) {
+        if (QueueId > CONFIG_MAX_IO_QUEUES || !PdoContext->IoSq[queueIndex].Created) {
             return STATUS_INVALID_PARAMETER;
         }
         
-        ioDescs = GetIoQueueDescriptors();
+        ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
         if (ioDescs == NULL) {
             return STATUS_DEVICE_NOT_READY;
         }
@@ -486,7 +462,7 @@ VnvmePostCompletion(
         return STATUS_INVALID_PARAMETER;
     }
     
-    shm = GetShmControlBlock();
+    shm = VnvmeShmGetControlBlock(NULL);
     if (shm == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -501,11 +477,11 @@ VnvmePostCompletion(
         PVNVME_QUEUE_DESCRIPTOR ioDescs;
         ULONG queueIndex = QueueId - 1;
         
-        if (QueueId > VNVME_MAX_IO_QUEUES || !PdoContext->IoCq[queueIndex].Created) {
+        if (QueueId > CONFIG_MAX_IO_QUEUES || !PdoContext->IoCq[queueIndex].Created) {
             return STATUS_INVALID_PARAMETER;
         }
         
-        ioDescs = GetIoQueueDescriptors();
+        ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
         if (ioDescs == NULL) {
             return STATUS_DEVICE_NOT_READY;
         }
@@ -604,7 +580,7 @@ VnvmeFetchCommandBatch(
         return STATUS_SUCCESS;
     }
     
-    shm = GetShmControlBlock();
+    shm = VnvmeShmGetControlBlock(NULL);
     if (shm == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -613,7 +589,7 @@ VnvmeFetchCommandBatch(
     if (QueueId == 0) {
         sqDesc = &shm->AdminSQ;
     } else {
-        PVNVME_QUEUE_DESCRIPTOR ioDescs = GetIoQueueDescriptors();
+        PVNVME_QUEUE_DESCRIPTOR ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
         USHORT queueIndex = QueueId - 1;
         
         // 边界检查：防止数组越界访问
@@ -687,7 +663,7 @@ VnvmePostCompletionBatch(
         return STATUS_SUCCESS;
     }
     
-    shm = GetShmControlBlock();
+    shm = VnvmeShmGetControlBlock(NULL);
     if (shm == NULL) {
         return STATUS_DEVICE_NOT_READY;
     }
@@ -697,7 +673,7 @@ VnvmePostCompletionBatch(
         cqDesc = &shm->AdminCQ;
         phase = PdoContext->AdminCq.PhaseTag;
     } else {
-        PVNVME_QUEUE_DESCRIPTOR ioDescs = GetIoQueueDescriptors();
+        PVNVME_QUEUE_DESCRIPTOR ioDescs = VnvmeShmGetIoQueueDescriptors(NULL);
         USHORT queueIndex = QueueId - 1;
         
         // 边界检查：防止数组越界访问

@@ -20,7 +20,8 @@
 /**
  * @brief 发送成功完成
  */
-static NTSTATUS PostSuccessCompletion(
+static NTSTATUS
+PostSuccessCompletion(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ UINT16 Cid,
     _In_ UINT32 Dw0
@@ -40,7 +41,8 @@ static NTSTATUS PostSuccessCompletion(
 /**
  * @brief 发送错误完成
  */
-static NTSTATUS PostErrorCompletion(
+static NTSTATUS
+PostErrorCompletion(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ UINT16 Cid,
     _In_ UINT8 Sct,
@@ -65,15 +67,14 @@ static NTSTATUS PostErrorCompletion(
 /**
  * @brief 处理 Identify Controller (CNS=0x01)
  */
-static NTSTATUS HandleIdentifyController(
+static NTSTATUS
+HandleIdentifyController(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
 {
     NTSTATUS status;
     PNVME_IDENTIFY_CONTROLLER_DATA identData = NULL;
-    PHYSICAL_ADDRESS prp1Phys;
-    PVOID prp1Va = NULL;
     
     TRACE_INFO("HandleIdentifyController: CID=%u", Command->CID);
     
@@ -121,22 +122,16 @@ static NTSTATUS HandleIdentifyController(
     identData->AWUN = 0;            // Atomic Write Unit Normal
     identData->AWUPF = 0;           // Atomic Write Unit Power Fail
     
-    // 复制数据到 PRP1 指向的内存
-    // 注意: 需要映射 PRP1 物理地址到虚拟地址
-    prp1Phys.QuadPart = Command->PRP1;
-    prp1Va = MmMapIoSpaceEx(prp1Phys, sizeof(NVME_IDENTIFY_CONTROLLER_DATA), PAGE_READWRITE | PAGE_NOCACHE);
+    // 复制数据到 PRP1 指向的主机内存
+    status = VnvmeWriteToHostMemory(Command->PRP1, identData, sizeof(NVME_IDENTIFY_CONTROLLER_DATA));
+    VNVME_FREE_POOL(identData);
     
-    if (prp1Va == NULL) {
-        TRACE_ERROR("HandleIdentifyController: Failed to map PRP1 0x%016llX", Command->PRP1);
-        VNVME_FREE_POOL(identData);
+    if (!NT_SUCCESS(status)) {
+        TRACE_ERROR("HandleIdentifyController: Failed to write to PRP1 0x%016llX, status=0x%X", 
+                    Command->PRP1, status);
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
     }
-    
-    RtlCopyMemory(prp1Va, identData, sizeof(NVME_IDENTIFY_CONTROLLER_DATA));
-    MmUnmapIoSpace(prp1Va, sizeof(NVME_IDENTIFY_CONTROLLER_DATA));
-    
-    VNVME_FREE_POOL(identData);
     
     status = PostSuccessCompletion(PdoContext, Command->CID, 0);
     
@@ -147,14 +142,14 @@ static NTSTATUS HandleIdentifyController(
 /**
  * @brief 处理 Identify Namespace (CNS=0x00)
  */
-static NTSTATUS HandleIdentifyNamespace(
+static NTSTATUS
+HandleIdentifyNamespace(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
 {
+    NTSTATUS status;
     PNVME_IDENTIFY_NAMESPACE_DATA nsData = NULL;
-    PHYSICAL_ADDRESS prp1Phys;
-    PVOID prp1Va = NULL;
     ULONG nsid = Command->NSID;
     PVNVME_NAMESPACE ns = NULL;
     
@@ -218,20 +213,15 @@ static NTSTATUS HandleIdentifyNamespace(
     nsData->LBAF[0].MS = 0;               // No metadata
     nsData->LBAF[0].RP = 0;               // Best performance
     
-    // 映射并复制数据
-    prp1Phys.QuadPart = Command->PRP1;
-    prp1Va = MmMapIoSpaceEx(prp1Phys, sizeof(NVME_IDENTIFY_NAMESPACE_DATA), PAGE_READWRITE | PAGE_NOCACHE);
+    // 复制数据到 PRP1 指向的主机内存
+    status = VnvmeWriteToHostMemory(Command->PRP1, nsData, sizeof(NVME_IDENTIFY_NAMESPACE_DATA));
+    VNVME_FREE_POOL(nsData);
     
-    if (prp1Va == NULL) {
-        VNVME_FREE_POOL(nsData);
+    if (!NT_SUCCESS(status)) {
+        TRACE_ERROR("HandleIdentifyNamespace: Failed to write to PRP1, status=0x%X", status);
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
     }
-    
-    RtlCopyMemory(prp1Va, nsData, sizeof(NVME_IDENTIFY_NAMESPACE_DATA));
-    MmUnmapIoSpace(prp1Va, sizeof(NVME_IDENTIFY_NAMESPACE_DATA));
-    
-    VNVME_FREE_POOL(nsData);
     
     TRACE_INFO("HandleIdentifyNamespace: NSID=%u, Size=%llu blocks", nsid, ns->TotalBlocks);
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
@@ -243,28 +233,28 @@ static NTSTATUS HandleIdentifyNamespace(
  * 返回从指定 NSID 开始的活动命名空间 ID 列表。
  * 列表为 1024 个 32 位条目，以 0 结尾。
  */
-static NTSTATUS HandleIdentifyActiveNsList(
+static NTSTATUS
+HandleIdentifyActiveNsList(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
 {
+    NTSTATUS status;
     PUINT32 nsList = NULL;
-    PHYSICAL_ADDRESS prp1Phys;
-    PVOID prp1Va = NULL;
     ULONG startNsid = Command->NSID;
     ULONG index = 0;
     ULONG i;
     
     TRACE_INFO("HandleIdentifyActiveNsList: CID=%u, StartNSID=%u", Command->CID, startNsid);
     
-    // 分配命名空间 ID 列表 (4096 bytes = 1024 x 4 bytes)
-    nsList = (PUINT32)VNVME_ALLOC_POOL(NonPagedPoolNx, 4096);
+    // 分配命名空间 ID 列表 (4KB = 1024 x 4 bytes)
+    nsList = (PUINT32)VNVME_ALLOC_POOL(NonPagedPoolNx, VNVME_NVME_PAGE_SIZE);
     if (nsList == NULL) {
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_INTERNAL_ERROR);
     }
     
-    RtlZeroMemory(nsList, 4096);
+    RtlZeroMemory(nsList, VNVME_NVME_PAGE_SIZE);
     
     // 填充活动命名空间 ID 列表
     // 从 startNsid + 1 开始，返回所有活动的命名空间 ID
@@ -276,20 +266,15 @@ static NTSTATUS HandleIdentifyActiveNsList(
     
     TRACE_INFO("HandleIdentifyActiveNsList: Found %u active namespaces", index);
     
-    // 映射并复制数据到 PRP1
-    prp1Phys.QuadPart = Command->PRP1;
-    prp1Va = MmMapIoSpaceEx(prp1Phys, 4096, PAGE_READWRITE | PAGE_NOCACHE);
+    // 复制数据到 PRP1 指向的主机内存
+    status = VnvmeWriteToHostMemory(Command->PRP1, nsList, VNVME_NVME_PAGE_SIZE);
+    VNVME_FREE_POOL(nsList);
     
-    if (prp1Va == NULL) {
-        VNVME_FREE_POOL(nsList);
+    if (!NT_SUCCESS(status)) {
+        TRACE_ERROR("HandleIdentifyActiveNsList: Failed to write to PRP1, status=0x%X", status);
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
     }
-    
-    RtlCopyMemory(prp1Va, nsList, 4096);
-    MmUnmapIoSpace(prp1Va, 4096);
-    
-    VNVME_FREE_POOL(nsList);
     
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
 }
@@ -297,7 +282,8 @@ static NTSTATUS HandleIdentifyActiveNsList(
 /**
  * @brief 处理 Identify 命令
  */
-static NTSTATUS HandleIdentify(
+static NTSTATUS
+HandleIdentify(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -330,7 +316,8 @@ static NTSTATUS HandleIdentify(
 /**
  * @brief 处理 Create I/O Completion Queue
  */
-static NTSTATUS HandleCreateIoCq(
+static NTSTATUS
+HandleCreateIoCq(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -378,7 +365,8 @@ static NTSTATUS HandleCreateIoCq(
 /**
  * @brief 处理 Create I/O Submission Queue
  */
-static NTSTATUS HandleCreateIoSq(
+static NTSTATUS
+HandleCreateIoSq(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -435,7 +423,8 @@ static NTSTATUS HandleCreateIoSq(
 /**
  * @brief 处理 Delete I/O Completion Queue
  */
-static NTSTATUS HandleDeleteIoCq(
+static NTSTATUS
+HandleDeleteIoCq(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -475,7 +464,8 @@ static NTSTATUS HandleDeleteIoCq(
 /**
  * @brief 处理 Delete I/O Submission Queue
  */
-static NTSTATUS HandleDeleteIoSq(
+static NTSTATUS
+HandleDeleteIoSq(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -507,7 +497,8 @@ static NTSTATUS HandleDeleteIoSq(
 /**
  * @brief 处理 Set Features 命令
  */
-static NTSTATUS HandleSetFeatures(
+static NTSTATUS
+HandleSetFeatures(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -529,12 +520,14 @@ static NTSTATUS HandleSetFeatures(
             {
                 USHORT ncqr = (USHORT)(Command->CDW11 & 0xFFFF);        // CQ Requested
                 USHORT nsqr = (USHORT)((Command->CDW11 >> 16) & 0xFFFF); // SQ Requested
-                USHORT ncqa = (ncqr > VNVME_MAX_IO_QUEUES) ? VNVME_MAX_IO_QUEUES : ncqr;
-                USHORT nsqa = (nsqr > VNVME_MAX_IO_QUEUES) ? VNVME_MAX_IO_QUEUES : nsqr;
+                // 使用运行时配置的队列数上限 (不超过编译时最大值)
+                USHORT maxQueues = (USHORT)CONFIG_MAX_IO_QUEUES;
+                USHORT ncqa = (ncqr > maxQueues) ? maxQueues : ncqr;
+                USHORT nsqa = (nsqr > maxQueues) ? maxQueues : nsqr;
                 UINT32 dw0 = ncqa | ((UINT32)nsqa << 16);
                 
-                TRACE_INFO("HandleSetFeatures: Number of Queues - Req CQ=%u SQ=%u, Alloc CQ=%u SQ=%u",
-                           ncqr, nsqr, ncqa, nsqa);
+                TRACE_INFO("HandleSetFeatures: Number of Queues - Req CQ=%u SQ=%u, Alloc CQ=%u SQ=%u (max=%u)",
+                           ncqr, nsqr, ncqa, nsqa, maxQueues);
                 
                 PdoContext->MaxIoQueues = (ncqa < nsqa) ? ncqa : nsqa;
                 return PostSuccessCompletion(PdoContext, Command->CID, dw0);
@@ -554,7 +547,8 @@ static NTSTATUS HandleSetFeatures(
 /**
  * @brief 处理 Get Features 命令
  */
-static NTSTATUS HandleGetFeatures(
+static NTSTATUS
+HandleGetFeatures(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -609,7 +603,8 @@ static NTSTATUS HandleGetFeatures(
 /**
  * @brief 处理 Abort 命令
  */
-static NTSTATUS HandleAbort(
+static NTSTATUS
+HandleAbort(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -636,7 +631,8 @@ static NTSTATUS HandleAbort(
  * - 2: Notice
  * - 6: Vendor Specific
  */
-static NTSTATUS HandleAsyncEventRequest(
+static NTSTATUS
+HandleAsyncEventRequest(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
@@ -671,25 +667,25 @@ static NTSTATUS HandleAsyncEventRequest(
  * - 0x02: SMART / Health Information
  * - 0x03: Firmware Slot Information
  */
-static NTSTATUS HandleGetLogPage(
+static NTSTATUS
+HandleGetLogPage(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )
 {
+    NTSTATUS status;
     UINT8 lid = (UINT8)(Command->CDW10 & 0xFF);
     UINT32 numdl = (Command->CDW10 >> 16) & 0xFFFF;
     UINT32 numdu = Command->CDW11 & 0xFFFF;
     UINT32 numDwords = ((UINT32)numdu << 16) | numdl;
     UINT32 dataLength = (numDwords + 1) * 4;  // NUMD is 0-based
-    PHYSICAL_ADDRESS prp1Phys;
-    PVOID prp1Va = NULL;
     PVOID logData = NULL;
     
     TRACE_INFO("HandleGetLogPage: LID=0x%02X, DataLen=%u", lid, dataLength);
     
-    // 限制最大数据长度
-    if (dataLength > 4096) {
-        dataLength = 4096;
+    // 限制最大数据长度为一个 NVMe 页面
+    if (dataLength > VNVME_NVME_PAGE_SIZE) {
+        dataLength = VNVME_NVME_PAGE_SIZE;
     }
     
     // 分配日志数据缓冲区
@@ -781,20 +777,15 @@ static NTSTATUS HandleGetLogPage(
                                        NVME_SCT_GENERIC, NVME_SC_INVALID_LOG_PAGE);
     }
     
-    // 映射并复制数据到 PRP1
-    prp1Phys.QuadPart = Command->PRP1;
-    prp1Va = MmMapIoSpaceEx(prp1Phys, dataLength, PAGE_READWRITE | PAGE_NOCACHE);
+    // 复制数据到 PRP1 指向的主机内存
+    status = VnvmeWriteToHostMemory(Command->PRP1, logData, dataLength);
+    VNVME_FREE_POOL(logData);
     
-    if (prp1Va == NULL) {
-        VNVME_FREE_POOL(logData);
+    if (!NT_SUCCESS(status)) {
+        TRACE_ERROR("HandleGetLogPage: Failed to write to PRP1, status=0x%X", status);
         return PostErrorCompletion(PdoContext, Command->CID,
                                    NVME_SCT_GENERIC, NVME_SC_DATA_TRANSFER_ERROR);
     }
-    
-    RtlCopyMemory(prp1Va, logData, dataLength);
-    MmUnmapIoSpace(prp1Va, dataLength);
-    
-    VNVME_FREE_POOL(logData);
     
     TRACE_INFO("HandleGetLogPage: Success, LID=0x%02X", lid);
     return PostSuccessCompletion(PdoContext, Command->CID, 0);
@@ -803,7 +794,8 @@ static NTSTATUS HandleGetLogPage(
 /**
  * @brief 处理 Keep Alive 命令
  */
-static NTSTATUS HandleKeepAlive(
+static NTSTATUS
+HandleKeepAlive(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ PNVME_COMMAND Command
     )

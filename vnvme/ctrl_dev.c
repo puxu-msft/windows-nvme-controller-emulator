@@ -9,6 +9,23 @@
 #include <ntstrsafe.h>
 
 //===========================================================================
+// IOCTL 输入验证常量
+//===========================================================================
+
+// 单次提交的最大完成数量 (防止过大值导致统计溢出)
+#define VNVME_MAX_COMPLETIONS_PER_SUBMIT    4096
+
+// 支持的块大小
+#define VNVME_BLOCK_SIZE_512                512
+#define VNVME_BLOCK_SIZE_4096               4096
+
+// 最大调试级别
+#define VNVME_MAX_DEBUG_LEVEL               5
+
+// 最大命名空间容量 (16TB)
+#define VNVME_MAX_NAMESPACE_CAPACITY        (16ULL * 1024 * 1024 * 1024 * 1024)
+
+//===========================================================================
 // ObOpenObjectByPointer 声明 (用于创建用户态可等待事件句柄)
 //===========================================================================
 
@@ -136,6 +153,19 @@ VnvmeHandleListNamespaces(
     _In_ size_t InputBufferLength,
     _In_ size_t OutputBufferLength,
     _Out_ size_t* BytesReturned
+    );
+
+static NTSTATUS
+VnvmeHandleGetConfig(
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    );
+
+static NTSTATUS
+VnvmeHandleSetConfig(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
     );
 
 //===========================================================================
@@ -336,6 +366,14 @@ VnvmeEvtIoDeviceControl(
         
         case IOCTL_VNVME_LIST_NAMESPACES:
             status = VnvmeHandleListNamespaces(Request, InputBufferLength, OutputBufferLength, &bytesReturned);
+            break;
+        
+        case IOCTL_VNVME_GET_CONFIG:
+            status = VnvmeHandleGetConfig(Request, OutputBufferLength, &bytesReturned);
+            break;
+        
+        case IOCTL_VNVME_SET_CONFIG:
+            status = VnvmeHandleSetConfig(Request, InputBufferLength);
             break;
         
         default:
@@ -1028,6 +1066,13 @@ VnvmeHandleSubmitCompletions(
         return STATUS_SUCCESS;
     }
     
+    // P2: 验证完成数量上限，防止统计溢出或恶意输入
+    if (completionCount > VNVME_MAX_COMPLETIONS_PER_SUBMIT) {
+        TRACE_ERROR("VnvmeHandleSubmitCompletions: CompletionCount %lu exceeds max %lu",
+                    completionCount, VNVME_MAX_COMPLETIONS_PER_SUBMIT);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
     // 遍历控制器列表
     // ControllerId == 0: 广播到所有控制器
     // ControllerId != 0: 只通知指定控制器
@@ -1223,12 +1268,19 @@ VnvmeHandleSetDebugLevel(
         return status;
     }
     
-    // 更新全局调试级别
-    g_VnvmeDebugLevel = input->DebugLevel;
-    g_VnvmeDebugFlags = input->DebugFlags;
+    // P2: 验证调试级别范围
+    if (input->DebugLevel > VNVME_MAX_DEBUG_LEVEL) {
+        TRACE_WARN("VnvmeHandleSetDebugLevel: DebugLevel %u exceeds max %u, clamping",
+                   input->DebugLevel, VNVME_MAX_DEBUG_LEVEL);
+        g_DebugLevel = VNVME_MAX_DEBUG_LEVEL;
+    } else {
+        g_DebugLevel = input->DebugLevel;
+    }
+    
+    g_DebugFlags = input->DebugFlags;
     
     TRACE_INFO("VnvmeHandleSetDebugLevel: Level=%u, Flags=0x%08X",
-               input->DebugLevel, input->DebugFlags);
+               g_DebugLevel, input->DebugFlags);
     
     return STATUS_SUCCESS;
 }
@@ -1351,6 +1403,39 @@ VnvmeHandleCreateNamespace(
         return STATUS_NOT_FOUND;
     }
     
+    // P2: 验证块大小 (只允许 512 或 4096)
+    {
+        UINT32 blockSize = input->Config.BlockSize;
+        if (blockSize != 0 && blockSize != VNVME_BLOCK_SIZE_512 && blockSize != VNVME_BLOCK_SIZE_4096) {
+            TRACE_ERROR("VnvmeHandleCreateNamespace: Invalid block size %lu (must be 512 or 4096)",
+                        blockSize);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    
+    // P2: 验证总块数 (不能为零，且总容量不能超过上限)
+    if (input->Config.TotalBlocks == 0) {
+        TRACE_ERROR("VnvmeHandleCreateNamespace: TotalBlocks cannot be 0");
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    {
+        UINT64 blockSize = input->Config.BlockSize ? input->Config.BlockSize : VNVME_BLOCK_SIZE_512;
+        UINT64 totalCapacity = input->Config.TotalBlocks * blockSize;
+        
+        // 检查溢出
+        if (totalCapacity / blockSize != input->Config.TotalBlocks) {
+            TRACE_ERROR("VnvmeHandleCreateNamespace: Capacity overflow");
+            return STATUS_INTEGER_OVERFLOW;
+        }
+        
+        if (totalCapacity > VNVME_MAX_NAMESPACE_CAPACITY) {
+            TRACE_ERROR("VnvmeHandleCreateNamespace: Total capacity %llu exceeds max %llu",
+                        totalCapacity, VNVME_MAX_NAMESPACE_CAPACITY);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+    
     // 检查命名空间数量上限
     if (pdoContext->NamespaceCount >= VNVME_MAX_NAMESPACES) {
         TRACE_ERROR("VnvmeHandleCreateNamespace: Max namespaces reached");
@@ -1374,13 +1459,54 @@ VnvmeHandleCreateNamespace(
     PVNVME_NAMESPACE ns = &pdoContext->Namespaces[nsid - 1];
     RtlZeroMemory(ns, sizeof(VNVME_NAMESPACE));
     
-    ns->Active = TRUE;
     ns->NsId = nsid;
     ns->TotalBlocks = input->Config.TotalBlocks;
     ns->BlockSize = input->Config.BlockSize ? input->Config.BlockSize : 512;
+    ns->TotalBytes = ns->TotalBlocks * ns->BlockSize;
     ns->ReadOnly = (input->Config.Flags & VNVME_NS_FLAG_READONLY) ? TRUE : FALSE;
     ns->ThinProvisioned = (input->Config.Flags & VNVME_NS_FLAG_SPARSE) ? TRUE : FALSE;
     
+    // 创建存储后端
+    {
+        VNVME_STORAGE_TYPE storageType;
+        UNICODE_STRING storagePath;
+        PUNICODE_STRING pStoragePath = NULL;
+        
+        // 根据配置和 namespace 标志选择存储类型
+        if (ns->ThinProvisioned) {
+            storageType = VNVME_STORAGE_TYPE_SPARSE;
+        } else {
+            storageType = (VNVME_STORAGE_TYPE)CONFIG_STORAGE_TYPE;
+        }
+        
+        // 如果是文件后端，需要路径
+        if (storageType == VNVME_STORAGE_TYPE_FILE || 
+            storageType == VNVME_STORAGE_TYPE_SPARSE) {
+            if (CONFIG_STORAGE_PATH[0] != L'\0') {
+                RtlInitUnicodeString(&storagePath, CONFIG_STORAGE_PATH);
+                pStoragePath = &storagePath;
+            } else {
+                // 没有配置路径，回退到内存后端
+                TRACE_WARN("VnvmeHandleCreateNamespace: No storage path configured, using memory backend");
+                storageType = VNVME_STORAGE_TYPE_MEMORY;
+            }
+        }
+        
+        status = VnvmeStorageCreate(
+            &ns->Storage,
+            storageType,
+            ns->TotalBytes,
+            ns->BlockSize,
+            pStoragePath
+            );
+        
+        if (!NT_SUCCESS(status)) {
+            TRACE_ERROR("VnvmeHandleCreateNamespace: VnvmeStorageCreate failed, status=0x%08X", status);
+            return status;
+        }
+    }
+    
+    ns->Active = TRUE;
     pdoContext->NamespaceCount++;
     
     // 填充输出
@@ -1388,8 +1514,8 @@ VnvmeHandleCreateNamespace(
     output->Reserved = 0;
     *BytesReturned = sizeof(VNVME_CREATE_NAMESPACE_OUTPUT);
     
-    TRACE_INFO("VnvmeHandleCreateNamespace: Created NSID=%lu on Controller=%lu, Blocks=%llu, BlockSize=%lu",
-               nsid, input->ControllerId, input->Config.TotalBlocks, ns->BlockSize);
+    TRACE_INFO("VnvmeHandleCreateNamespace: Created NSID=%lu on Controller=%lu, Blocks=%llu, BlockSize=%lu, Storage=%p",
+               nsid, input->ControllerId, input->Config.TotalBlocks, ns->BlockSize, ns->Storage);
     
     return STATUS_SUCCESS;
 }
@@ -1442,8 +1568,11 @@ VnvmeHandleDeleteNamespace(
         return STATUS_NOT_FOUND;
     }
     
-    // 清理命名空间
-    // TODO: 释放存储后端资源
+    // 清理存储后端
+    if (ns->Storage != NULL) {
+        VnvmeStorageDestroy(ns->Storage);
+        ns->Storage = NULL;
+    }
     
     ns->Active = FALSE;
     pdoContext->NamespaceCount--;
@@ -1532,6 +1661,140 @@ VnvmeHandleListNamespaces(
     
     TRACE_INFO("VnvmeHandleListNamespaces: Listed %lu namespaces for Controller=%lu",
                count, input->ControllerId);
+    
+    return STATUS_SUCCESS;
+}
+
+//===========================================================================
+// 配置管理 IOCTL
+//===========================================================================
+
+/**
+ * @brief 处理 IOCTL_VNVME_GET_CONFIG
+ * 
+ * 获取当前驱动配置。
+ */
+static NTSTATUS
+VnvmeHandleGetConfig(
+    _In_ WDFREQUEST Request,
+    _In_ size_t OutputBufferLength,
+    _Out_ size_t* BytesReturned
+    )
+{
+    NTSTATUS status;
+    PVNVME_GET_CONFIG_OUTPUT output;
+    VNVME_CONFIG config;
+    
+    *BytesReturned = 0;
+    
+    if (OutputBufferLength < sizeof(VNVME_GET_CONFIG_OUTPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveOutputBuffer(Request, sizeof(VNVME_GET_CONFIG_OUTPUT),
+                                            (PVOID*)&output, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    // 获取当前配置
+    VnvmeConfigGet(&config);
+    
+    RtlZeroMemory(output, sizeof(VNVME_GET_CONFIG_OUTPUT));
+    
+    // 复制到 IOCTL 输出结构
+    output->Config.DebugLevel = config.DebugLevel;
+    output->Config.DebugFlags = config.DebugFlags;
+    output->Config.HeartbeatTimeoutMs = (UINT32)(config.HeartbeatTimeout100ns / 10000);
+    
+    output->Config.StorageType = (UINT32)config.StorageType;
+    output->Config.StorageSizeGB = config.StorageSizeGB;
+    RtlCopyMemory(output->Config.StoragePath, config.StoragePath, 
+                  sizeof(output->Config.StoragePath));
+    
+    output->Config.MaxIOQueues = config.MaxIOQueues;
+    output->Config.AdminQueueDepth = config.AdminQueueDepth;
+    output->Config.IOQueueDepth = config.IOQueueDepth;
+    
+    output->Config.DoorbellPollIntervalUs = config.DoorbellPollIntervalUs;
+    output->Config.BatchSize = config.BatchSize;
+    
+    output->Config.AllowUserModeAccess = config.AllowUserModeAccess ? 1 : 0;
+    output->Config.RequireAdminPrivilege = config.RequireAdminPrivilege ? 1 : 0;
+    
+    // 指示可动态修改的字段
+    output->DynamicFieldMask = VNVME_CONFIG_FIELD_ALL_DYNAMIC;
+    
+    *BytesReturned = sizeof(VNVME_GET_CONFIG_OUTPUT);
+    
+    TRACE_INFO("VnvmeHandleGetConfig: Returned config (DebugLevel=%lu, PollInterval=%luus)",
+               output->Config.DebugLevel, output->Config.DoorbellPollIntervalUs);
+    
+    return STATUS_SUCCESS;
+}
+
+/**
+ * @brief 处理 IOCTL_VNVME_SET_CONFIG
+ * 
+ * 设置可动态修改的配置字段。
+ */
+static NTSTATUS
+VnvmeHandleSetConfig(
+    _In_ WDFREQUEST Request,
+    _In_ size_t InputBufferLength
+    )
+{
+    NTSTATUS status;
+    PVNVME_SET_CONFIG_INPUT input;
+    VNVME_CONFIG newConfig;
+    UINT32 fieldMask;
+    
+    if (InputBufferLength < sizeof(VNVME_SET_CONFIG_INPUT)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    
+    status = WdfRequestRetrieveInputBuffer(Request, sizeof(VNVME_SET_CONFIG_INPUT),
+                                           (PVOID*)&input, NULL);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+    
+    fieldMask = input->FieldMask;
+    
+    // 仅允许修改动态字段
+    if (fieldMask & ~VNVME_CONFIG_FIELD_ALL_DYNAMIC) {
+        TRACE_WARN("VnvmeHandleSetConfig: Attempt to modify read-only fields (mask=0x%08X)", fieldMask);
+        return STATUS_ACCESS_DENIED;
+    }
+    
+    // 获取当前配置作为基础
+    VnvmeConfigGet(&newConfig);
+    
+    // 根据 FieldMask 更新请求的字段
+    if (fieldMask & VNVME_CONFIG_FIELD_DEBUG_LEVEL) {
+        newConfig.DebugLevel = input->Config.DebugLevel;
+    }
+    if (fieldMask & VNVME_CONFIG_FIELD_DEBUG_FLAGS) {
+        newConfig.DebugFlags = input->Config.DebugFlags;
+    }
+    if (fieldMask & VNVME_CONFIG_FIELD_HEARTBEAT) {
+        newConfig.HeartbeatTimeout100ns = (LONGLONG)input->Config.HeartbeatTimeoutMs * 10000;
+    }
+    if (fieldMask & VNVME_CONFIG_FIELD_POLL_INTERVAL) {
+        newConfig.DoorbellPollIntervalUs = input->Config.DoorbellPollIntervalUs;
+    }
+    if (fieldMask & VNVME_CONFIG_FIELD_BATCH_SIZE) {
+        newConfig.BatchSize = input->Config.BatchSize;
+    }
+    
+    // 应用更新
+    status = VnvmeConfigUpdate(&newConfig);
+    if (!NT_SUCCESS(status)) {
+        TRACE_ERROR("VnvmeHandleSetConfig: VnvmeConfigUpdate failed 0x%08X", status);
+        return status;
+    }
+    
+    TRACE_INFO("VnvmeHandleSetConfig: Updated config (mask=0x%08X)", fieldMask);
     
     return STATUS_SUCCESS;
 }

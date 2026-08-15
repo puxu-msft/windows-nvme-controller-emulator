@@ -6,17 +6,19 @@
  * 支持自适应轮询间隔：
  * - 有工作时：减少间隔到最小值 (更频繁轮询)
  * - 无工作时：增加间隔到最大值 (节省 CPU)
+ * 
+ * 轮询间隔可通过注册表配置:
+ * - DoorbellPollIntervalUs: 默认轮询间隔 (微秒)
  */
 
 #include "vnvme.h"
 
-// 自适应轮询参数
-#define VNVME_POLL_INTERVAL_MIN_US      100     // 最小间隔 100us
-#define VNVME_POLL_INTERVAL_MAX_US      10000   // 最大间隔 10ms
-#define VNVME_POLL_INTERVAL_DEFAULT_US  1000    // 默认间隔 1ms
+// 自适应轮询边界 (相对于配置的间隔)
+#define VNVME_POLL_INTERVAL_DIVISOR     10      // 最小间隔 = 配置值 / 10
+#define VNVME_POLL_INTERVAL_MULTIPLIER  100     // 最大间隔 = 配置值 * 100
 
-// 用户态心跳超时 (10秒，100ns 单位)
-#define VNVME_HEARTBEAT_TIMEOUT_100NS   (10LL * 10000000LL)
+// 用户态心跳超时默认值已移至 debug.c 的 g_HeartbeatTimeout100ns 全局变量
+// 可通过注册表 HKLM\SYSTEM\CurrentControlSet\Services\vnvme\Parameters\HeartbeatTimeoutMs 配置
 
 //===========================================================================
 // 轮询定时器管理
@@ -62,10 +64,10 @@ VnvmeInitializePollingTimer(
         return status;
     }
     
-    // 初始化自适应轮询间隔
-    PdoContext->PollingIntervalUs = VNVME_POLL_INTERVAL_DEFAULT_US;
+    // 使用注册表配置的轮询间隔
+    PdoContext->PollingIntervalUs = CONFIG_POLL_INTERVAL_US;
     
-    TRACE_INFO("VnvmeInitializePollingTimer: Timer created, initial interval=%lu us",
+    TRACE_INFO("VnvmeInitializePollingTimer: Timer created, initial interval=%lu us (from config)",
                PdoContext->PollingIntervalUs);
     
     return STATUS_SUCCESS;
@@ -113,6 +115,10 @@ VnvmeStopPollingTimer(
  * 根据是否有工作动态调整轮询间隔:
  * - 有工作: 减半间隔 (更频繁轮询)
  * - 无工作: 加倍间隔 (节省 CPU)
+ * 
+ * 边界基于配置的轮询间隔:
+ * - 最小间隔 = 配置值 / 10 (但不小于 VNVME_MIN_POLL_INTERVAL_US)
+ * - 最大间隔 = 配置值 * 100 (但不超过 VNVME_MAX_POLL_INTERVAL_US)
  */
 static VOID
 AdjustPollingInterval(
@@ -121,18 +127,29 @@ AdjustPollingInterval(
     )
 {
     ULONG newInterval = PdoContext->PollingIntervalUs;
+    ULONG configInterval = CONFIG_POLL_INTERVAL_US;
+    ULONG minInterval = configInterval / VNVME_POLL_INTERVAL_DIVISOR;
+    ULONG maxInterval = configInterval * VNVME_POLL_INTERVAL_MULTIPLIER;
+    
+    // 确保边界在全局限制内
+    if (minInterval < VNVME_MIN_POLL_INTERVAL_US) {
+        minInterval = VNVME_MIN_POLL_INTERVAL_US;
+    }
+    if (maxInterval > VNVME_MAX_POLL_INTERVAL_US) {
+        maxInterval = VNVME_MAX_POLL_INTERVAL_US;
+    }
     
     if (HadWork) {
         // 有工作 - 减少间隔 (更快响应)
         newInterval = newInterval / 2;
-        if (newInterval < VNVME_POLL_INTERVAL_MIN_US) {
-            newInterval = VNVME_POLL_INTERVAL_MIN_US;
+        if (newInterval < minInterval) {
+            newInterval = minInterval;
         }
     } else {
         // 无工作 - 增加间隔 (节省 CPU)
         newInterval = newInterval + newInterval / 4;  // 增加 25%
-        if (newInterval > VNVME_POLL_INTERVAL_MAX_US) {
-            newInterval = VNVME_POLL_INTERVAL_MAX_US;
+        if (newInterval > maxInterval) {
+            newInterval = maxInterval;
         }
     }
     
@@ -160,14 +177,39 @@ CheckUserModeHeartbeat(
     KeQuerySystemTime(&currentTime);
     elapsed = currentTime.QuadPart - FdoContext->LastHeartbeat.QuadPart;
     
-    if (elapsed > VNVME_HEARTBEAT_TIMEOUT_100NS) {
+    if (elapsed > g_HeartbeatTimeout100ns) {
         TRACE_ERROR("CheckUserModeHeartbeat: User-mode service timeout! "
-                    "Last heartbeat was %lld seconds ago",
-                    elapsed / 10000000LL);
+                    "Last heartbeat was %lld seconds ago (timeout=%lldms)",
+                    elapsed / 10000000LL,
+                    g_HeartbeatTimeout100ns / 10000LL);
         
         // 标记用户态已崩溃
         FdoContext->UserCrashed = TRUE;
         FdoContext->UserReady = FALSE;
+        
+        // =========================================================
+        // P0 修复: 在切换模式前，中止所有待处理的用户态命令
+        // 这确保 stornvme 不会因为等待永远不会到来的完成而超时
+        // =========================================================
+        {
+            PLIST_ENTRY entry;
+            KIRQL oldIrql;
+            
+            KeAcquireSpinLock(&FdoContext->ChildDeviceListLock, &oldIrql);
+            
+            for (entry = FdoContext->ChildDeviceList.Flink;
+                 entry != &FdoContext->ChildDeviceList;
+                 entry = entry->Flink) {
+                
+                PVNVME_PDO_CONTEXT pdoContext = CONTAINING_RECORD(
+                    entry, VNVME_PDO_CONTEXT, ListEntry);
+                
+                // 中止该控制器的所有待处理命令
+                VnvmeAbortPendingUserCommands(pdoContext);
+            }
+            
+            KeReleaseSpinLock(&FdoContext->ChildDeviceListLock, oldIrql);
+        }
         
         // 切换到内核态命令处理模式
         FdoContext->CommandMode = VNVME_CMD_MODE_KERNEL;

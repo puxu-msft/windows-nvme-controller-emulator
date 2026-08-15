@@ -1,0 +1,17 @@
+; VNVME Driver Exports for Unit Testing
+;
+; This file defines the exported symbols from the VNVME driver
+; that can be called directly in unit tests.
+
+EXPORTS
+    ; Driver entry point
+    DriverEntry
+
+    ; Configuration functions (for direct testing)
+    VNvmeConfigGetDefault
+    VNvmeConfigValidate
+    VNvmeConfigReconfigure
+
+    ; Debug functions
+    VNvmeDebugSetLevel
+    VNvmeDebugGetLevel

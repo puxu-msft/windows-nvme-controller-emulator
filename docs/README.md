@@ -5,9 +5,9 @@
 本项目实现一个 **Windows 软件 NVMe 控制器仿真器**，采用**混合用户态/内核态架构**，在 Windows 宿主机上创建**真正的虚拟 NVMe 设备**，让 Windows 原生 NVMe 驱动 (stornvme.sys) 可以正常加载和使用。
 
 > **📌 重要**: 本项目已采用 v2 混合架构设计。请优先阅读：
-> - [architecture-v2.md](architecture-v2.md) - 新的统一混合架构设计
-> - [core-mechanisms.md](core-mechanisms.md) - 核心机制详解 (Doorbell 轮询、共享内存、PRP 解析)
-> - [architecture-analysis.md](architecture-analysis.md) - 架构分析和问题修复记录
+> - [architecture/overview.md](architecture/overview.md) - 新的统一混合架构设计
+> - [architecture/core-mechanisms.md](architecture/core-mechanisms.md) - 核心机制详解 (Doorbell 轮询、共享内存、PRP 解析)
+> - [architecture/decisions.md](architecture/decisions.md) - 架构分析和问题修复记录
 
 ### 核心目标
 
@@ -47,6 +47,8 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 ---
 
 ## 技术架构 (v2 混合模式)
+
+> 📖 **详细说明**: 请参考 [架构设计](architecture/overview.md) 了解完整的组件交互和设计原理。
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -99,57 +101,101 @@ nvme1      VNVME0000000001  Virtual NVMe SSD      100.0 GB  ← 我们的设备
 
 ## 文档结构
 
-### 📌 开始阅读
+本文档库采用分类目录组织，便于快速定位所需内容。
+
+### 📁 目录概览
+
+```
+docs/
+├── README.md                 # 本文件 - 文档索引
+├── architecture/             # 架构设计
+├── development/              # 开发者指南
+├── reference/                # 参考手册
+│   ├── api/                  # API 文档
+│   ├── nvme/                 # NVMe 协议
+│   └── pcie/                 # PCIe 规范
+├── components/               # 组件文档
+├── operations/               # 运维指南
+├── project/                  # 项目管理
+└── archive/                  # 归档文档
+```
+
+### 📌 快速开始
 
 | 文档 | 说明 |
 |------|------|
-| [ROADMAP.md](ROADMAP.md) | **开发路线图** - 阶段规划、任务清单、里程碑 |
-| [architecture-v2.md](architecture-v2.md) | **核心架构设计** - 内核/用户态分工、FDO/PDO 层 |
-| [core-mechanisms.md](core-mechanisms.md) | **核心机制详解** - 轮询、共享内存、PRP、数据路径 |
-| [CODING-STANDARDS.md](CODING-STANDARDS.md) | **编码规范** - 命名约定、开发原则、最佳实践 |
+| [getting-started.md](getting-started.md) | **🚀 5分钟快速入门** - 安装、配置、首次使用 |
+| [faq.md](faq.md) | **❓ 常见问题** - 安装、使用、开发问题解答 |
+| [project/ROADMAP.md](project/ROADMAP.md) | **开发路线图** - 阶段规划、任务清单、里程碑 |
+| [architecture/overview.md](architecture/overview.md) | **核心架构设计** - 内核/用户态分工、FDO/PDO 层 |
+| [development/coding-standards.md](development/coding-standards.md) | **编码规范** - 命名约定、开发原则、最佳实践 |
 
-### 🔧 开发文档
-
-| 文档 | 说明 |
-|------|------|
-| [build-guide.md](build-guide.md) | 构建环境、项目结构、编译流程 |
-| [inf-guide.md](inf-guide.md) | INF 文件详解、安装/卸载脚本、测试签名 |
-| [data-structures.md](data-structures.md) | 核心数据结构 (FDO/PDO Context、共享内存) |
-| [user-mode-service.md](user-mode-service.md) | vnvme-server.exe 详细设计 |
-| [vnvme-server-modular-design.md](vnvme-server-modular-design.md) | vnvme-server 模块化架构 (v2) |
-| [debugging.md](debugging.md) | 调试基础设施和 WinDbg 使用 |
-
-### 📚 NVMe/PCIe 规范参考
+### 🏗️ 架构设计 (`architecture/`)
 
 | 文档 | 说明 |
 |------|------|
-| [pcie-emulation.md](pcie-emulation.md) | PCIe 配置空间仿真 |
-| [nvme-controller.md](nvme-controller.md) | NVMe 控制器寄存器 (BAR0) |
-| [nvme-commands.md](nvme-commands.md) | NVMe 命令格式 (Admin/IO) |
-| [queue-engine.md](queue-engine.md) | SQ/CQ 队列机制 |
+| [overview.md](architecture/overview.md) | 系统架构概览 (v2 混合模式) |
+| [core-mechanisms.md](architecture/core-mechanisms.md) | 核心机制 (Doorbell、共享内存、PRP) |
+| [data-structures.md](architecture/data-structures.md) | 核心数据结构定义 |
+| [decisions.md](architecture/decisions.md) | 架构决策记录 |
 
-### 📦 实现模块
-
-| 文档 | 说明 |
-|------|------|
-| [backend-storage.md](backend-storage.md) | 存储后端实现 (内存/文件) |
-| [ioctl-interface.md](ioctl-interface.md) | 用户态管理接口 |
-| [interrupt-emulation.md](interrupt-emulation.md) | 中断机制参考 |
-
-### 🔍 测试与运维
+### 🔧 开发指南 (`development/`)
 
 | 文档 | 说明 |
 |------|------|
-| [testing.md](testing.md) | 测试策略和验证方法 |
-| [troubleshooting.md](troubleshooting.md) | 故障排查指南 |
-| [performance-optimization.md](performance-optimization.md) | **性能优化指南** - 轮询优化、事件通知、批处理、内存访问 |
+| [build-guide.md](development/build-guide.md) | 构建环境、项目结构、编译流程 |
+| [coding-standards.md](development/coding-standards.md) | 编码规范和最佳实践 |
+| [debugging.md](development/debugging.md) | 调试指南 (WinDbg、DebugView) |
+| [testing.md](development/testing.md) | 测试策略和方法 |
+| [inf-guide.md](development/inf-guide.md) | INF 文件和驱动安装 |
 
-### 📜 历史记录
+### 📚 参考手册 (`reference/`)
+
+#### API 文档 (`reference/api/`)
+| 文档 | 说明 |
+|------|------|
+| [api-reference.md](reference/api/api-reference.md) | API 参考 |
+| [ioctl-interface.md](reference/api/ioctl-interface.md) | IOCTL 接口定义 |
+
+#### NVMe 协议 (`reference/nvme/`)
+| 文档 | 说明 |
+|------|------|
+| [commands.md](reference/nvme/commands.md) | NVMe 命令格式 (Admin/IO) |
+| [controller.md](reference/nvme/controller.md) | NVMe 控制器寄存器 |
+| [queues.md](reference/nvme/queues.md) | SQ/CQ 队列机制 |
+
+#### PCIe 规范 (`reference/pcie/`)
+| 文档 | 说明 |
+|------|------|
+| [config-space.md](reference/pcie/config-space.md) | PCIe 配置空间仿真 |
+| [interrupts.md](reference/pcie/interrupts.md) | 中断机制参考 |
+
+### 📦 组件文档 (`components/`)
 
 | 文档 | 说明 |
 |------|------|
-| [architecture-analysis.md](architecture-analysis.md) | 架构分析和问题修复记录 |
-| [history/](history/) | 评审记录、废弃设计等 |
+| [user-mode-service.md](components/user-mode-service.md) | vnvme-server.exe 设计 |
+| [vnvme-server-modular-design.md](components/vnvme-server-modular-design.md) | 模块化架构 (v2) |
+| [backends.md](components/backends.md) | 存储后端 (内存/文件) |
+
+### 🔍 运维指南 (`operations/`)
+
+| 文档 | 说明 |
+|------|------|
+| [user-manual.md](operations/user-manual.md) | 用户手册 |
+| [troubleshooting.md](operations/troubleshooting.md) | 故障排查 |
+| [performance.md](operations/performance.md) | 性能优化 |
+
+### 📋 项目管理 (`project/`)
+
+| 文档 | 说明 |
+|------|------|
+| [ROADMAP.md](project/ROADMAP.md) | 开发路线图 |
+| [RELEASE-NOTES.md](project/RELEASE-NOTES.md) | 发布说明 |
+
+### 📜 归档 (`archive/`)
+
+包含已完成的审计报告、废弃设计等历史文档。
 
 ---
 
@@ -265,8 +311,8 @@ Get-PhysicalDisk | Where-Object BusType -eq "NVMe"
 
 | 组件 | 源文件数 | 总行数 | 状态 |
 |------|---------|--------|------|
-| **vnvme.sys** (内核驱动) | 19 | ~8,500 | ✅ 功能完整 |
-| **vnvme-server.exe** (用户态服务) | 22 | ~7,500 | ✅ 模块化重构完成 |
+| **vnvme.sys** (内核驱动) | 19 | ~9,800 | ✅ 功能完整 |
+| **vnvme-server.exe** (用户态服务) | 22 | ~5,600 | ✅ 模块化重构完成 |
 | **vnvmectl.exe** (命令行工具) | 1 | ~850 | ✅ 完整功能 |
 | **共享头文件** | 3 | ~1,300 | ✅ 完整定义 |
 
@@ -320,11 +366,15 @@ virtual-nvme-driver/
 │   ├── vnvme_ioctl.h       # ✅ IOCTL 接口定义 (252行)
 │   └── nvme_spec.h         # ✅ NVMe 规范定义 (536行)
 │
-├── docs/                   # 文档
-│   ├── README.md           # 本文件
-│   ├── ROADMAP.md          # 开发路线图
-│   ├── architecture-v2.md  # 混合架构设计
-│   └── ...                 # 其他文档 (20+ 文件)
+├── docs/                   # 文档 (分类组织)
+│   ├── README.md           # 本文件 - 文档索引
+│   ├── architecture/       # 架构设计文档
+│   ├── development/        # 开发者指南
+│   ├── reference/          # API 和协议参考
+│   ├── components/         # 组件文档
+│   ├── operations/         # 运维指南
+│   ├── project/            # 项目管理 (ROADMAP, RELEASE-NOTES)
+│   └── archive/            # 归档历史文档
 │
 ├── scripts/                # 构建和安装脚本
 ├── templates/              # INF 模板等

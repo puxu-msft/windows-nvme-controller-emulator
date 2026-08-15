@@ -16,6 +16,7 @@
 #include "vnvme_ioctl.h"
 #include "nvme_spec.h"
 #include "vnvme_utils.h"
+#include "config.h"
 #include "debug.h"
 #include "trace.h"
 
@@ -29,6 +30,12 @@
 #define VNVME_MAX_AER_COMMANDS      4               // 最大待处理 AER 命令数
 #define VNVME_BAR0_SIZE             (64 * 1024)     // 64 KB
 #define VNVME_PCIE_CONFIG_SIZE      4096            // 4 KB PCIe配置空间
+
+// NVMe 内存页大小 (4KB)
+// 注意: 这是 NVMe 规范定义的页面大小 (CC.MPS)，与 Windows PAGE_SIZE 语义不同
+// NVMe 1.4 规范定义 MPS = 0 对应 4KB，MPS = 1 对应 8KB 等
+#define VNVME_NVME_PAGE_SIZE        4096
+#define VNVME_NVME_PAGE_MASK        (VNVME_NVME_PAGE_SIZE - 1)
 // VNVME_MAX_IO_QUEUES 已在 vnvme_common.h 中定义
 #define VNVME_POLLING_INTERVAL_MS   1               // 轮询间隔 (毫秒)
 
@@ -114,15 +121,9 @@ typedef struct _VNVME_FDO_CONTEXT {
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_FDO_CONTEXT, VnvmeGetFdoContext)
 
 //===========================================================================
-// 存储后端类型前向声明
+// 存储后端上下文前向声明
+// 注意: VNVME_STORAGE_TYPE 枚举已移至 config.h
 //===========================================================================
-
-typedef enum _VNVME_STORAGE_TYPE {
-    VNVME_STORAGE_TYPE_NONE = 0,
-    VNVME_STORAGE_TYPE_MEMORY,          // 内存后端 (非分页池)
-    VNVME_STORAGE_TYPE_FILE,            // 文件后端
-    VNVME_STORAGE_TYPE_SPARSE           // 稀疏内存后端 (TODO Phase 5)
-} VNVME_STORAGE_TYPE;
 
 typedef struct _VNVME_STORAGE_CONTEXT VNVME_STORAGE_CONTEXT, *PVNVME_STORAGE_CONTEXT;
 
@@ -285,6 +286,17 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VNVME_PDO_CONTEXT, VnvmeGetPdoContext)
 
 extern PVNVME_FDO_CONTEXT g_FdoContext;
 
+/**
+ * @brief 线程安全地获取全局 FDO 上下文
+ * 
+ * 使用原子操作读取，确保获取的值在读取时刻是有效的。
+ * 调用者应将返回值保存到本地变量中使用，避免多次读取全局变量。
+ * 
+ * @return FDO 上下文指针，可能为 NULL
+ */
+PVNVME_FDO_CONTEXT
+VnvmeGetFdoContextSafe(void);
+
 //===========================================================================
 // 函数声明 - vnvme.c
 //===========================================================================
@@ -381,6 +393,33 @@ VnvmeMapShmToUser(
 VOID
 VnvmeUnmapShmFromUser(
     _In_ PVNVME_FDO_CONTEXT FdoContext
+    );
+
+/**
+ * @brief 获取共享内存控制块 (内核模式)
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ */
+PVNVME_SHM_CONTROL_BLOCK
+VnvmeShmGetControlBlock(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
+    );
+
+/**
+ * @brief 获取通知环 (内核模式)
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ */
+PVNVME_NOTIFY_RING
+VnvmeShmGetNotifyRing(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
+    );
+
+/**
+ * @brief 获取 I/O 队列描述符数组 (内核模式)
+ * @param FdoContext FDO 上下文 (可选，NULL 时使用全局)
+ */
+PVNVME_QUEUE_DESCRIPTOR
+VnvmeShmGetIoQueueDescriptors(
+    _In_opt_ PVNVME_FDO_CONTEXT FdoContext
     );
 
 //===========================================================================
@@ -619,6 +658,20 @@ VnvmeForwardIoCommandsToUser(
  */
 NTSTATUS
 VnvmeProcessUserCompletions(
+    _In_ PVNVME_PDO_CONTEXT PdoContext
+    );
+
+/**
+ * @brief 中止所有待处理的用户态命令
+ * 
+ * 当用户态服务崩溃时调用，为所有未完成的命令返回内部错误状态。
+ * 这确保 stornvme 不会因为等待永远不会到来的完成而超时。
+ * 
+ * @param PdoContext PDO 上下文
+ * @return 被中止的命令数量
+ */
+ULONG
+VnvmeAbortPendingUserCommands(
     _In_ PVNVME_PDO_CONTEXT PdoContext
     );
 

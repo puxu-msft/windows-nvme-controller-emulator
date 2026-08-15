@@ -15,12 +15,27 @@
  * @brief 全局 FDO 上下文指针
  * 
  * 线程安全说明:
- * - 在 VnvmeEvtDeviceAdd 中设置一次，不再修改直到驱动卸载
- * - 在驱动卸载时 (VnvmeEvtDriverContextCleanup) 设为 NULL
- * - WDF 保证在删除控制设备之前，所有 IOCTL 请求都已完成
- * - IOCTL 处理函数应保存本地副本后检查 NULL
+ * - 使用 InterlockedExchangePointer 原子操作更新
+ * - 在 VnvmeEvtDeviceAdd 中设置一次
+ * - 在驱动卸载时 (VnvmeEvtDriverContextCleanup) 原子设为 NULL
+ * - 读取时使用 VnvmeGetFdoContextSafe() 获取本地副本
  */
 PVNVME_FDO_CONTEXT g_FdoContext = NULL;
+
+/**
+ * @brief 线程安全地获取全局 FDO 上下文
+ * 
+ * 使用 InterlockedCompareExchangePointer 读取，确保获取的值
+ * 在读取时刻是有效的。调用者应将返回值保存到本地变量中使用。
+ * 
+ * @return FDO 上下文指针，可能为 NULL
+ */
+PVNVME_FDO_CONTEXT
+VnvmeGetFdoContextSafe(void)
+{
+    return (PVNVME_FDO_CONTEXT)InterlockedCompareExchangePointer(
+        (PVOID*)&g_FdoContext, NULL, NULL);
+}
 
 //===========================================================================
 // 驱动入口
@@ -39,11 +54,14 @@ DriverEntry(
     WDF_DRIVER_CONFIG config;
     WDF_OBJECT_ATTRIBUTES attributes;
     
-    // 初始化调试子系统 (最先执行)
-    VnvmeDebugInit(RegistryPath);
+    // 初始化配置子系统 (最先执行，从注册表加载配置)
+    VnvmeConfigInit(RegistryPath);
     
-    VNVME_DBG_INFO("DriverEntry: VNVME driver loading, version 0x%08X", VNVME_VERSION);
-    VNVME_FUNC_ENTER();
+    // 初始化调试统计
+    VnvmeDebugInit();
+    
+    TRACE_INFO("DriverEntry: VNVME driver loading, version 0x%08X", VNVME_VERSION);
+    TRACE_FUNC_ENTER();
     
     // 启用 NX 池 - 安全性要求
     ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
@@ -68,14 +86,14 @@ DriverEntry(
         );
     
     if (!NT_SUCCESS(status)) {
-        VNVME_DBG_ERROR("DriverEntry: WdfDriverCreate failed, status=0x%08X", status);
+        TRACE_ERROR("DriverEntry: WdfDriverCreate failed, status=0x%08X", status);
         WPP_CLEANUP(DriverObject);
-        VNVME_FUNC_EXIT_NTSTATUS(status);
+        TRACE_FUNC_EXIT_NTSTATUS(status);
         return status;
     }
     
-    VNVME_DBG_INFO("DriverEntry: Driver created successfully");
-    VNVME_FUNC_EXIT_NTSTATUS(STATUS_SUCCESS);
+    TRACE_INFO("DriverEntry: Driver created successfully");
+    TRACE_FUNC_EXIT_NTSTATUS(STATUS_SUCCESS);
     return STATUS_SUCCESS;
 }
 
@@ -157,8 +175,20 @@ VnvmeEvtDeviceAdd(
     // 记录启动时间
     KeQuerySystemTime(&fdoContext->StartTime);
     
-    // 保存全局指针
-    g_FdoContext = fdoContext;
+    // 保存全局指针 (原子操作 + 单实例保护)
+    // 使用 CAS 确保只有一个实例可以设置全局指针
+    {
+        PVOID previousContext = InterlockedCompareExchangePointer(
+            (PVOID*)&g_FdoContext, fdoContext, NULL);
+        
+        if (previousContext != NULL) {
+            // 已有实例存在，拒绝创建第二个
+            TRACE_ERROR("VnvmeEvtDeviceAdd: Only one instance supported, "
+                        "existing context at %p", previousContext);
+            // 注意: WdfDeviceCreate 创建的设备会在函数失败后自动清理
+            return STATUS_DEVICE_ALREADY_ATTACHED;
+        }
+    }
     
     // 创建控制设备
     status = VnvmeCreateControlDevice(device);
@@ -323,10 +353,14 @@ VnvmeEvtDriverContextCleanup(
     
     TRACE_INFO("VnvmeEvtDriverContextCleanup: Driver unloading");
     
-    // 删除控制设备
-    if (g_FdoContext != NULL) {
-        VnvmeDeleteControlDevice(g_FdoContext);
-        g_FdoContext = NULL;
+    // 删除控制设备 (先原子获取指针，再设为 NULL)
+    {
+        PVNVME_FDO_CONTEXT fdoContext = (PVNVME_FDO_CONTEXT)InterlockedExchangePointer(
+            (PVOID*)&g_FdoContext, NULL);
+        
+        if (fdoContext != NULL) {
+            VnvmeDeleteControlDevice(fdoContext);
+        }
     }
     
     // 清理 WPP 跟踪

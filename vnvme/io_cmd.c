@@ -21,7 +21,8 @@
 /**
  * @brief 发送 I/O 完成
  */
-static NTSTATUS PostIoCompletion(
+static NTSTATUS
+PostIoCompletion(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ UINT16 Cid,
@@ -67,7 +68,8 @@ static NTSTATUS PostIoCompletion(
  * 2. 从存储后端读取数据到临时缓冲区
  * 3. 解析 PRP 列表，将数据写入主机内存
  */
-static NTSTATUS HandleRead(
+static NTSTATUS
+HandleRead(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command
@@ -226,7 +228,8 @@ WriteToHost:
  * 2. 解析 PRP 列表，从主机内存读取数据
  * 3. 将数据写入存储后端
  */
-static NTSTATUS HandleWrite(
+static NTSTATUS
+HandleWrite(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command
@@ -379,7 +382,8 @@ Success:
 /**
  * @brief 处理 Flush 命令
  */
-static NTSTATUS HandleFlush(
+static NTSTATUS
+HandleFlush(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command
@@ -431,7 +435,8 @@ static NTSTATUS HandleFlush(
 /**
  * @brief 处理 Write Zeroes 命令
  */
-static NTSTATUS HandleWriteZeroes(
+static NTSTATUS
+HandleWriteZeroes(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command
@@ -512,7 +517,8 @@ static NTSTATUS HandleWriteZeroes(
  * 
  * 解析范围描述符并对每个范围执行 TRIM (写零) 操作。
  */
-static NTSTATUS HandleDatasetManagement(
+static NTSTATUS
+HandleDatasetManagement(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command
@@ -629,7 +635,8 @@ static NTSTATUS HandleDatasetManagement(
  * @param Command NVMe 命令
  * @return NTSTATUS 状态码
  */
-static NTSTATUS HandleCompare(
+static NTSTATUS
+HandleCompare(
     _In_ PVNVME_PDO_CONTEXT PdoContext,
     _In_ USHORT QueueId,
     _In_ PNVME_COMMAND Command

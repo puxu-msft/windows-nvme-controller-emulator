@@ -6,6 +6,12 @@
 #ifndef _TRACE_H_
 #define _TRACE_H_
 
+//
+// begin_wpp config
+// FUNC TraceEvents(LEVEL, FLAGS, MSG, ...);
+// end_wpp
+//
+
 /*
  * WPP 跟踪控制 GUID
  * {12345678-ABCD-EF01-2345-6789ABCDEF01}
@@ -53,12 +59,59 @@
 #endif /* WPP_INIT_TRACING */
 
 /*
- * 便捷宏
+ * 模块化跟踪宏
+ * 
+ * 使用方式: TRACE_MOD_INFO(TRACE_QUEUE, "Queue %d created", qid)
+ * 
+ * 这些宏允许按模块过滤跟踪输出。在 WPP 启用时，可通过 tracelog 工具
+ * 选择性启用特定模块的跟踪；在 WPP 未启用时，回退到 DbgPrint。
  */
-#define TRACE_ERROR(msg, ...)   TraceEvents(TRACE_LEVEL_ERROR, TRACE_DRIVER, msg, ##__VA_ARGS__)
-#define TRACE_WARN(msg, ...)    TraceEvents(TRACE_LEVEL_WARNING, TRACE_DRIVER, msg, ##__VA_ARGS__)
-#define TRACE_INFO(msg, ...)    TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, msg, ##__VA_ARGS__)
-#define TRACE_DEBUG(msg, ...)   TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, msg, ##__VA_ARGS__)
-#define TRACE_VERBOSE(msg, ...) TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_MOD_ERROR(flag, msg, ...)   TraceEvents(TRACE_LEVEL_ERROR, flag, msg, ##__VA_ARGS__)
+#define TRACE_MOD_WARN(flag, msg, ...)    TraceEvents(TRACE_LEVEL_WARNING, flag, msg, ##__VA_ARGS__)
+#define TRACE_MOD_INFO(flag, msg, ...)    TraceEvents(TRACE_LEVEL_INFORMATION, flag, msg, ##__VA_ARGS__)
+#define TRACE_MOD_DEBUG(flag, msg, ...)   TraceEvents(TRACE_LEVEL_VERBOSE, flag, msg, ##__VA_ARGS__)
+#define TRACE_MOD_VERBOSE(flag, msg, ...) TraceEvents(TRACE_LEVEL_VERBOSE, flag, msg, ##__VA_ARGS__)
+
+/*
+ * 便捷宏 (默认使用 TRACE_DRIVER 标志)
+ */
+#define TRACE_ERROR(msg, ...)   TRACE_MOD_ERROR(TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_WARN(msg, ...)    TRACE_MOD_WARN(TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_INFO(msg, ...)    TRACE_MOD_INFO(TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_DEBUG(msg, ...)   TRACE_MOD_DEBUG(TRACE_DRIVER, msg, ##__VA_ARGS__)
+#define TRACE_VERBOSE(msg, ...) TRACE_MOD_VERBOSE(TRACE_DRIVER, msg, ##__VA_ARGS__)
+
+/*
+ * 函数跟踪宏 (用于调试函数入口/出口)
+ */
+#if DBG
+
+#define TRACE_FUNC_ENTER() \
+    TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, ">>> %s", __FUNCTION__)
+
+#define TRACE_FUNC_EXIT() \
+    TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, "<<< %s", __FUNCTION__)
+
+#define TRACE_FUNC_EXIT_STATUS(status) \
+    TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, "<<< %s (0x%08X)", __FUNCTION__, (status))
+
+#define TRACE_FUNC_EXIT_NTSTATUS(status) \
+    do { \
+        NTSTATUS _s = (status); \
+        if (NT_SUCCESS(_s)) { \
+            TraceEvents(TRACE_LEVEL_VERBOSE, TRACE_DRIVER, "<<< %s SUCCESS", __FUNCTION__); \
+        } else { \
+            TraceEvents(TRACE_LEVEL_INFORMATION, TRACE_DRIVER, "<<< %s FAILED (0x%08X)", __FUNCTION__, _s); \
+        } \
+    } while(0)
+
+#else
+
+#define TRACE_FUNC_ENTER()                  ((void)0)
+#define TRACE_FUNC_EXIT()                   ((void)0)
+#define TRACE_FUNC_EXIT_STATUS(status)      ((void)0)
+#define TRACE_FUNC_EXIT_NTSTATUS(status)    ((void)0)
+
+#endif /* DBG */
 
 #endif /* _TRACE_H_ */

@@ -8,6 +8,62 @@
 #include "vnvme.h"
 
 //===========================================================================
+// 物理地址验证
+//===========================================================================
+
+// 保留的低内存区域 (不应被访问)
+#define VNVME_LOW_MEMORY_LIMIT          0x100000ULL     // 1MB
+
+// 合理的物理地址上限 (可配置，默认 16TB)
+#define VNVME_MAX_PHYSICAL_ADDRESS      0x100000000000ULL
+
+/**
+ * @brief 验证物理地址是否在合法范围内
+ * 
+ * 检查 stornvme 提供的 PRP 物理地址是否有效。
+ * 这是一个防御性检查，防止损坏的地址导致系统崩溃。
+ * 
+ * @param PhysicalAddress 要验证的物理地址
+ * @param Length 要访问的长度
+ * @return TRUE 如果地址有效，FALSE 如果地址可疑
+ */
+static BOOLEAN
+VnvmeIsValidPhysicalAddress(
+    _In_ ULONGLONG PhysicalAddress,
+    _In_ SIZE_T Length
+    )
+{
+    // 检查 NULL 地址
+    if (PhysicalAddress == 0) {
+        TRACE_WARN("VnvmeIsValidPhysicalAddress: NULL physical address");
+        return FALSE;
+    }
+    
+    // 检查低 1MB 保留区域 (BIOS, 中断向量表等)
+    if (PhysicalAddress < VNVME_LOW_MEMORY_LIMIT) {
+        TRACE_WARN("VnvmeIsValidPhysicalAddress: Address 0x%llX in reserved low memory",
+                   PhysicalAddress);
+        return FALSE;
+    }
+    
+    // 检查溢出
+    if (PhysicalAddress + Length < PhysicalAddress) {
+        TRACE_ERROR("VnvmeIsValidPhysicalAddress: Address overflow 0x%llX + %zu",
+                    PhysicalAddress, Length);
+        return FALSE;
+    }
+    
+    // 检查超出合理物理地址范围
+    if (PhysicalAddress > VNVME_MAX_PHYSICAL_ADDRESS) {
+        TRACE_WARN("VnvmeIsValidPhysicalAddress: Address 0x%llX exceeds reasonable limit",
+                   PhysicalAddress);
+        return FALSE;
+    }
+    
+    return TRUE;
+}
+
+//===========================================================================
 // PRP 解析
 //===========================================================================
 
@@ -23,7 +79,8 @@ VnvmeParsePrpList(
     _Out_ PULONG EntryCount
     )
 {
-    ULONG pageSize = PAGE_SIZE;
+    // 使用 NVMe 规范定义的页面大小 (与 Windows PAGE_SIZE 语义不同)
+    ULONG pageSize = VNVME_NVME_PAGE_SIZE;
     ULONG numPages;
     ULONG firstPageOffset;
     ULONG firstPageBytes;
@@ -35,6 +92,12 @@ VnvmeParsePrpList(
     
     if (DataLength == 0) {
         return STATUS_SUCCESS;
+    }
+    
+    // P1 修复: 验证 PRP1 地址
+    if (!VnvmeIsValidPhysicalAddress(Prp1, pageSize)) {
+        TRACE_ERROR("VnvmeParsePrpList: Invalid PRP1 address 0x%llX", Prp1);
+        return STATUS_INVALID_PARAMETER;
     }
     
     // 计算第一页偏移和字节数
@@ -79,6 +142,12 @@ VnvmeParsePrpList(
     
     if (numPages == 2) {
         // 双页，PRP2 直接是第二页地址
+        // P1 修复: 验证 PRP2 地址
+        if (!VnvmeIsValidPhysicalAddress(Prp2, pageSize)) {
+            TRACE_ERROR("VnvmeParsePrpList: Invalid PRP2 address 0x%llX", Prp2);
+            VNVME_FREE_POOL(entries);
+            return STATUS_INVALID_PARAMETER;
+        }
         entries[entryIndex].PhysicalAddress = Prp2 & ~((ULONGLONG)pageSize - 1);
         entries[entryIndex].Offset = 0;
         entries[entryIndex].Length = DataLength - firstPageBytes;
@@ -92,6 +161,13 @@ VnvmeParsePrpList(
         ULONG prpListSize;
         ULONG maxEntriesPerPage;
         ULONG i;
+        
+        // P1 修复: 验证 PRP 列表地址
+        if (!VnvmeIsValidPhysicalAddress(Prp2, pageSize)) {
+            TRACE_ERROR("VnvmeParsePrpList: Invalid PRP list address 0x%llX", Prp2);
+            VNVME_FREE_POOL(entries);
+            return STATUS_INVALID_PARAMETER;
+        }
         
         prpListPhysAddr.QuadPart = Prp2;
         remainingBytes = DataLength - firstPageBytes;
@@ -121,8 +197,9 @@ VnvmeParsePrpList(
             // 检查是否是链式 PRP 列表 (最后一个条目可能指向下一个 PRP 列表页)
             // 简化实现: 假设所有条目都是数据页地址
             
-            if (prpEntry == 0) {
-                TRACE_ERROR("VnvmeParsePrpList: NULL PRP entry at index %u", i);
+            // P1 修复: 验证 PRP 列表条目地址
+            if (!VnvmeIsValidPhysicalAddress(prpEntry, pageSize)) {
+                TRACE_ERROR("VnvmeParsePrpList: Invalid PRP entry at index %u: 0x%llX", i, prpEntry);
                 MmUnmapIoSpace(prpList, prpListSize);
                 VNVME_FREE_POOL(entries);
                 return STATUS_INVALID_PARAMETER;
@@ -177,6 +254,16 @@ VnvmeFreePrpEntries(
 
 /**
  * @brief 从主机内存读取数据
+ * 
+ * 将 stornvme 分配的主机内存缓冲区内容读取到本地缓冲区。
+ * 包含地址验证以防止访问无效的物理地址。
+ * 
+ * @param PhysicalAddress 主机内存的物理地址
+ * @param Buffer 目标缓冲区
+ * @param Length 读取长度
+ * @return STATUS_SUCCESS 成功
+ * @return STATUS_INVALID_PARAMETER 无效物理地址
+ * @return STATUS_INSUFFICIENT_RESOURCES 映射失败
  */
 NTSTATUS
 VnvmeReadFromHostMemory(
@@ -188,11 +275,22 @@ VnvmeReadFromHostMemory(
     PHYSICAL_ADDRESS physAddr;
     PVOID mappedAddr;
     
+    // 参数验证
+    if (Buffer == NULL || Length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    // 验证物理地址
+    if (!VnvmeIsValidPhysicalAddress(PhysicalAddress, Length)) {
+        TRACE_ERROR("VnvmeReadFromHostMemory: Invalid physical address 0x%llX", PhysicalAddress);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
     physAddr.QuadPart = PhysicalAddress;
     
     TRACE_VERBOSE("VnvmeReadFromHostMemory: PA=0x%016llX, Len=%u", PhysicalAddress, Length);
     
-    // 映射物理地址
+    // 映射物理地址 (使用 MmCached 因为这是主机内存缓冲区，非设备寄存器)
     mappedAddr = MmMapIoSpace(physAddr, Length, MmCached);
     if (mappedAddr == NULL) {
         TRACE_ERROR("VnvmeReadFromHostMemory: MmMapIoSpace failed");
@@ -210,6 +308,16 @@ VnvmeReadFromHostMemory(
 
 /**
  * @brief 向主机内存写入数据
+ * 
+ * 将本地缓冲区内容写入到 stornvme 分配的主机内存缓冲区。
+ * 包含地址验证以防止访问无效的物理地址。
+ * 
+ * @param PhysicalAddress 主机内存的物理地址
+ * @param Buffer 源缓冲区
+ * @param Length 写入长度
+ * @return STATUS_SUCCESS 成功
+ * @return STATUS_INVALID_PARAMETER 无效物理地址
+ * @return STATUS_INSUFFICIENT_RESOURCES 映射失败
  */
 NTSTATUS
 VnvmeWriteToHostMemory(
@@ -221,11 +329,22 @@ VnvmeWriteToHostMemory(
     PHYSICAL_ADDRESS physAddr;
     PVOID mappedAddr;
     
+    // 参数验证
+    if (Buffer == NULL || Length == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    // 验证物理地址
+    if (!VnvmeIsValidPhysicalAddress(PhysicalAddress, Length)) {
+        TRACE_ERROR("VnvmeWriteToHostMemory: Invalid physical address 0x%llX", PhysicalAddress);
+        return STATUS_INVALID_PARAMETER;
+    }
+    
     physAddr.QuadPart = PhysicalAddress;
     
     TRACE_VERBOSE("VnvmeWriteToHostMemory: PA=0x%016llX, Len=%u", PhysicalAddress, Length);
     
-    // 映射物理地址
+    // 映射物理地址 (使用 MmCached 因为这是主机内存缓冲区，非设备寄存器)
     mappedAddr = MmMapIoSpace(physAddr, Length, MmCached);
     if (mappedAddr == NULL) {
         TRACE_ERROR("VnvmeWriteToHostMemory: MmMapIoSpace failed");

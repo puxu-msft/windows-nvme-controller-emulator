@@ -96,6 +96,13 @@
 #define IOCTL_VNVME_RESET_STATS         \
     CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 111, METHOD_BUFFERED, FILE_WRITE_DATA)
 
+/* 配置管理 (可动态修改部分配置) */
+#define IOCTL_VNVME_GET_CONFIG          \
+    CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 120, METHOD_BUFFERED, FILE_READ_DATA)
+
+#define IOCTL_VNVME_SET_CONFIG          \
+    CTL_CODE(FILE_DEVICE_VNVME, VNVME_IOCTL_INDEX_BASE + 121, METHOD_BUFFERED, FILE_WRITE_DATA)
+
 //===========================================================================
 // IOCTL 输入/输出结构
 //===========================================================================
@@ -400,6 +407,79 @@ typedef struct _VNVME_RESET_STATS_INPUT {
     UINT32 ControllerId;                // 控制器 ID (0 = 所有控制器)
     UINT32 Flags;                       // 保留
 } VNVME_RESET_STATS_INPUT, *PVNVME_RESET_STATS_INPUT;
+
+/*---------------------------------------------------------------------------
+ * IOCTL_VNVME_GET_CONFIG / IOCTL_VNVME_SET_CONFIG
+ * 
+ * 配置管理接口:
+ * - GET_CONFIG: 获取当前配置 (所有字段)
+ * - SET_CONFIG: 设置配置 (仅可动态修改的字段)
+ * 
+ * 可动态修改的配置:
+ * - DebugLevel, DebugFlags
+ * - HeartbeatTimeoutMs
+ * - DoorbellPollIntervalUs, BatchSize
+ * 
+ * 不可动态修改 (需要重启驱动):
+ * - StorageType, StoragePath, StorageSizeGB
+ * - MaxIOQueues, AdminQueueDepth, IOQueueDepth
+ *---------------------------------------------------------------------------*/
+
+/* 存储后端类型 (与内核 VNVME_STORAGE_TYPE 一致) */
+#define VNVME_IOCTL_STORAGE_TYPE_NONE       0
+#define VNVME_IOCTL_STORAGE_TYPE_MEMORY     1
+#define VNVME_IOCTL_STORAGE_TYPE_FILE       2
+#define VNVME_IOCTL_STORAGE_TYPE_SPARSE     3
+
+/* 配置结构体 - 用于 IOCTL 传输 */
+typedef struct _VNVME_IOCTL_CONFIG {
+    /* 调试配置 (可动态修改) */
+    UINT32 DebugLevel;                  // TRACE_LEVEL_* (1-5)
+    UINT32 DebugFlags;                  // 调试模块标志位掩码
+    UINT32 HeartbeatTimeoutMs;          // 用户态心跳超时 (毫秒)
+    UINT32 Reserved1;
+    
+    /* 存储配置 (只读 - 启动时固定) */
+    UINT32 StorageType;                 // VNVME_IOCTL_STORAGE_TYPE_*
+    UINT32 StorageSizeGB;               // 存储容量 (GB)
+    WCHAR  StoragePath[260];            // 文件后端路径 (仅 FILE/SPARSE 类型)
+    
+    /* 队列配置 (只读 - 启动时固定) */
+    UINT32 MaxIOQueues;                 // 最大 I/O 队列数
+    UINT32 AdminQueueDepth;             // Admin 队列深度
+    UINT32 IOQueueDepth;                // I/O 队列深度
+    UINT32 Reserved2;
+    
+    /* 性能配置 (可动态修改) */
+    UINT32 DoorbellPollIntervalUs;      // Doorbell 轮询间隔 (微秒)
+    UINT32 BatchSize;                   // 命令批处理大小
+    
+    /* 安全配置 (只读 - 启动时固定) */
+    UINT32 AllowUserModeAccess;         // 允许用户态访问 (0/1)
+    UINT32 RequireAdminPrivilege;       // 要求管理员权限 (0/1)
+    
+} VNVME_IOCTL_CONFIG, *PVNVME_IOCTL_CONFIG;
+
+/* SET_CONFIG 时指定要修改的字段 */
+#define VNVME_CONFIG_FIELD_DEBUG_LEVEL      0x0001
+#define VNVME_CONFIG_FIELD_DEBUG_FLAGS      0x0002
+#define VNVME_CONFIG_FIELD_HEARTBEAT        0x0004
+#define VNVME_CONFIG_FIELD_POLL_INTERVAL    0x0008
+#define VNVME_CONFIG_FIELD_BATCH_SIZE       0x0010
+#define VNVME_CONFIG_FIELD_ALL_DYNAMIC      0x001F
+
+typedef struct _VNVME_SET_CONFIG_INPUT {
+    UINT32 FieldMask;                   // 要修改的字段 (VNVME_CONFIG_FIELD_*)
+    UINT32 Reserved;
+    VNVME_IOCTL_CONFIG Config;          // 新配置值
+} VNVME_SET_CONFIG_INPUT, *PVNVME_SET_CONFIG_INPUT;
+
+/* GET_CONFIG 输出 */
+typedef struct _VNVME_GET_CONFIG_OUTPUT {
+    VNVME_IOCTL_CONFIG Config;          // 当前配置
+    UINT32 DynamicFieldMask;            // 可动态修改的字段掩码
+    UINT32 Reserved;
+} VNVME_GET_CONFIG_OUTPUT, *PVNVME_GET_CONFIG_OUTPUT;
 
 #pragma pack(pop)
 
